@@ -81,7 +81,12 @@ export default function AuthModal({
     api
       .roles()
       .then((list) => {
-        if (Array.isArray(list) && list.length) setRoles(list);
+        if (Array.isArray(list) && list.length) {
+          setRoles(list);
+          setRoleName((current) =>
+            list.some((r) => r.name === current) ? current : list[0].name
+          );
+        }
       })
       .catch(() => setRoles(FALLBACK_ROLES));
   }, [open, initialMode]);
