@@ -1,10 +1,11 @@
-# Explicit Railway config (mirrors railway.json) — force root Dockerfile
+# Explicit Railway config for the API+SPA service (repo root).
+# Do not set startCommand here — use the Dockerfile CMD so a frontend-only
+# service cannot inherit `sh /start.sh` by mistake.
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "sh /start.sh"
 healthcheckPath = "/healthz"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"

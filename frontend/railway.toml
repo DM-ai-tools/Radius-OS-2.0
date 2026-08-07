@@ -5,7 +5,8 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-# Do NOT use sh /start.sh — that belongs to the API image only.
+# Must override any inherited API startCommand (sh /start.sh).
+startCommand = "/start-frontend.sh"
 healthcheckPath = "/healthz"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
