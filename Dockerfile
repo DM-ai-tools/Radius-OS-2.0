@@ -26,9 +26,13 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY backend/ .
 COPY --from=frontend /frontend/dist /app/static
+
+# Railway may honor Procfile (`sh scripts/start.sh`) over CMD — keep both paths.
+RUN mkdir -p /app/scripts
 COPY scripts/start.sh /start.sh
-RUN chmod +x /start.sh \
-    && sed -i 's/\r$//' /start.sh
+COPY scripts/start.sh /app/scripts/start.sh
+RUN chmod +x /start.sh /app/scripts/start.sh \
+    && sed -i 's/\r$//' /start.sh /app/scripts/start.sh
 
 ENV PYTHONPATH=/app \
     STATIC_DIR=/app/static \
@@ -40,4 +44,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD curl -fsS "http://127.0.0.1:${PORT:-8000}/health" || exit 1
 
-CMD ["/start.sh"]
+# Prefer shell form so $PORT is expanded if Railway wraps the command
+CMD ["sh", "/start.sh"]
