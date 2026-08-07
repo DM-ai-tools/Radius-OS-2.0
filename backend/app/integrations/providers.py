@@ -1547,7 +1547,13 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
 
     # Bot-walled sites: Perplexity research, audit from returned meta
     home_probe = await fetch_url(url if url.startswith("http") else f"https://{domain}")
-    if (home_probe.get("error") or "") == "bot_challenge_blocked":
+    home_err = (home_probe.get("error") or "")
+    home_blocked = home_err in {
+        "bot_challenge_blocked",
+        "soft_forbidden",
+        "empty_or_shell_page",
+    }
+    if home_blocked:
         from app.integrations.site_research import research_ready, research_site_crawl
 
         if research_ready():
@@ -1594,6 +1600,52 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
     page_urls = await discover_site_urls(url, max_pages=max_pages)
     if not page_urls:
         page_urls = [url if url.startswith("http") else f"https://{domain}"]
+
+    # Cloud/partial crawls often stop at a handful of nav links — expand via research
+    thin_after_discover = len(page_urls) < max(10, min(max_pages // 2, 40))
+    if thin_after_discover:
+        from app.integrations.site_research import research_ready, research_site_crawl
+
+        if research_ready():
+            research = await research_site_crawl(url, max_pages=max_pages)
+            research_pages = research.get("pages") or []
+            if len(research_pages) > len(page_urls):
+                pages_list = [_audit_from_research_page(p) for p in research_pages]
+                critical = list(site_critical)
+                warnings = list(site_warnings)
+                opportunities = []
+                passing = list(site_passing)
+                for pr in pages_list:
+                    for it in pr["critical"]:
+                        critical.append(
+                            {"issue": it["issue"], "ref": f"{pr['url']} — {it.get('ref') or ''}"}
+                        )
+                    for it in pr["warnings"]:
+                        warnings.append(
+                            {"issue": it["issue"], "ref": f"{pr['url']} — {it.get('ref') or ''}"}
+                        )
+                    for it in pr["opportunities"]:
+                        opportunities.append(
+                            {"issue": it["issue"], "ref": f"{pr['url']} — {it.get('ref') or ''}"}
+                        )
+                all_pass = [p for pr in pages_list for p in pr.get("passing") or []]
+                for item in all_pass:
+                    if item not in passing and len(passing) < 12:
+                        passing.append(item)
+                score = round(sum(int(p["overall_score"]) for p in pages_list) / len(pages_list))
+                return {
+                    "site": domain,
+                    "display_name": display_name,
+                    "pages_analyzed": len(pages_list),
+                    "overall_score": score,
+                    "score_band": _score_band(score),
+                    "critical": critical,
+                    "warnings": warnings,
+                    "opportunities": opportunities,
+                    "passing": passing,
+                    "pages": pages_list,
+                    "severity": "critical" if score < 50 else "warning" if score < 80 else "info",
+                }
 
     sem = asyncio.Semaphore(5)
 
