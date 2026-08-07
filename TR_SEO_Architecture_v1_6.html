@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Traffic Radius — SEO Agentic Architecture (API + Fallback Edition)</title>
+<style>
+  :root{
+    --bg:#F4F1EA; --card:#ffffff; --ink:#0B2E33; --muted:#5B6B70;
+    --line:#D8DDD8; --dash:#9AA9AC;
+    --primary:#028090; --primary-bg:#E6F5F3;
+    --secondary:#00A896; --secondary-bg:#E1F5EE;
+    --accent:#02C39A;
+    --coral:#993C1D; --coral-bg:#FAECE7;
+    --purple:#534AB7; --purple-bg:#EEEDFE;
+    --amber:#854F0B; --amber-bg:#FAEEDA;
+    --gray:#444441; --gray-bg:#F1EFE8;
+    --blue:#185FA5; --blue-bg:#E6F1FB;
+  }
+  .phase0{margin-bottom:36px;padding-bottom:28px;border-bottom:2px dashed var(--dash)}
+  .phase0 > .ptag{text-align:center;font-size:12px;font-weight:800;color:var(--muted);letter-spacing:.3px;text-transform:uppercase;margin-bottom:4px}
+  .phase0 > h2{text-align:center;font-family:Cambria,Georgia,serif;font-size:24px;color:var(--primary);margin-bottom:4px}
+  .phase0 > .rnote{text-align:center;font-size:12.5px;color:var(--muted);margin-bottom:18px;max-width:820px;margin-left:auto;margin-right:auto}
+  .row.d .num span{background:var(--blue)}
+  .row.d .card{border-left-color:var(--blue)}
+  .row.d .card h3{color:var(--blue)}
+  .phase0-out{margin-top:6px;text-align:center;font-size:12px;color:var(--muted);font-style:italic}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Segoe UI",Calibri,Arial,sans-serif;
+    padding:32px 26px 46px;}
+  .wrap{max-width:1360px;margin:0 auto}
+  header{text-align:center;margin-bottom:6px}
+  h1{margin:0;font-family:Cambria,Georgia,serif;font-size:38px;letter-spacing:-.3px;color:var(--primary);font-weight:800}
+  .sub{margin:8px 0 4px;font-size:16px;font-weight:600;color:var(--ink)}
+  .meta{font-size:12px;color:var(--muted)}
+  .rule{border-top:2px dashed var(--dash);margin:18px 0 22px}
+
+  .grid{display:grid;grid-template-columns:minmax(0,1fr) 272px;gap:22px;align-items:start}
+  .flow{display:flex;flex-direction:column;gap:0}
+  .row{display:grid;grid-template-columns:40px minmax(0,1fr);gap:12px;align-items:stretch}
+  .num{display:flex;align-items:flex-start;justify-content:center;padding-top:14px}
+  .num span{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;
+    font-weight:800;font-size:13px;color:#fff;background:var(--primary)}
+  .row.g .num span{background:var(--secondary)}
+  .row.p .num span{background:var(--purple)}
+  .row.a .num span{background:var(--amber)}
+
+  .card{background:var(--card);border:1.5px solid var(--line);border-left:5px solid var(--primary);
+    border-radius:12px;padding:11px 14px;box-shadow:0 1px 2px rgba(11,46,51,.06)}
+  .row.g .card{border-left-color:var(--secondary)}
+  .row.p .card{border-left-color:var(--purple)}
+  .row.a .card{border-left-color:var(--amber)}
+  .card h3{margin:0 0 3px;font-family:Cambria,Georgia,serif;font-size:15px;font-weight:800;color:var(--primary)}
+  .row.g .card h3{color:var(--secondary)}
+  .row.p .card h3{color:var(--purple)}
+  .row.a .card h3{color:var(--amber)}
+  .card p{margin:0;font-size:13px;line-height:1.5;color:var(--muted)}
+  .chips{margin-top:8px;display:flex;flex-wrap:wrap;gap:5px}
+  .chip{font-size:10.5px;font-weight:700;padding:3px 7px;border-radius:5px;border:1px solid transparent;white-space:nowrap}
+  .c-claude{color:var(--primary);background:var(--primary-bg);border-color:#bfe3df}
+  .c-fallback{color:var(--purple);background:var(--purple-bg);border-color:#d3d0f7}
+  .c-api{color:var(--coral);background:var(--coral-bg);border-color:#f0cdb0}
+  .c-db{color:#25507a;background:#e9f0f8;border-color:#bcd3e9}
+  .c-ext{color:var(--gray);background:var(--gray-bg);border-color:#d9d6c9}
+  .c-ui{color:#0d6b8a;background:#e6f4f9;border-color:#bfe0ec}
+  .c-human{color:var(--amber);background:var(--amber-bg);border-color:#eed7ab}
+
+  .arrow{grid-column:2;height:20px;position:relative}
+  .arrow::before{content:"";position:absolute;left:26px;top:0;bottom:6px;width:2px;background:#2b3350}
+  .arrow::after{content:"";position:absolute;left:21px;bottom:0;
+    border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid #2b3350}
+  .arrow .lbl{position:absolute;left:44px;top:1px;font-size:11px;font-weight:700;color:var(--muted)}
+
+  .split{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:12px}
+  .aside{background:#fbfdfc;border:1.5px dashed var(--dash);border-radius:12px;padding:10px 12px}
+  .aside h4{margin:0 0 3px;font-size:12.5px;font-weight:800;color:#2b3350}
+  .aside p{margin:0;font-size:12px;line-height:1.45;color:var(--muted)}
+  .aside .chips{margin-top:6px}
+
+  .branch{background:#fffdf5;border:1.5px solid #e6d6a8;border-radius:12px;padding:10px 13px}
+  .branch h4{margin:0 0 4px;font-size:12.5px;font-weight:800;color:#8a6a12}
+  .branch ul{margin:0;padding-left:16px;font-size:12px;color:var(--muted);line-height:1.55}
+  .yesno{display:flex;gap:14px;margin-top:8px;font-size:11.5px;font-weight:800}
+  .yes{color:#0f8a5f} .no{color:#c0392b}
+
+  .cc{background:var(--primary-bg);border:1.5px solid var(--line);border-radius:14px;padding:12px}
+  .cc > h2{margin:2px 0 4px;text-align:center;font-family:Cambria,Georgia,serif;font-size:15px;color:var(--primary);font-weight:800}
+  .cc > .note{margin:0 0 10px;text-align:center;font-size:11px;color:var(--muted)}
+  .ccbox{background:#fff;border:1.5px solid #cfe3e0;border-radius:10px;padding:9px 10px;margin-bottom:9px}
+  .ccbox h5{margin:0 0 3px;font-size:12px;font-weight:800;color:var(--ink)}
+  .ccbox p{margin:0;font-size:11.5px;line-height:1.45;color:var(--muted)}
+
+  .legend{margin-top:24px;background:#fff;border:1.5px solid var(--line);border-radius:12px;
+    padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center;justify-content:center;
+    font-size:11.5px;font-weight:700;color:#2b3350}
+  .lg{display:flex;align-items:center;gap:7px}
+  .sw{width:26px;height:0;border-top:2px solid #2b3350}
+  .divider{font-size:11px;color:var(--muted);font-weight:600}
+  .ports{margin-top:12px;text-align:center;font-size:11.5px;color:var(--muted)}
+
+  .roles-section{margin-top:30px}
+  .roles-section > h2{text-align:center;font-family:Cambria,Georgia,serif;font-size:20px;color:var(--ink);margin-bottom:4px}
+  .roles-section > .rnote{text-align:center;font-size:12.5px;color:var(--muted);margin-bottom:16px}
+  .roles{display:flex;gap:12px}
+  .roles.six .rcard{padding:10px 8px 11px;min-height:64px}
+  .roles.six .rcard h3{font-size:12.5px}
+  .roles.six .rcard p{font-size:10px}
+  .roles.six .skill{font-size:10px;padding:4px 5px}
+  .rolecol{flex:1;display:flex;flex-direction:column}
+  .rcard{background:#fff;border:1.5px solid var(--line);border-top:5px solid var(--primary);border-radius:10px;
+    padding:12px 12px 13px;text-align:center;box-shadow:0 1px 2px rgba(11,46,51,.06);min-height:74px}
+  .rcard.c-blue{border-top-color:#185FA5}
+  .rcard.c-teal{border-top-color:var(--secondary)}
+  .rcard.c-purple{border-top-color:var(--purple)}
+  .rcard.c-coral{border-top-color:var(--coral)}
+  .rcard.c-amber{border-top-color:var(--amber)}
+  .rcard h3{font-family:Cambria,Georgia,serif;font-size:13.5px;font-weight:800;line-height:1.25}
+  .rcard p{font-size:10.5px;color:var(--muted);margin-top:4px;line-height:1.3}
+  .skillbox{border:1.5px dashed var(--line);border-top:none;border-radius:0 0 10px 10px;margin-top:-1px;
+    padding:11px 10px;flex:1;background:#fff}
+  .skillbox .lbl{font-size:9.5px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:7px;text-align:center}
+  .skill{display:block;font-size:10.8px;font-weight:700;padding:5px 7px;border-radius:6px;margin-bottom:5px;text-align:center}
+  .skill.blue{color:#185FA5;background:#E6F1FB}
+  .skill.teal{color:var(--secondary);background:var(--secondary-bg)}
+  .skill.purple{color:var(--purple);background:var(--purple-bg)}
+  .skill.coral{color:var(--coral);background:var(--coral-bg)}
+  .skill.amber{color:var(--amber);background:var(--amber-bg)}
+  .skill.gray{color:var(--gray);background:var(--gray-bg)}
+  .skill.shared{border:1.3px dashed currentColor;opacity:.9}
+  .rcard.c-gray{border-top-color:var(--gray)}
+  .roles.six .rolecol{min-width:0}
+  .common-skill{margin-top:18px;background:var(--purple-bg);border:1.5px solid #d3d0f7;border-radius:12px;
+    padding:14px 18px;text-align:center}
+  .common-skill h4{margin:0 0 6px;font-size:14px;font-weight:800;color:var(--purple)}
+  .common-skill p{margin:0;font-size:12px;line-height:1.5;color:var(--ink)}
+  .sharenote{font-size:9px;color:var(--muted);text-align:center;margin-top:4px;font-style:italic}
+  .authbox{border:1.5px solid var(--line);border-top:3px solid #2b3350;border-radius:10px;margin-top:8px;
+    padding:8px 9px;background:#fbfbf9}
+  .authbox .lbl{font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;text-align:center}
+  .authbox p{font-size:9.8px;line-height:1.32;color:var(--ink);text-align:center}
+  .authbox.can p{color:#0f6e42;font-weight:700}
+  .authbox.cannot p{color:#8a3b2b;font-weight:700}
+
+  .org-section{margin-top:44px;padding-top:32px;border-top:2px dashed var(--dash)}
+  .org-section > h2{text-align:center;font-family:Cambria,Georgia,serif;font-size:22px;color:var(--primary);margin-bottom:2px}
+  .org-section > .otag{text-align:center;font-size:12px;font-weight:800;color:var(--muted);letter-spacing:.3px;text-transform:uppercase;margin-bottom:4px}
+  .org-section > .rnote{text-align:center;font-size:12.5px;color:var(--muted);margin-bottom:20px}
+
+  .context{display:flex;justify-content:center}
+  .context-box{border:1.5px dashed var(--dash);border-radius:8px;padding:6px 16px;font-size:11.5px;font-weight:700;color:var(--muted);background:#fff}
+  .cvline{width:2px;height:20px;background:var(--dash);margin:0 auto}
+  .root-wrap{display:flex;justify-content:center;margin-top:2px}
+  .root{background:var(--primary);color:#fff;border-radius:12px;padding:13px 28px;text-align:center;box-shadow:0 2px 6px rgba(11,46,51,.15)}
+  .root h3{font-family:Cambria,Georgia,serif;font-size:17px;font-weight:800}
+  .root p{font-size:11px;margin-top:3px;color:#dff3f1}
+  .vline{width:2px;height:24px;background:#2b3350;margin:0 auto}
+  .hline-row{display:flex;justify-content:center}
+  .hline{height:2px;background:#2b3350}
+  .drop{width:2px;height:20px;background:#2b3350;margin:0 auto}
+
+  .sub-roles{margin-top:9px;border-top:1.3px dashed var(--line);padding-top:8px}
+  .sub-roles .lbl{font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;margin-bottom:5px;text-align:center}
+  .subrole{display:block;font-size:10px;color:var(--ink);padding:3.5px 6px;background:var(--gray-bg);border-radius:5px;margin-bottom:4px;text-align:center}
+  @media (max-width:1080px){.roles{flex-direction:column}}
+  @media (max-width:1080px){.grid{grid-template-columns:1fr} .split{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Traffic Radius — SEO Agentic Architecture</h1>
+  <p class="sub">API + Fallback Edition — one client request in, one verified change live on the website</p>
+  <p class="meta">Marketing pillar &middot; SearchFit skill layer &middot; Direct API orchestration</p>
+</header>
+<div class="rule"></div>
+
+<div class="phase0">
+  <p class="ptag">Phase 0 &middot; runs once, before Step 01</p>
+  <h2>Business &amp; Project Discovery</h2>
+  <p class="rnote">Not a SearchFit skill and not a static form — a short workflow that populates the Client Digital Profile before a client's first request ever reaches the pipeline below.</p>
+
+  <div class="row d">
+    <div class="num"><span>D1</span></div>
+    <div class="card">
+      <h3>Automated pre-research</h3>
+      <p>Before anyone asks the client a single question, Claude researches their public footprint — website, Google Business Profile, social presence, reviews, visible competitors — and drafts a first pass at products, business model, and positioning.</p>
+      <div class="chips"><span class="chip c-claude">Claude + web research</span></div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="row d">
+    <div class="num"><span>D2</span></div>
+    <div class="card">
+      <h3>Targeted questionnaire, pre-filled</h3>
+      <p>The client only answers what only they know — revenue split, average order value, sales cycle, seasonality, real objectives (checkboxes, not free text), legal/compliance constraints, and marketing spend elsewhere. Pre-filled with D1's findings so the client is confirming, not starting from zero.</p>
+      <div class="chips"><span class="chip c-ui">Short client questionnaire</span></div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="row d">
+    <div class="num"><span>D3</span></div>
+    <div class="card">
+      <h3>Completeness scoring</h3>
+      <p>The assembled profile runs through the same weighted-readiness model used for automation eligibility (Section 7) — applied here to flag exactly which discovery fields are still missing or low-confidence, rather than a form silently sitting half-blank.</p>
+      <div class="chips"><span class="chip c-db">Weighted readiness score</span></div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="row d">
+    <div class="num"><span>D4</span></div>
+    <div class="card">
+      <h3>Human sign-off</h3>
+      <p>The Client Success Manager reviews before the profile is finalized. Discrepancies between what the client says and what independent research found are surfaced as insight — a client claiming "premium" while public reviews suggest price-sensitive buyers is exactly what discovery should catch, not paper over.</p>
+      <div class="chips"><span class="chip c-human">Client Success Manager</span></div>
+    </div>
+  </div>
+  <div class="arrow"></div>
+
+  <div class="row d">
+    <div class="num"><span>D5</span></div>
+    <div class="card">
+      <h3>Publishes to the Client Digital Profile</h3>
+      <p>The output doesn't live in its own spreadsheet — it populates the Commercial Scope and Marketing Context sections of the Client Digital Profile (Section 6). Every SearchFit skill and pillar agent downstream reads from here, not from a file nobody revisits after onboarding.</p>
+      <div class="chips"><span class="chip c-db">Client Digital Profile</span></div>
+    </div>
+  </div>
+
+  <p class="phase0-out">Feeds directly into Step 01 below — by the time a request arrives, the profile it needs already exists.</p>
+</div>
+
+<div class="grid">
+  <div class="flow">
+
+    <div class="row">
+      <div class="num"><span>01</span></div>
+      <div class="card">
+        <h3>The request arrives</h3>
+        <p>A request enters through the command center, a chat interface, or a scheduled cadence trigger — carrying <b>who is asking</b> (their role: Strategist, Specialist, Technical, Content, or QA) as well as which client it's about.</p>
+        <div class="chips"><span class="chip c-ui">Command center / chat / scheduler</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row">
+      <div class="num"><span>02</span></div>
+      <div class="card">
+        <h3>Role &amp; permission check</h3>
+        <p>Before anything else, the system looks up the requester's role and loads that role's permitted SearchFit skill set and client-tier access. No role can trigger a skill outside its own lane — see the role-based skill assignment below.</p>
+        <div class="chips"><span class="chip c-api">Orchestration API</span><span class="chip c-db">Role permission table</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row">
+      <div class="num"><span>03</span></div>
+      <div class="card">
+        <h3>The orchestration API receives it</h3>
+        <p>A Python/FastAPI-style backend authenticates the caller, checks rate limits, and validates the request before anything reaches a model. It calls Claude and every other provider directly; nothing is delegated to an external workflow canvas.</p>
+        <div class="chips"><span class="chip c-api">Orchestration API (direct calls)</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row g">
+      <div class="num"><span>04</span></div>
+      <div class="card">
+        <h3>The client's profile is pulled</h3>
+        <p>Brand voice, budget, KPIs, automation level, and readiness score are loaded from the Client Digital Profile, so every downstream step already knows this client's rules.</p>
+        <div class="chips"><span class="chip c-db">PostgreSQL / Airtable</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row">
+      <div class="num"><span>05</span></div>
+      <div class="card">
+        <h3>The right SearchFit skill is picked</h3>
+        <p>A fast, cheap model reads the request and the page type (pillar / sub-service / supporting content) to choose one pipeline — but only from the skill set the requester's role is permitted to trigger.</p>
+        <div class="chips"><span class="chip c-claude">Claude Haiku 4.5</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row">
+      <div class="num"><span>06</span></div>
+      <div class="card">
+        <h3>A plan is built</h3>
+        <p>The main reasoning model works out what research is needed and in what order. This is the step that makes the system agentic — it decides its own route through the pipeline rather than following one fixed script.</p>
+        <div class="chips"><span class="chip c-claude">Claude Sonnet 5 — main reasoning</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row p">
+      <div class="num"><span>07</span></div>
+      <div class="card">
+        <h3>Facts are gathered — with a built-in fallback</h3>
+        <p>The plan runs: keyword and site data from GSC/Ahrefs, a site crawl, and competitor research. If a data provider's API is unreachable, <b>the orchestration API itself retries with backoff, then calls a secondary provider directly</b> — no separate automation tool is needed to handle this.</p>
+        <div class="chips"><span class="chip c-api">Primary provider + automatic fallback provider</span></div>
+      </div>
+    </div>
+
+    <div class="split" style="margin:10px 0 0">
+      <div class="aside">
+        <h4>Playbook grounding</h4>
+        <p>TR's own SEO playbooks and cadence rules are fed in, so output follows house standards, not generic advice.</p>
+        <div class="chips"><span class="chip c-db">Playbook store</span></div>
+      </div>
+      <div class="aside">
+        <h4>Reuse, don't repay</h4>
+        <p>Competitor research is cached for a set window so the same rivals aren't re-analysed on every run.</p>
+        <div class="chips"><span class="chip c-db">Cached results</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row">
+      <div class="num"><span>08</span></div>
+      <div class="card">
+        <h3>The SEO skill executes</h3>
+        <p>The chosen skill runs with all gathered research, data, and playbook context supplied to it — one of the 15 SearchFit skills, each a reusable, versioned set of instructions.</p>
+        <div class="chips"><span class="chip c-claude">Claude Sonnet 5</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row g">
+      <div class="num"><span>09</span></div>
+      <div class="card">
+        <h3>A unified report is synthesized</h3>
+        <p>Step outputs are combined into one purpose-driven report — text only at this stage, which keeps every job fast and cheap until a client actually wants to act on it.</p>
+        <div class="chips"><span class="chip c-claude">Claude Sonnet 5</span></div>
+      </div>
+    </div>
+    <div class="arrow"><span class="lbl">only if the client wants to act on it</span></div>
+
+    <div class="row">
+      <div class="num"><span>10</span></div>
+      <div class="card">
+        <h3>The report becomes structured changes</h3>
+        <p>Recommendations are parsed into individually reviewable change items — page URL, change type, priority, confidence, current vs. proposed state — and logged to the suggestion ledger.</p>
+        <div class="chips"><span class="chip c-claude">Claude Sonnet 5</span><span class="chip c-api">Orchestration API</span></div>
+      </div>
+    </div>
+
+    <div class="split" style="margin:10px 0 0">
+      <div class="branch">
+        <h4>Confidence decides the shelf, not the gate</h4>
+        <ul>
+          <li>High confidence → staged for review, not published</li>
+          <li>Medium / low confidence → held pending, flagged for closer review</li>
+        </ul>
+      </div>
+      <div class="aside">
+        <h4>Nothing auto-applies</h4>
+        <p>Every item is saved as "pending" and waits for a person, regardless of confidence score.</p>
+        <div class="chips"><span class="chip c-db">Suggestion ledger</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row a">
+      <div class="num"><span>11</span></div>
+      <div class="card">
+        <h3>Domain review, then QA triage</h3>
+        <p>The specialist who owns that domain reviews it first — Technical reviews technical changes, Content reviews content, never the person who drafted it. SEO Reporting &amp; QA then triages the approval queue. Anything high-risk escalates to a lead regardless of who reviewed it.</p>
+        <div class="chips"><span class="chip c-human">Domain reviewer</span><span class="chip c-human">QA approval queue</span></div>
+        <div class="yesno"><span class="yes">✓ Approve → build preview</span><span class="no">✕ Reject → back to step 06</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row p">
+      <div class="num"><span>12</span></div>
+      <div class="card">
+        <h3>A preview is built</h3>
+        <p>Only after approval does the system spend on a dry-run preview — the exact payload that would be sent, with no live CMS writes — so the team sees precisely what will change before it goes anywhere.</p>
+        <div class="chips"><span class="chip c-claude">Claude, cost-gated</span></div>
+      </div>
+    </div>
+    <div class="arrow"><span class="lbl">team confirms "publish"</span></div>
+
+    <div class="row">
+      <div class="num"><span>13</span></div>
+      <div class="card">
+        <h3>Publish — direct API call, with fallback</h3>
+        <p>The orchestration API calls the CMS's own API directly — WordPress, Webflow, or Wix — to push the approved change. <b>Final publish authority sits only with the two lead roles</b> (Senior SEO Strategist for Tier A, Content &amp; On-Page Lead for content changes) — reviewers and specialists can approve into the queue, but cannot trigger this step themselves. If the call fails, the API layer retries with backoff before escalating to a human.</p>
+        <div class="chips"><span class="chip c-api">Direct CMS API + built-in retry/backoff</span><span class="chip c-human">Lead-restricted</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row g">
+      <div class="num"><span>14</span></div>
+      <div class="card">
+        <h3>Verify — never a silent republish</h3>
+        <p>The system fires an IndexNow submission, then recrawls the URL to confirm the change is actually visible. If it isn't, this raises an in-app notification for a human to review — it never retries silently.</p>
+        <div class="chips"><span class="chip c-api">Recrawl + IndexNow</span></div>
+      </div>
+    </div>
+    <div class="arrow"></div>
+
+    <div class="row">
+      <div class="num"><span>15</span></div>
+      <div class="card">
+        <h3>Result and audit trail</h3>
+        <p>A verified live page, a set of applied fixes, or a downloadable report — with the full record of what was recommended, approved, and published kept against the client.</p>
+        <div class="chips"><span class="chip c-ext">Live page</span><span class="chip c-db">Audit trail</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <aside class="cc">
+    <h2>Things that apply throughout</h2>
+    <p class="note">Not steps — these run across the whole system</p>
+
+    <div class="ccbox">
+      <h5>Not locked to one model</h5>
+      <p>Claude is primary. Specific narrow tasks can fall back to another provider through the same orchestration layer — switching is a config change, not a rebuild.</p>
+    </div>
+
+    <div class="ccbox">
+      <h5>Built-in resilience</h5>
+      <p>Retries, backoff, and fallback routing (steps 07 and 13) are built directly into the orchestration API — full control over the logic, at the cost of TR's own engineering team owning every connector and retry path.</p>
+    </div>
+
+    <div class="ccbox">
+      <h5>Role-based access control</h5>
+      <p>Every SearchFit skill has exactly one accountable role (a few deliberately shared). Step 02 enforces this before a skill is ever selected — see the role assignment section below.</p>
+    </div>
+
+    <div class="ccbox">
+      <h5>Cost is managed by design</h5>
+      <p>Cheap model for skill selection, expensive model only for real reasoning. Competitor research is cached. Reports stay text-only until a client asks to act.</p>
+    </div>
+
+    <div class="ccbox">
+      <h5>A person is always in the loop</h5>
+      <p>Two mandatory checkpoints — approve the changes, confirm the publish. Nothing reaches a client's live site without a human decision, at any automation level.</p>
+    </div>
+
+    <div class="ccbox">
+      <h5>Multi-client governance</h5>
+      <p>The client's automation level and readiness score (Client Digital Profile) govern how much of steps 05–12 can ever run without a human — this is per-client, not one blanket rule.</p>
+    </div>
+
+    <div class="ccbox">
+      <h5>Security</h5>
+      <p>All provider keys and CMS credentials live server-side only. Publish calls are signed so only TR's own orchestration API can trigger them.</p>
+    </div>
+
+    <div class="ccbox">
+      <h5>Everything is traceable</h5>
+      <p>Every job, report, approval, and publish is logged against the client and request that started it — a complete record of what happened, when, and who signed off.</p>
+    </div>
+  </aside>
+</div>
+
+<div class="roles-section">
+  <h2>SearchFit skill assignment, by role</h2>
+  <p class="rnote">Enforced at step 02 — a role can only ever select from its own column</p>
+  <div class="roles six">
+
+    <div class="rolecol">
+      <div class="rcard c-blue">
+        <h3>SEO Strategist</h3>
+        <p>Direction, positioning, prioritization</p>
+      </div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill blue">Content Strategy</span>
+        <span class="skill blue">AI Visibility (GEO)</span>
+        <div class="sharenote">Dashed = shared with another role</div>
+      </div>
+      <div class="authbox can">
+        <div class="lbl">Review &amp; publish authority</div>
+        <p>Escalation lead + final publish authority (Tier A / cross-domain)</p>
+      </div>
+    </div>
+
+    <div class="rolecol">
+      <div class="rcard c-teal">
+        <h3>Content SEO Specialist</h3>
+        <p>Research → topic → draft pipeline</p>
+      </div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill teal">Create Topic</span>
+        <span class="skill teal">Content Brief</span>
+        <span class="skill teal shared">Create Content</span>
+        <span class="skill teal">Keyword Cluster</span>
+        <span class="skill teal">Keyword Clustering</span>
+        <div class="sharenote">Research + drafting, one owner</div>
+      </div>
+      <div class="authbox cannot">
+        <div class="lbl">Review &amp; publish authority</div>
+        <p>Executes only — drafts need domain review before publish</p>
+      </div>
+    </div>
+
+    <div class="rolecol">
+      <div class="rcard c-purple">
+        <h3>Technical SEO Specialist</h3>
+        <p>Crawlability, site health, Core Web Vitals</p>
+      </div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill purple">SEO Audit</span>
+        <span class="skill purple">Technical SEO</span>
+        <span class="skill purple">Broken Links</span>
+        <span class="skill purple shared">Internal Linking</span>
+        <div class="sharenote">Dashed = shared with another role</div>
+      </div>
+      <div class="authbox cannot">
+        <div class="lbl">Review &amp; publish authority</div>
+        <p>Domain review (Technical) only — no publish authority</p>
+      </div>
+    </div>
+
+    <div class="rolecol">
+      <div class="rcard c-coral">
+        <h3>On-Page SEO Specialist</h3>
+        <p>Page-level optimization, all tiers</p>
+      </div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill coral">On-Page SEO</span>
+        <span class="skill coral shared">Content Strategy</span>
+        <span class="skill coral shared">Create Content</span>
+        <span class="skill coral shared">Internal Linking</span>
+        <div class="sharenote">Reviews/drafts Tier A content</div>
+      </div>
+      <div class="authbox can">
+        <div class="lbl">Review &amp; publish authority</div>
+        <p>Domain review (Content) + final publish authority (content changes)</p>
+      </div>
+    </div>
+
+    <div class="rolecol">
+      <div class="rcard c-gray">
+        <h3>Structured Data Specialist</h3>
+        <p>Schema / rich results</p>
+      </div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill gray">Schema Markup</span>
+        <span class="skill gray">Generate Schema</span>
+      </div>
+      <div class="authbox cannot">
+        <div class="lbl">Review &amp; publish authority</div>
+        <p>Consults Technical SEO Specialist — no publish authority</p>
+      </div>
+    </div>
+
+    <div class="rolecol">
+      <div class="rcard c-amber">
+        <h3>SEO QA / Reporting Lead</h3>
+        <p>Final gate, measurement, sign-off</p>
+      </div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill amber">SEO Check</span>
+        <span class="skill amber shared">AI Visibility (GEO)</span>
+        <div class="sharenote">SEO Check is the mandatory final gate on every pipeline</div>
+      </div>
+      <div class="authbox can">
+        <div class="lbl">Review &amp; publish authority</div>
+        <p>Approval-queue triage, all pipelines — escalates high-risk to a lead</p>
+      </div>
+    </div>
+
+  </div>
+  <div class="common-skill">
+    <h4>🔓 Common skill — available to every role</h4>
+    <p><b>Competitor Research</b> is not gated to any single role. Strategist uses it for positioning, Content for angles, Technical for benchmarking, On-Page for gap-driven optimization, and QA for monitoring drift. Forced model: Gemini 2.5 Pro regardless of which role triggers it. No individual role owns or gatekeeps this skill.</p>
+  </div>
+</div>
+
+<!-- ================= STARTUP LEVEL ================= -->
+<div class="org-section">
+  <p class="otag">Org chart &middot; scaled by client volume</p>
+  <h2>SEO Department Org Chart — Startup Level</h2>
+  <p class="rnote">Lean team for early-stage growth (&lt; 50 clients) — same 15 skills, broader ownership per role</p>
+
+  <div class="context"><div class="context-box">Director of AI &amp; Automation</div></div>
+  <div class="cvline"></div>
+  <div class="root-wrap">
+    <div class="root"><h3>Head of SEO</h3><p>Strategy, client success, escalations, final sign-off</p></div>
+  </div>
+  <div class="vline"></div>
+  <div class="hline-row"><div class="hline" style="width:1098px"></div></div>
+
+  <div class="roles six" style="margin-top:0">
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-teal"><h3>SEO Specialist</h3><p>Keyword research, competitor input, strategy support</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill teal">Create Topic</span>
+        <span class="skill teal">Keyword Clustering</span>
+        <span class="skill teal">Content Brief</span>
+        <div class="sharenote">Research + Content, broad ownership</div>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-purple"><h3>Technical SEO Specialist</h3><p>Audits, fixes, schema, Core Web Vitals</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill purple">SEO Audit</span>
+        <span class="skill purple">Technical SEO</span>
+        <span class="skill purple">Broken Links</span>
+        <span class="skill purple">Schema Markup</span>
+        <span class="skill purple">Internal Linking</span>
+        <div class="sharenote">Full technical stack, one owner</div>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-coral"><h3>Content Lead</h3><p>Planning, briefs, AI content review, publishing</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill coral">Content Strategy</span>
+        <span class="skill coral">Create Content</span>
+        <span class="skill coral">On-Page SEO</span>
+        <span class="skill coral">Content Translation</span>
+        <div class="sharenote">Full content stack, one owner</div>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-amber"><h3>SEO Reporting &amp; QA</h3><p>Rank tracking, dashboards, client reports, verification</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill amber">SEO Check</span>
+        <span class="skill amber shared">AI Visibility (GEO)</span>
+        <div class="sharenote">Approval gate + reporting</div>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-blue"><h3>Outreach &amp; Links (Exec)</h3><p>Link opportunities, outreach support, basic digital PR</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill blue shared">Internal Linking</span>
+        <span class="skill blue shared">Competitor Research</span>
+        <div class="sharenote">No dedicated skill yet — manual/exec function, supported by Technical + Competitor Research</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= MID-LEVEL ================= -->
+<div class="org-section">
+  <p class="otag">Org chart &middot; scaled by client volume</p>
+  <h2>SEO Department Org Chart — Mid-Size Level</h2>
+  <p class="rnote">For scaling teams (100&ndash;300 clients) — research, content, and strategy start to split into dedicated roles</p>
+
+  <div class="root-wrap">
+    <div class="root"><h3>Head of SEO</h3></div>
+  </div>
+  <div class="vline"></div>
+  <div class="hline-row"><div class="hline" style="width:1144px"></div></div>
+
+  <div class="roles six" style="margin-top:0">
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-blue"><h3>Senior SEO Strategist</h3><p>Direction, escalations, Tier A ownership</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill blue shared">Content Strategy</span>
+        <span class="skill blue shared">AI Visibility (GEO)</span>
+        <div class="sharenote">Escalation lead, Tier A</div>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-teal"><h3>SEO Specialist</h3><p>Keyword research, competitor analysis</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill teal">Create Topic</span>
+        <span class="skill teal">Keyword Clustering</span>
+        <div class="sharenote">Research only — content now split out</div>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-purple"><h3>Technical SEO Specialist</h3><p>Audits, schema, Core Web Vitals</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill purple">SEO Audit</span>
+        <span class="skill purple">Technical SEO</span>
+        <span class="skill purple">Broken Links</span>
+        <span class="skill purple">Schema Markup</span>
+        <span class="skill purple">Internal Linking</span>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-coral"><h3>Content Strategist</h3><p>Content planning, calendars, briefs</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill coral shared">Content Strategy</span>
+        <span class="skill coral">Content Brief</span>
+        <div class="sharenote">Plans — does not draft</div>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-gray"><h3>SEO Copywriter</h3><p>Drafting, on-page copy, translation</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill gray">Create Content</span>
+        <span class="skill gray">On-Page SEO</span>
+        <span class="skill gray">Content Translation</span>
+        <div class="sharenote">Drafts — does not plan strategy</div>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-amber"><h3>SEO Reporting &amp; QA</h3><p>Verification, client dashboards</p></div>
+      <div class="skillbox">
+        <div class="lbl">Permitted skills</div>
+        <span class="skill amber">SEO Check</span>
+        <span class="skill amber shared">AI Visibility (GEO)</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= ENTERPRISE LEVEL ================= -->
+<div class="org-section">
+  <p class="otag">Org chart &middot; scaled by client volume</p>
+  <h2>SEO Department Org Chart — Enterprise Level</h2>
+  <p class="rnote">For large-scale operations (300+ clients, enterprise accounts) — skills are owned at the Lead level, fanned out across a sub-team</p>
+
+  <div class="root-wrap">
+    <div class="root"><h3>Head of SEO</h3></div>
+  </div>
+  <div class="vline"></div>
+  <div class="hline-row"><div class="hline" style="width:1029px"></div></div>
+
+  <div class="roles" style="margin-top:0">
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-teal"><h3>SEO Strategy Lead</h3><p>Direction &amp; prioritization across the portfolio</p></div>
+      <div class="skillbox">
+        <div class="lbl">Skills owned</div>
+        <span class="skill teal">Content Strategy</span>
+        <span class="skill teal">AI Visibility (GEO)</span>
+        <span class="skill teal shared">Competitor Research</span>
+      </div>
+      <div class="sub-roles">
+        <div class="lbl">Sub-team</div>
+        <span class="subrole">SEO Strategists</span>
+        <span class="subrole">SEO Specialists</span>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-purple"><h3>Technical SEO Lead</h3><p>Site health across the portfolio</p></div>
+      <div class="skillbox">
+        <div class="lbl">Skills owned</div>
+        <span class="skill purple">SEO Audit</span>
+        <span class="skill purple">Technical SEO</span>
+        <span class="skill purple">Broken Links</span>
+        <span class="skill purple">Schema Markup</span>
+        <span class="skill purple">Internal Linking</span>
+      </div>
+      <div class="sub-roles">
+        <div class="lbl">Sub-team</div>
+        <span class="subrole">Technical SEO Specialists</span>
+        <span class="subrole">Technical SEO Analysts</span>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-coral"><h3>Content &amp; PR Lead</h3><p>Content production &amp; outreach across the portfolio</p></div>
+      <div class="skillbox">
+        <div class="lbl">Skills owned</div>
+        <span class="skill coral">Content Brief</span>
+        <span class="skill coral shared">Content Strategy</span>
+        <span class="skill coral">Create Content</span>
+        <span class="skill coral">Content Translation</span>
+        <span class="skill coral">On-Page SEO</span>
+      </div>
+      <div class="sub-roles">
+        <div class="lbl">Sub-team</div>
+        <span class="subrole">Content Strategist</span>
+        <span class="subrole">SEO Copywriters</span>
+        <span class="subrole">Editors &amp; Outreach Specialists</span>
+      </div>
+    </div>
+
+    <div class="rolecol"><div class="drop"></div>
+      <div class="rcard c-amber"><h3>Reporting &amp; Operations Lead</h3><p>Measurement, delivery, client success</p></div>
+      <div class="skillbox">
+        <div class="lbl">Skills owned</div>
+        <span class="skill amber">SEO Check</span>
+        <span class="skill amber shared">AI Visibility (GEO)</span>
+        <div class="sharenote">+ owns dashboards &amp; delivery ops (not a SearchFit skill)</div>
+      </div>
+      <div class="sub-roles">
+        <div class="lbl">Sub-team</div>
+        <span class="subrole">Reporting Manager</span>
+        <span class="subrole">Data Analyst</span>
+        <span class="subrole">Dashboard Developer</span>
+        <span class="subrole">QA Analyst</span>
+        <span class="subrole">SEO Operations</span>
+        <span class="subrole">Project Coordinator</span>
+        <span class="subrole">Client Success Manager</span>
+      </div>
+    </div>
+  </div>
+  <p class="rnote" style="margin-top:14px">Same principle as the AI architecture: a small number of broad roles, not many narrow ones. At enterprise scale, the Lead is accountable for the skill; the sub-team is where headcount grows.</p>
+</div>
+
+<div class="legend">
+  <span class="lg"><span class="sw"></span> Main flow</span>
+  <span class="divider">Technology used:</span>
+  <span class="chip c-claude">Claude</span>
+  <span class="chip c-fallback">Fallback provider</span>
+  <span class="chip c-api">Orchestration API (direct calls)</span>
+  <span class="chip c-db">Database</span>
+  <span class="chip c-human">Human review</span>
+  <span class="chip c-ext">Live system</span>
+  <span class="chip c-ui">User interface</span>
+</div>
+
+<p class="ports">In short: <b>Claude does the reasoning, TR's own API layer controls sequencing and fallback directly, and a person approves before anything goes live — with no standing dependency on an external workflow tool.</b></p>
+
+</div>
+</body>
+</html>
