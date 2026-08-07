@@ -1,0 +1,11 @@
+# Railway config for a *separate* frontend-only service (Root Directory = frontend).
+# Prefer the single root Dockerfile (API + SPA) on the Backend service instead.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Do NOT use sh /start.sh — that belongs to the API image only.
+healthcheckPath = "/healthz"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
