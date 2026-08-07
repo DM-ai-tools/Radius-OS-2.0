@@ -38,13 +38,31 @@ def _resolve_static_dir() -> Path | None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Create tables (Alembic for Postgres; create_all works for SQLite local)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    async with AsyncSessionLocal() as db:
-        await seed_all(db, seed_demo_data=settings.environment != "production")
-        await db.commit()
-    log.info("startup_complete", database=settings.database_url.split("://")[0])
+    import asyncio
+
+    # Railway Postgres/Redis may not be reachable on the first instant after deploy.
+    last_err: Exception | None = None
+    for attempt in range(1, 21):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            async with AsyncSessionLocal() as db:
+                await seed_all(db, seed_demo_data=settings.environment != "production")
+                await db.commit()
+            log.info(
+                "startup_complete",
+                database=settings.database_url.split("://")[0],
+                attempt=attempt,
+            )
+            last_err = None
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            log.warning("db_startup_retry", attempt=attempt, error=str(exc))
+            await asyncio.sleep(3)
+    if last_err is not None:
+        # Still bind HTTP so Railway healthchecks get a response (see /health).
+        log.error("db_startup_failed_continuing", error=str(last_err))
     yield
     await engine.dispose()
 
@@ -75,7 +93,13 @@ app.include_router(chat.router, prefix=prefix)
 
 
 @app.get("/health")
+@app.get("/healthz")
 async def health():
+    """Liveness probe — always HTTP 200 once the process is listening.
+
+    Postgres/Redis status is reported in the body for diagnostics; Railway only
+    needs a successful HTTP response to mark the replica healthy.
+    """
     from sqlalchemy import text
 
     from app.services.cache import get_redis
@@ -116,7 +140,18 @@ if _static_dir is not None:
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
-        # Never shadow API/docs/health (already matched above when registered first)
+        # Keep API / health / docs out of the SPA fallback
+        if full_path.split("/", 1)[0] in {
+            "api",
+            "health",
+            "healthz",
+            "docs",
+            "redoc",
+            "openapi.json",
+        }:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=404, detail="Not found")
         candidate = _static_dir / full_path
         if full_path and candidate.is_file():
             return FileResponse(candidate)
