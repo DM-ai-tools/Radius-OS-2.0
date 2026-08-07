@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _KNOWN_BAD_ENCRYPTION_KEYS = {
@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     # "development" (default) seeds demo users/client; "production" skips them
     environment: str = "development"
 
+    # Directory of built SPA assets (set in production Docker image)
+    static_dir: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -74,6 +77,19 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_database_url(cls, v: object) -> object:
+        """Accept Railway/Heroku postgres:// URLs and force asyncpg driver."""
+        if not isinstance(v, str) or not v:
+            return v
+        url = v.strip()
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://") :]
+        if url.startswith("postgresql://") and "+asyncpg" not in url.split("://", 1)[0]:
+            url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+        return url
 
     @model_validator(mode="after")
     def _reject_known_bad_secrets(self) -> "Settings":

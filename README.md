@@ -55,6 +55,24 @@ docker compose up --build
 
 API: http://localhost:8000 · UI: http://localhost:5173 · Docs: http://localhost:8000/docs
 
+Production-like single container (API + built SPA):
+
+```bash
+docker compose --profile production up --build app db redis
+```
+
+App: http://localhost:8080
+
+## Railway
+
+1. Create a project from this repo (uses root `Dockerfile` + `railway.json`).
+2. Add **PostgreSQL** and **Redis** plugins; link `DATABASE_URL` / `REDIS_URL` / `CELERY_BROKER_URL`.
+3. Set required secrets (`SECRET_KEY`, `ENCRYPTION_KEY`) and production URLs — see deployment notes in the latest release commit / team runbook.
+4. Set `ENVIRONMENT=production` and `AUTH_DISABLED=false`.
+5. Public health check: `GET /health`.
+
+The production image serves the React SPA from FastAPI on Railway’s `PORT`.
+
 ## End-to-end walkthrough
 
 1. Open Acme Retail → Discovery pre-research starts → Approve.

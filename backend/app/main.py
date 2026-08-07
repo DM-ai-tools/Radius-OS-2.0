@@ -3,6 +3,8 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import auth, chat, clients, findings, oauth, readiness, sessions
 from app.config import get_settings
@@ -16,6 +18,22 @@ import app.models  # noqa: F401
 setup_logging()
 log = get_logger("main")
 settings = get_settings()
+
+
+def _resolve_static_dir() -> Path | None:
+    """Return SPA build dir when present (production Docker); None in API-only/dev."""
+    candidates: list[Path] = []
+    if settings.static_dir:
+        candidates.append(Path(settings.static_dir))
+    candidates.append(Path("/app/static"))
+    # Local frontend/dist only when explicitly running as production
+    if settings.environment == "production":
+        candidates.append(Path(__file__).resolve().parents[2] / "frontend" / "dist")
+        candidates.append(Path(__file__).resolve().parent.parent / "static")
+    for path in candidates:
+        if path.is_dir() and (path / "index.html").is_file():
+            return path
+    return None
 
 
 @asynccontextmanager
@@ -46,7 +64,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-api = FastAPI()  # unused — routers mounted directly
 prefix = "/api/v1"
 app.include_router(auth.router, prefix=prefix)
 app.include_router(clients.router, prefix=prefix)
@@ -83,3 +100,26 @@ async def health():
         "postgres": db_ok,
         "redis": redis_ok,
     }
+
+
+# Serve built SPA in production when STATIC_DIR / frontend/dist is available.
+# Registered last so /api/v1 and /health keep priority. No-op in local API-only mode.
+_static_dir = _resolve_static_dir()
+if _static_dir is not None:
+    _assets = _static_dir / "assets"
+    if _assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=_assets), name="spa-assets")
+
+    @app.get("/")
+    async def spa_index():
+        return FileResponse(_static_dir / "index.html")
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        # Never shadow API/docs/health (already matched above when registered first)
+        candidate = _static_dir / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_static_dir / "index.html")
+
+    log.info("spa_static_enabled", path=str(_static_dir))

@@ -8,6 +8,7 @@ __pycache__/
 venv/
 backend/.venv/
 backend/searchfit.db
+backend/tests/*.db
 node_modules/
 frontend/dist/
 frontend/node_modules/
@@ -20,3 +21,4 @@ htmlcov/
 .~lock.*
 *.swp
 *.swo
+.railway/
