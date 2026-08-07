@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import auth, chat, clients, findings, oauth, readiness, sessions
@@ -25,12 +25,19 @@ def _resolve_static_dir() -> Path | None:
     candidates: list[Path] = []
     if settings.static_dir:
         candidates.append(Path(settings.static_dir))
-    candidates.append(Path("/app/static"))
-    # Local frontend/dist only when explicitly running as production
-    if settings.environment == "production":
-        candidates.append(Path(__file__).resolve().parents[2] / "frontend" / "dist")
-        candidates.append(Path(__file__).resolve().parent.parent / "static")
+    candidates.extend(
+        [
+            Path("/app/static"),
+            Path(__file__).resolve().parent.parent / "static",
+            Path(__file__).resolve().parents[2] / "frontend" / "dist",
+        ]
+    )
+    seen: set[str] = set()
     for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
         if path.is_dir() and (path / "index.html").is_file():
             return path
     return None
@@ -63,6 +70,15 @@ async def lifespan(_: FastAPI):
     if last_err is not None:
         # Still bind HTTP so Railway healthchecks get a response (see /health).
         log.error("db_startup_failed_continuing", error=str(last_err))
+
+    static = _resolve_static_dir()
+    if static is not None:
+        log.info("spa_static_enabled", path=str(static))
+    else:
+        log.warning(
+            "spa_static_missing",
+            hint="Root Dockerfile must copy frontend/dist to /app/static",
+        )
     yield
     await engine.dispose()
 
@@ -117,44 +133,69 @@ async def health():
         redis_ok = bool(r and r.ping())
     except Exception:  # noqa: BLE001
         redis_ok = False
+    static = _resolve_static_dir()
     status = "ok" if db_ok and redis_ok else "degraded"
     return {
         "status": status,
         "service": "radius-os-phase1-4",
         "postgres": db_ok,
         "redis": redis_ok,
+        "spa": static is not None,
+        "static_dir": str(static) if static else None,
     }
 
 
-# Serve built SPA in production when STATIC_DIR / frontend/dist is available.
-# Registered last so /api/v1 and /health keep priority. No-op in local API-only mode.
+_API_PREFIXES = {
+    "api",
+    "health",
+    "healthz",
+    "docs",
+    "redoc",
+    "openapi.json",
+    "assets",
+}
+
+
+@app.get("/")
+async def spa_or_api_root():
+    static = _resolve_static_dir()
+    if static is not None:
+        return FileResponse(static / "index.html")
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>Radius OS</title></head><body style='font-family:system-ui;padding:2rem'>"
+        "<h1>Radius OS API</h1>"
+        "<p>The web UI bundle is not in this container (<code>/app/static</code> missing).</p>"
+        "<p>In Railway: set the service to use the <strong>root Dockerfile</strong> "
+        "(not <code>backend/Dockerfile</code>), Root Directory = <code>/</code>.</p>"
+        "<p><a href='/docs'>Open API docs</a> · <a href='/healthz'>Health</a></p>"
+        "</body></html>",
+        status_code=200,
+    )
+
+
+# Mount hashed Vite assets when present (resolved once at import; Docker image has them).
 _static_dir = _resolve_static_dir()
 if _static_dir is not None:
     _assets = _static_dir / "assets"
     if _assets.is_dir():
         app.mount("/assets", StaticFiles(directory=_assets), name="spa-assets")
-
-    @app.get("/")
-    async def spa_index():
-        return FileResponse(_static_dir / "index.html")
-
-    @app.get("/{full_path:path}")
-    async def spa_fallback(full_path: str):
-        # Keep API / health / docs out of the SPA fallback
-        if full_path.split("/", 1)[0] in {
-            "api",
-            "health",
-            "healthz",
-            "docs",
-            "redoc",
-            "openapi.json",
-        }:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=404, detail="Not found")
-        candidate = _static_dir / full_path
-        if full_path and candidate.is_file():
-            return FileResponse(candidate)
-        return FileResponse(_static_dir / "index.html")
-
     log.info("spa_static_enabled", path=str(_static_dir))
+
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    head = full_path.split("/", 1)[0]
+    if head in _API_PREFIXES:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="Not found")
+    static = _resolve_static_dir()
+    if static is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail="Not found")
+    candidate = static / full_path
+    if full_path and candidate.is_file():
+        return FileResponse(candidate)
+    return FileResponse(static / "index.html")

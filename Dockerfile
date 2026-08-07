@@ -26,6 +26,10 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY backend/ .
 COPY --from=frontend /frontend/dist /app/static
+# Fail the image build if the SPA did not land in the runtime image
+RUN test -f /app/static/index.html \
+    && test -d /app/static/assets \
+    && ls -la /app/static
 
 # Railway may honor Procfile (`sh scripts/start.sh`) over CMD — keep both paths.
 RUN mkdir -p /app/scripts
