@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -35,42 +35,20 @@ def _user_out(user: User) -> UserOut:
     )
 
 
-async def _user_count(db: AsyncSession) -> int:
-    return int((await db.execute(select(func.count()).select_from(User))).scalar_one())
-
-
-def _signup_roles(*, bootstrap: bool) -> list[dict[str, str]]:
-    """Roles offered on signup. HoD only when bootstrapping an empty install."""
-    allowed = set(SELF_SERVICE_ROLES)
-    if bootstrap:
-        allowed.add("head_of_department")
-    return [r for r in SEO_ROLES if r["name"] in allowed]
-
-
 @router.get("/roles", response_model=list[RoleOut])
-async def list_roles(db: AsyncSession = Depends(get_db)):
-    """Self-service signup options. HoD appears only when no users exist yet."""
-    bootstrap = (await _user_count(db)) == 0
+async def list_roles():
+    """All SEO roles available for self-service signup (including Head of Department)."""
     return [
         RoleOut(name=r["name"], label=r["label"], description=r["description"])
-        for r in _signup_roles(bootstrap=bootstrap)
+        for r in SEO_ROLES
+        if r["name"] in SELF_SERVICE_ROLES
     ]
 
 
 @router.post("/signup", response_model=TokenResponse)
 async def signup(body: SignupRequest, db: AsyncSession = Depends(get_db)):
-    bootstrap = (await _user_count(db)) == 0
-    allowed = set(SELF_SERVICE_ROLES)
-    if bootstrap:
-        allowed.add("head_of_department")
-
-    if body.role_name not in allowed:
-        raise HTTPException(
-            400,
-            "This role can't be self-assigned — ask a Head of Department to invite you"
-            if body.role_name == "head_of_department"
-            else "This role can't be self-assigned — ask an admin to invite you",
-        )
+    if body.role_name not in SELF_SERVICE_ROLES:
+        raise HTTPException(400, "This role can't be self-assigned — ask an admin to invite you")
 
     existing = (
         await db.execute(select(User).where(User.email == body.email.lower().strip()))

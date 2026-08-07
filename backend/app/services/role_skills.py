@@ -52,7 +52,9 @@ SEO_ROLES: list[dict[str, str]] = [
     },
 ]
 
-SELF_SERVICE_ROLES: set[str] = {r["name"] for r in SEO_ROLES if r["name"] != "head_of_department"}
+# All catalog roles can self-register (HoD included — needed for org bootstrap on Railway).
+SELF_SERVICE_ROLES: set[str] = {r["name"] for r in SEO_ROLES}
+
 
 # Phase / skill ownership from coverage doc (all phases). implemented=False → future.
 PHASE_SKILL_COVERAGE: list[dict[str, Any]] = [
