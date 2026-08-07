@@ -409,8 +409,10 @@ def extract_sitemap_locs(xml_text: str) -> list[str]:
     return out
 
 
-async def discover_site_urls(start_url: str, *, max_pages: int = 80) -> list[str]:
-    """Discover indexable site URLs via homepage crawl + sitemap.xml (best effort)."""
+async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]:
+    """Discover indexable site URLs via homepage crawl + sitemap + research merge."""
+    if max_pages <= 0:
+        max_pages = 2000
     if not start_url.startswith("http"):
         start_url = "https://" + start_url
     start_url = _normalize_page_url(start_url)
@@ -537,43 +539,29 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 80) -> list[str
         ordered.remove(home_url)
         ordered.insert(0, home_url)
 
-    # Local crawl blocked / thin → Perplexity web research (not DataForSEO).
-    # Cloud hosts (e.g. Railway) often see a partial HTML shell with a few nav
-    # links while local/dev hits a captcha path — both should use research for
-    # full coverage up to max_pages.
-    home_blocked = (home.get("error") or "") in {
-        "bot_challenge_blocked",
-        "soft_forbidden",
-        "empty_or_shell_page",
-    }
-    thin_crawl = len(ordered) < max(10, min(max_pages // 2, 40))
-    if thin_crawl or home_blocked:
-        try:
-            from app.integrations.site_research import research_ready, research_site_crawl
+    # Merge Perplexity research whenever configured — take every unique page found
+    # (no min/max thresholds; max_pages is only a safety ceiling).
+    try:
+        from app.integrations.site_research import research_ready, research_site_crawl
 
-            if research_ready():
-                log.info(
-                    "discover_fallback_perplexity",
-                    start=start_url,
-                    local_pages=len(ordered),
-                    home_error=home.get("error"),
-                    thin_crawl=thin_crawl,
-                )
-                research = await research_site_crawl(start_url, max_pages=max_pages)
-                research_pages = [
-                    p.get("url")
-                    for p in (research.get("pages") or [])
-                    if p.get("url") and int(p.get("status_code") or 0) < 400
-                ]
-                if len(research_pages) > len(ordered):
-                    return research_pages[:max_pages]
-                for u in research_pages:
-                    if u not in ordered:
-                        ordered.append(u)
-                    if len(ordered) >= max_pages:
-                        break
-        except Exception as exc:  # noqa: BLE001
-            log.warning("discover_perplexity_failed", error=str(exc))
+        if research_ready():
+            log.info(
+                "discover_merge_perplexity",
+                start=start_url,
+                local_pages=len(ordered),
+                home_error=home.get("error"),
+            )
+            research = await research_site_crawl(start_url, max_pages=max_pages)
+            research_pages = [
+                p.get("url")
+                for p in (research.get("pages") or [])
+                if p.get("url") and int(p.get("status_code") or 0) < 400
+            ]
+            merged = list(dict.fromkeys([*research_pages, *ordered]))
+            if merged:
+                ordered = merged
+    except Exception as exc:  # noqa: BLE001
+        log.warning("discover_perplexity_failed", error=str(exc))
 
     return ordered[:max_pages]
 

@@ -51,8 +51,8 @@ class Settings(BaseSettings):
 
     competitor_cache_days: int = 14
     readiness_threshold: float = 90.0
-    # Cap for multi-page SEO audit (sitemap + crawl)
-    seo_audit_max_pages: int = 80
+    # 0 = no soft cap — take every page discovered (hard safety ceiling still applies)
+    seo_audit_max_pages: int = 0
 
     feature_discovery_agent: bool = True
     feature_tracking_agent: bool = True
@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+    @property
+    def effective_seo_audit_max_pages(self) -> int:
+        """Pages to collect for SEO audit. 0/unset = unlimited (safety ceiling only)."""
+        # Absolute ceiling avoids runaway memory/timeouts on huge sites / LLM payloads
+        ceiling = 2000
+        n = int(self.seo_audit_max_pages or 0)
+        if n <= 0:
+            return ceiling
+        return min(n, ceiling)
 
     @field_validator("database_url", mode="before")
     @classmethod

@@ -185,7 +185,7 @@ def _normalize_pages(
     return out[:max_pages]
 
 
-async def research_site_crawl(url: str, *, max_pages: int = 80) -> dict[str, Any]:
+async def research_site_crawl(url: str, *, max_pages: int = 0) -> dict[str, Any]:
     """
     Discover and summarize site pages with Perplexity web research.
 
@@ -213,22 +213,24 @@ async def research_site_crawl(url: str, *, max_pages: int = 80) -> dict[str, Any
             "source": "perplexity_research",
         }
 
-    max_pages = max(1, min(int(max_pages or 80), 80))
+    max_pages = max(1, int(max_pages or 0) or 2000)
     start = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
 
     system = (
         "You are an SEO auditor with live web access.\n"
-        "Research the public website and list real indexable HTML pages on THAT domain only.\n"
+        "Research the public website and list EVERY real indexable HTML page on THAT domain only.\n"
         "Use sitemaps, site: search results, navigation, blog indexes, and public page listings.\n"
         "Do NOT invent URLs. Prefer pages you can verify from search/public sources.\n"
         "If the live site is behind a captcha/WAF, still list publicly known pages from the open web.\n"
         "For EACH page, fill SEO fields from public evidence (title, meta description, H1, issues).\n"
-        "status_code: use 200 when the page is known to exist publicly; 404 only if clearly dead."
+        "status_code: use 200 when the page is known to exist publicly; 404 only if clearly dead.\n"
+        "Do not stop early — return the full set of pages you can verify (as many as exist)."
     )
     user = (
         f"Website: {start}\n"
         f"Domain: {bare}\n"
-        f"Return up to {max_pages} pages as JSON with this exact shape:\n"
+        f"Return all indexable pages you can verify (target complete coverage; "
+        f"include at least every major section page). JSON shape:\n"
         "{\n"
         '  "pages_found": <int>,\n'
         '  "broken_links": <int estimate or 0>,\n'
@@ -246,8 +248,8 @@ async def research_site_crawl(url: str, *, max_pages: int = 80) -> dict[str, Any
         "    }\n"
         "  ]\n"
         "}\n"
-        "Include homepage first, then ALL major service/about/contact/landing/blog pages you can verify. "
-        "Maximize coverage up to the page limit — this feeds a per-page SEO audit."
+        "Include homepage first, then every service/about/contact/landing/blog/product/category "
+        "page you can verify. Maximize coverage — this feeds a per-page SEO audit."
     )
 
     try:
