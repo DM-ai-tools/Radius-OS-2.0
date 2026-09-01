@@ -49,7 +49,7 @@ ENV PYTHONPATH=/app \
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD-SHELL curl -fsS "http://127.0.0.1:$${PORT:-8000}/health" || exit 1
+    CMD /bin/sh -c "curl -fsS http://127.0.0.1:$${PORT:-8000}/health || exit 1"
 
 # Prefer shell form so $PORT is expanded if Railway wraps the command
 CMD ["sh", "/start.sh"]
