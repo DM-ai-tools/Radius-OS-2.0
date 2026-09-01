@@ -40,8 +40,11 @@ def _normalize_url(url: str, *, default_host: str = "") -> str | None:
     parsed = urlparse(raw)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
-    path = parsed.path or "/"
-    return f"{parsed.scheme}://{parsed.netloc.lower()}{path}"
+    from app.integrations.web_fetch import _normalize_page_url, is_indexable_html_url
+
+    if not is_indexable_html_url(raw):
+        return None
+    return _normalize_page_url(raw)
 
 
 def _parse_json_loose(text: str) -> dict[str, Any] | None:

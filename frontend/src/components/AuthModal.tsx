@@ -31,27 +31,27 @@ const FALLBACK_ROLES: SeoRole[] = [
   {
     name: "seo_strategist",
     label: "SEO Strategist",
-    description: "Owns Competitor & Market; escalation lead across phases.",
+    description: "Owns Competitor & Market and Phase 6 Content Strategy / IA.",
   },
   {
     name: "content_seo_specialist",
     label: "Content SEO Specialist",
-    description: "Phases 5+ — view-only on Phases 1–4.",
+    description: "Owns Phase 5 Search Demand (topics + clustering).",
   },
   {
     name: "on_page_seo_specialist",
     label: "On-Page SEO Specialist",
-    description: "On-page SEO, internal linking — view-only on Phases 1–4.",
+    description: "On-page SEO, internal linking — view-only until later phases.",
   },
   {
     name: "structured_data_specialist",
     label: "Structured Data Specialist",
-    description: "Schema markup — view-only on Phases 1–4.",
+    description: "Schema markup — view-only until later phases.",
   },
   {
     name: "seo_qa_lead",
     label: "SEO QA Lead",
-    description: "Final readiness gate before Phase 5 handoff.",
+    description: "QA / reporting — reviews findings across phases.",
   },
 ];
 
@@ -144,7 +144,7 @@ export default function AuthModal({
         <h2>{mode === "login" ? "Log in" : "Create account"}</h2>
         <p className="auth-modal-sub">
           {mode === "login"
-            ? "Your role is loaded from your account and gates Phase 1–4 skills."
+            ? "Your role is loaded from your account and gates Phase 1–6 skills."
             : "Choose your SEO role — it is stored with your email and limits which skills you can run."}
         </p>
 
@@ -255,8 +255,8 @@ export default function AuthModal({
           </button>
         </form>
         <p className="auth-demo-hint">
-          Demo: hod@trafficradius.com (Head of Department) · csm@ / tech@ /
-          strategist@ / qa@trafficradius.com — password123
+          Demo: hod@trafficradius.com · csm@ / tech@ / strategist@ / content@ /
+          onpage@ / qa@trafficradius.com — password123
         </p>
       </div>
     </div>

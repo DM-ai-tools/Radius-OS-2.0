@@ -4,6 +4,17 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { AuthProvider } from "./auth";
 import "./styles.css";
+import "./theme-classy.css";
+import "./command-center.css";
+
+document.documentElement.classList.add("theme-classy");
+try {
+  if (localStorage.getItem("seo-os-theme") === "light") {
+    document.documentElement.classList.add("theme-light");
+  }
+} catch {
+  /* ignore */
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

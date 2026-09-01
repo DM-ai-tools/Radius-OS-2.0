@@ -21,6 +21,7 @@ from app.models import (
     CompetitorRanking,
     DiscoveryResponse,
     FindingsLedger,
+    PhaseValidation,
     ReadinessScore,
     TrackingAudit,
     User,
@@ -180,6 +181,7 @@ async def delete_client(
     await db.execute(delete(WebsiteAudit).where(WebsiteAudit.client_id == client_id))
 
     if session_ids:
+        await db.execute(delete(PhaseValidation).where(PhaseValidation.session_id.in_(session_ids)))
         await db.execute(delete(AgentJob).where(AgentJob.session_id.in_(session_ids)))
         await db.execute(delete(ChatMessage).where(ChatMessage.session_id.in_(session_ids)))
         await db.execute(delete(ChatSession).where(ChatSession.id.in_(session_ids)))
@@ -205,6 +207,7 @@ async def delete_client(
     await db.execute(delete(BacklinkSnapshot).where(BacklinkSnapshot.client_id == client_id))
     await db.execute(delete(CompetitorProfile).where(CompetitorProfile.client_id == client_id))
 
+    await db.execute(delete(PhaseValidation).where(PhaseValidation.client_id == client_id))
     await db.execute(delete(DiscoveryResponse).where(DiscoveryResponse.client_id == client_id))
     await db.execute(delete(TrackingAudit).where(TrackingAudit.client_id == client_id))
     await db.execute(delete(FindingsLedger).where(FindingsLedger.client_id == client_id))
@@ -376,3 +379,91 @@ async def get_profile(
     if not profile:
         raise HTTPException(404, "Profile not found")
     return profile
+
+
+REPORT_EXPORT_FORMATS = {
+    "pdf": ("application/pdf", "pdf"),
+    "docx": (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "docx",
+    ),
+}
+
+
+def _build_export_body(bundle: dict, *, fmt: str, single: bool) -> bytes:
+    if fmt == "docx":
+        from app.services.report_docx import build_reports_docx
+
+        return build_reports_docx(bundle, single=single)
+    from app.services.report_pdf import build_reports_pdf
+
+    return build_reports_pdf(bundle, single=single)
+
+
+@router.get("/{client_id}/reports/{card_type}/export")
+async def export_single_client_report(
+    client_id: UUID,
+    card_type: str,
+    format: str = "pdf",
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Download one structured phase report as a PDF or Word document."""
+    from app.services.report_export import build_report_export, find_report, report_filename_slug
+
+    fmt = format.lower()
+    if fmt not in REPORT_EXPORT_FORMATS:
+        raise HTTPException(400, f"Unsupported format '{format}'. Use pdf or docx.")
+
+    try:
+        bundle = await build_report_export(db, client_id)
+    except LookupError:
+        raise HTTPException(404, "Client not found") from None
+
+    report = find_report(bundle, card_type)
+    if not report:
+        raise HTTPException(404, f"Report not found: {card_type}")
+
+    slug = bundle.get("filename_slug") or "client"
+    stamp = str(bundle.get("exported_at") or "")[:10].replace("-", "") or "export"
+    single_bundle = {**bundle, "reports": [report]}
+    media_type, ext = REPORT_EXPORT_FORMATS[fmt]
+    body = _build_export_body(single_bundle, fmt=fmt, single=True)
+    title_slug = report_filename_slug(report, bundle.get("client"))
+    filename = f"{slug}-{title_slug}-{stamp}.{ext}"
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{client_id}/reports/export")
+async def export_client_reports(
+    client_id: UUID,
+    format: str = "pdf",
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Download all structured phase reports for a client as a PDF or Word document."""
+    from app.services.report_export import build_report_export
+
+    fmt = format.lower()
+    if fmt not in REPORT_EXPORT_FORMATS:
+        raise HTTPException(400, f"Unsupported format '{format}'. Use pdf or docx.")
+
+    try:
+        bundle = await build_report_export(db, client_id)
+    except LookupError:
+        raise HTTPException(404, "Client not found") from None
+
+    slug = bundle.get("filename_slug") or "client"
+    stamp = str(bundle.get("exported_at") or "")[:10].replace("-", "") or "export"
+    media_type, ext = REPORT_EXPORT_FORMATS[fmt]
+    body = _build_export_body(bundle, fmt=fmt, single=False)
+    filename = f"{slug}-reports-{stamp}.{ext}"
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

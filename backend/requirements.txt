@@ -15,8 +15,6 @@ celery==5.4.0
 structlog==24.4.0
 python-multipart==0.0.20
 numpy==2.2.0
-scikit-learn==1.6.0
-pandas==2.2.3
 anthropic==0.40.0
 greenlet==3.1.1
 pytest==8.3.4
@@ -25,3 +23,4 @@ email-validator==2.2.0
 openpyxl==3.1.5
 python-docx==1.1.2
 pypdf==5.1.0
+reportlab==4.2.5

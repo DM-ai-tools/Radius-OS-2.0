@@ -24,12 +24,18 @@ jobs:
             echo "Possible secret found"; exit 1;
           fi
           true
+      - name: Lint (dead imports, undefined names, bare excepts)
+        run: |
+          pip install ruff
+          ruff check app tests --select F401,F811,F821,F841,E711,E712,E722
+
       - name: Tests
         env:
           DATABASE_URL: sqlite+aiosqlite:///./test.db
           USE_MOCK_LLM: "true"
           USE_MOCK_PROVIDERS: "true"
-          SECRET_KEY: ci-secret
+          SECRET_KEY: ci-test-secret-key-not-a-placeholder
+          ENCRYPTION_KEY: ci-test-encryption-key-not-a-placeholder
         run: pytest -q
       - name: Dependency audit
         run: pip install pip-audit && pip-audit || true
@@ -46,3 +52,5 @@ jobs:
           node-version: "20"
       - run: npm install
       - run: npx tsc -p tsconfig.json --noEmit
+      # tsc alone let a build-breaking error reach the working tree once; build too.
+      - run: npx vite build

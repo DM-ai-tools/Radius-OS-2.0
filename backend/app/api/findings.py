@@ -23,6 +23,46 @@ class KnownChangesSubmit(BaseModel):
     fields: dict
 
 
+@router.get("/clients/{client_id}/phases/{agent_key}/validation")
+async def get_phase_validation_history(
+    client_id: UUID,
+    agent_key: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Traceable validation history for a phase — why accepted/rejected, which checks ran."""
+    from app.models.governance import PhaseValidation
+    from app.services.phase_validation import list_applicable_parameters, phase_criteria_as_dict
+
+    rows = (
+        await db.execute(
+            select(PhaseValidation)
+            .where(
+                PhaseValidation.client_id == client_id,
+                PhaseValidation.agent_key == agent_key,
+            )
+            .order_by(PhaseValidation.created_at.desc())
+            .limit(20)
+        )
+    ).scalars().all()
+    return {
+        "agent_key": agent_key,
+        "applicable_parameters": list_applicable_parameters(agent_key),
+        "criteria": phase_criteria_as_dict(agent_key),
+        "history": [
+            {
+                "id": str(r.id),
+                "iteration": r.iteration,
+                "decision": r.decision,
+                "output_fingerprint": r.output_fingerprint,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "result": r.result,
+            }
+            for r in rows
+        ],
+    }
+
+
 @router.get("/clients/{client_id}/findings")
 async def list_findings(
     client_id: UUID,

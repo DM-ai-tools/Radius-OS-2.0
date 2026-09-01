@@ -34,9 +34,22 @@ class Settings(BaseSettings):
     # anthropic | openrouter — skill synthesis (competitor analysis, discovery research, etc.)
     llm_provider: str = "anthropic"
     router_model: str = "claude-haiku-4-5"
+    # Main reasoning for skills (Architecture v1.9 Step 06/08 — Claude Sonnet)
     skill_model: str = "claude-sonnet-5"
+    # Competitor Research is forced to Gemini (Architecture v1.9 common skill)
+    competitor_model: str = "google/gemini-2.5-pro"
     # OpenRouter Perplexity Pro for URL research / CDD extraction
     research_model: str = "perplexity/sonar-pro"
+    # Nano Banana (Gemini 2.5 Flash Image) via OpenRouter Images API
+    image_model: str = "google/gemini-2.5-flash-image"
+    # Article drafts (Phase 10 create-content) via OpenRouter
+    write_model: str = "openai/gpt-5.6-sol"
+    # Lightweight OpenRouter model for post-cleaning keyword cluster + intent/funnel
+    keyword_cluster_model: str = "google/gemini-2.5-flash"
+    keyword_relevance_max_per_seed: int = 25
+    keyword_relevance_max_input_per_seed: int = 40
+    keyword_relevance_max_tokens: int = 2048
+    keyword_cluster_use_llm: bool = False
     use_mock_llm: bool = True
     use_mock_providers: bool = True
 
@@ -44,20 +57,62 @@ class Settings(BaseSettings):
     dataforseo_login: str = ""
     dataforseo_password: str = ""
     moz_api_key: str = ""
+    # Ahrefs Site Audit (Phase 7) — project resolved by URL when unset
+    ahrefs_site_audit_project_id: int | None = None
+    # Max pages from page-explorer per audit (1000 per API call @ 50 units each).
+    # 0 = issues-only (fastest — skip bulk page inventory).
+    ahrefs_site_audit_page_limit: int = 0
+    # Sample affected URLs for top N issues only (50 units per issue call)
+    ahrefs_site_audit_issue_sample_limit: int = 3
+    # Optional — Google PageSpeed Insights works unauthenticated at a low quota.
+    # Set this to raise the rate limit for Phase 7's cwv-measurement skill.
+    pagespeed_api_key: str = ""
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
     oauth_redirect_uri: str = "http://localhost:8000/api/v1/oauth/callback"
     frontend_url: str = "http://localhost:5173"
 
+    # --- Phase 12: design fetch, preview, and CMS publish -------------------------
+    brandfetch_api_key: str = ""
+    firecrawl_api_key: str = ""
+
+    # Each client connects their own WordPress site + Application Password from the
+    # app (stored encrypted per-client, see app.api.integrations) — there is no
+    # deployment-wide WordPress site. These two remain global because they are safety
+    # policy, not a credential: they cap what ANY client connection is allowed to do.
+    # Posts are created as drafts unless a caller explicitly asks to go live AND the
+    # deployment opts in below. Publishing to a client's live site is not reversible
+    # from here, so "draft" is the only safe default.
+    wordpress_default_status: str = "draft"
+    wordpress_allow_live_publish: bool = False
+
     competitor_cache_days: int = 14
     readiness_threshold: float = 90.0
     # 0 = no soft cap — take every page discovered (hard safety ceiling still applies)
     seo_audit_max_pages: int = 0
+    # Phase 7 composite fallback when Ahrefs Site Audit is unavailable
+    technical_seo_seo_audit_max_pages: int = 40
+    # Default chat-turn budget; heavy phases override below
+    agent_timeout_seconds: int = 480
+    technical_seo_agent_timeout_seconds: int = 900
 
     feature_discovery_agent: bool = True
     feature_tracking_agent: bool = True
     feature_website_agent: bool = True
     feature_competitor_agent: bool = True
+    feature_search_demand_agent: bool = True
+    feature_content_strategy_agent: bool = True
+    feature_site_architecture_agent: bool = True
+    feature_technical_seo_agent: bool = True
+    feature_content_audit_agent: bool = True
+    feature_content_planning_agent: bool = True
+    feature_content_production_agent: bool = True
+    feature_on_page_seo_agent: bool = True
+    feature_publishing_agent: bool = True
+    # Post-phase AI + deterministic validation (company-aware QC)
+    feature_phase_validation: bool = True
+    # Max generate→validate cycles before escalating needs_revision to reject
+    validation_max_attempts: int = 2
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

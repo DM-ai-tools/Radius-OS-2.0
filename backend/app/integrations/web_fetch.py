@@ -7,7 +7,7 @@ import re
 import socket
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 import httpx
 
@@ -387,12 +387,105 @@ def detect_tracking_snippets(html: str, scripts: list[str]) -> dict[str, Any]:
     }
 
 
-def _normalize_page_url(url: str) -> str:
+_ASSET_EXT = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".pdf",
+    ".zip",
+    ".css",
+    ".js",
+    ".xml",
+    ".json",
+    ".mp4",
+    ".mp3",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".txt",
+)
+
+# Utility / archive / pagination paths — not unique content pages.
+_SKIP_PATH = re.compile(
+    r"(?ix)"
+    r"(?:"
+    r"/wp-(?:admin|login|json|cron)(?:/|$)"
+    r"|/xmlrpc\.php"
+    r"|/(?:feed|rss|atom)(?:/|\.xml|$)"
+    r"|/comments/feed"
+    r"|/(?:cart|basket|checkout|wishlist|my-account)(?:/|$)"
+    r"|/cdn-cgi/"
+    r"|/(?:tag|tags|author|authors)(?:/|$)"
+    r"|/page/\d+(?:/|$)"
+    r")"
+)
+
+_DROP_QUERY_KEYS = {
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "gclid",
+    "fbclid",
+    "msclkid",
+    "mc_cid",
+    "mc_eid",
+    "_ga",
+    "ref",
+    "source",
+    "s",
+    "paged",
+    "orderby",
+    "order",
+    "add-to-cart",
+    "replytocom",
+    "share",
+    "filter",
+}
+
+
+def _normalize_page_url(
+    url: str,
+    *,
+    prefer_netloc: str | None = None,
+    prefer_scheme: str | None = None,
+) -> str:
     parsed = urlparse(url if url.startswith("http") else "https://" + url)
     path = parsed.path or "/"
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
-    return f"{parsed.scheme}://{parsed.netloc.lower()}{path}"
+    scheme = (prefer_scheme or parsed.scheme or "https").lower()
+    netloc = (prefer_netloc or parsed.netloc or "").lower()
+    if prefer_netloc and _host_bare(parsed.netloc) == _host_bare(prefer_netloc):
+        netloc = prefer_netloc.lower()
+    kept = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=False)
+        if k.lower() not in _DROP_QUERY_KEYS
+    ]
+    query = urlencode(kept) if kept else ""
+    return f"{scheme}://{netloc}{path}{('?' + query) if query else ''}"
+
+
+def is_indexable_html_url(url: str) -> bool:
+    """True for unique content pages; false for assets, tags, feeds, pagination."""
+    raw = (url or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw if raw.startswith("http") else "https://" + raw)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    path = parsed.path or "/"
+    path_l = path.lower()
+    if any(path_l.endswith(ext) for ext in _ASSET_EXT):
+        return False
+    if _SKIP_PATH.search(path_l):
+        return False
+    return True
 
 
 def extract_sitemap_locs(xml_text: str) -> list[str]:
@@ -410,7 +503,11 @@ def extract_sitemap_locs(xml_text: str) -> list[str]:
 
 
 async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]:
-    """Discover indexable site URLs via homepage crawl + sitemap + research merge."""
+    """Discover unique indexable HTML pages via homepage crawl + sitemap.
+
+    Filters tag/author/feed/pagination/asset URLs so the count matches real pages,
+    not every loc in a bloated sitemap.
+    """
     if max_pages <= 0:
         max_pages = 2000
     if not start_url.startswith("http"):
@@ -421,12 +518,21 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
 
     ordered: list[str] = []
     seen: set[str] = set()
+    skipped = 0
+    prefer_netloc: str | None = None
+    prefer_scheme: str | None = None
 
     def _add(u: str) -> None:
+        nonlocal skipped
         if len(ordered) >= max_pages:
             return
+        if not is_indexable_html_url(u):
+            skipped += 1
+            return
         try:
-            nu = _normalize_page_url(u)
+            nu = _normalize_page_url(
+                u, prefer_netloc=prefer_netloc, prefer_scheme=prefer_scheme
+            )
         except Exception:  # noqa: BLE001
             return
         p = urlparse(nu)
@@ -434,28 +540,6 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
             return
         h = p.netloc.lower()
         if _host_bare(h) != bare:
-            return
-        # Skip non-HTML assets
-        path_l = (p.path or "").lower()
-        if any(
-            path_l.endswith(ext)
-            for ext in (
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".gif",
-                ".webp",
-                ".svg",
-                ".pdf",
-                ".zip",
-                ".css",
-                ".js",
-                ".xml",
-                ".json",
-                ".mp4",
-                ".mp3",
-            )
-        ):
             return
         if nu in seen:
             return
@@ -465,9 +549,16 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
     _add(start_url)
 
     home = await fetch_url(start_url)
-    home_url = _normalize_page_url(home.get("url") or start_url)
+    home_parsed = urlparse(home.get("url") or start_url)
+    prefer_netloc = home_parsed.netloc.lower() or host
+    prefer_scheme = (home_parsed.scheme or "https").lower()
+    home_url = _normalize_page_url(
+        home.get("url") or start_url,
+        prefer_netloc=prefer_netloc,
+        prefer_scheme=prefer_scheme,
+    )
     # Follow redirects: audit the resolved host, not the typed alias
-    bare = _host_bare(urlparse(home_url).netloc)
+    bare = _host_bare(prefer_netloc)
     _add(home_url)
 
     # Sitemap candidates from robots.txt + default paths
@@ -494,7 +585,12 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
         if res.get("status_code") != 200 or not text:
             return
         locs = extract_sitemap_locs(text)
-        child_sitemaps = [u for u in locs if u.lower().endswith(".xml")]
+        child_sitemaps = [
+            u
+            for u in locs
+            if u.lower().endswith(".xml")
+            and not re.search(r"(?:tag|author|authors)-sitemap", u, re.I)
+        ]
         page_locs = [u for u in locs if not u.lower().endswith(".xml")]
         for u in page_locs:
             _add(u)
@@ -539,29 +635,34 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
         ordered.remove(home_url)
         ordered.insert(0, home_url)
 
-    # Merge Perplexity research whenever configured — take every unique page found
-    # (no min/max thresholds; max_pages is only a safety ceiling).
+    # Google `site:` index — used when SiteGround/WAF blocks HTML/sitemaps.
     try:
-        from app.integrations.site_research import research_ready, research_site_crawl
+        from app.integrations.dataforseo import indexed_site_urls
 
-        if research_ready():
-            log.info(
-                "discover_merge_perplexity",
-                start=start_url,
-                local_pages=len(ordered),
-                home_error=home.get("error"),
-            )
-            research = await research_site_crawl(start_url, max_pages=max_pages)
-            research_pages = [
-                p.get("url")
-                for p in (research.get("pages") or [])
-                if p.get("url") and int(p.get("status_code") or 0) < 400
-            ]
-            merged = list(dict.fromkeys([*research_pages, *ordered]))
-            if merged:
-                ordered = merged
+        for u in await indexed_site_urls(bare, limit=max_pages):
+            _add(u)
     except Exception as exc:  # noqa: BLE001
-        log.warning("discover_perplexity_failed", error=str(exc))
+        log.warning("discover_indexed_serp_failed", error=str(exc))
 
+    # Perplexity only fills remaining gaps (do not replace a real index list).
+    if len(ordered) < 8:
+        try:
+            from app.integrations.site_research import research_ready, research_site_crawl
+
+            if research_ready():
+                research = await research_site_crawl(start_url, max_pages=max_pages)
+                for p in research.get("pages") or []:
+                    u = p.get("url")
+                    if u and int(p.get("status_code") or 0) < 400:
+                        _add(u)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("discover_perplexity_failed", error=str(exc))
+
+    log.info(
+        "discover_site_urls_ok",
+        start=start_url,
+        pages=len(ordered),
+        skipped=skipped,
+    )
     return ordered[:max_pages]
 

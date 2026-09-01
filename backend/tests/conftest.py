@@ -5,7 +5,11 @@ from pathlib import Path
 
 TEST_DB_PATH = Path(__file__).parent / "test_searchfit.db"
 if TEST_DB_PATH.exists():
-    TEST_DB_PATH.unlink()
+    try:
+        TEST_DB_PATH.unlink()
+    except OSError:
+        # Another pytest worker or local process may still hold the SQLite file open.
+        pass
 
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{TEST_DB_PATH}"
 os.environ["SECRET_KEY"] = "test-suite-secret-key-not-a-real-default-value"

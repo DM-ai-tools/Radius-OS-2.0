@@ -1,0 +1,211 @@
+/* Radius OS — Premium Dark Command Center tokens.
+   Applied when html has .theme-classy. Landing page keeps its own palette. */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+html.theme-classy:not(:has(.landing)) {
+  color-scheme: dark;
+  --bg-primary: #070b10;
+  --bg-deep: #05080c;
+  --bg-raised: #0a1017;
+  --surface-1: #0b1118;
+  --surface-2: #0e151d;
+  --surface-3: #111821;
+  --surface-active: #111b26;
+  --border-subtle: rgba(148, 163, 184, 0.08);
+  --border-default: rgba(148, 163, 184, 0.1);
+  --border-strong: rgba(148, 163, 184, 0.16);
+  --border-active: rgba(59, 130, 246, 0.45);
+  --border-success: rgba(34, 197, 94, 0.35);
+  --brand-blue: #3b82f6;
+  --brand-blue-bright: #60a5fa;
+  --brand-blue-dark: #2563eb;
+  --brand-blue-soft: rgba(59, 130, 246, 0.12);
+  --brand-blue-glow: rgba(59, 130, 246, 0.18);
+  --success: #22c55e;
+  --success-bright: #4ade80;
+  --success-bg: rgba(34, 197, 94, 0.1);
+  --warning: #f59e0b;
+  --warning-bright: #fbbf24;
+  --warning-bg: rgba(245, 158, 11, 0.1);
+  --critical: #ef4444;
+  --critical-bright: #f87171;
+  --critical-bg: rgba(239, 68, 68, 0.1);
+  --info: #22d3ee;
+  --ai: #8b5cf6;
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #64748b;
+  --text-disabled: #475569;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.2);
+  --shadow-floating: 0 8px 30px rgba(0, 0, 0, 0.3);
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-display: "Inter", system-ui, sans-serif;
+  --bg: var(--bg-primary);
+  --card: var(--surface-1);
+  --ink: var(--text-primary);
+  --muted: var(--text-muted);
+  --line: var(--border-default);
+  --primary: var(--brand-blue);
+  --primary-deep: var(--brand-blue-dark);
+  --primary-bg: var(--brand-blue-soft);
+  --green: var(--success);
+  --green-bg: var(--success-bg);
+  --amber: var(--warning);
+  --amber-bg: var(--warning-bg);
+  --coral: var(--critical);
+  --coral-bg: var(--critical-bg);
+}
+
+html.theme-classy:not(:has(.landing)),
+html.theme-classy:not(:has(.landing)) body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+html.theme-classy:not(:has(.landing)) h1,
+html.theme-classy:not(:has(.landing)) h2,
+html.theme-classy:not(:has(.landing)) h3,
+html.theme-classy:not(:has(.landing)) .card-title {
+  font-family: "Inter", system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+html.theme-classy:not(:has(.landing)) .btn-primary {
+  background: var(--brand-blue-dark);
+  color: #fff;
+  border: none;
+}
+
+html.theme-classy:not(:has(.landing)) .btn-primary:hover:not(:disabled) {
+  background: var(--brand-blue);
+}
+
+html.theme-classy:not(:has(.landing)) .btn-ghost {
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+}
+
+html.theme-classy:not(:has(.landing)) .status-pill.pass {
+  background: var(--success-bg);
+  color: var(--success-bright);
+}
+
+html.theme-classy:not(:has(.landing)) .status-pill.warning {
+  background: var(--warning-bg);
+  color: var(--warning-bright);
+}
+
+html.theme-classy:not(:has(.landing)) .status-pill.fail {
+  background: var(--critical-bg);
+  color: var(--critical-bright);
+}
+
+html.theme-classy:not(:has(.landing)) .structured-card,
+html.theme-classy:not(:has(.landing)) .bubble {
+  background: var(--surface-1);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-card);
+  border-radius: var(--radius-md);
+}
+
+html.theme-classy:not(:has(.landing)) .field-row,
+html.theme-classy:not(:has(.landing)) .metric-tile,
+html.theme-classy:not(:has(.landing)) .scorecard-body {
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(:has(.landing)) .pv-muted,
+html.theme-classy:not(:has(.landing)) .col-box h4,
+html.theme-classy:not(:has(.landing)) table.data th {
+  color: var(--text-muted);
+}
+
+html.theme-classy:not(:has(.landing)) .playground-phase-card,
+html.theme-classy:not(:has(.landing)) .playground-card {
+  background: var(--surface-1);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(:has(.landing)) .playground-hero h2,
+html.theme-classy:not(:has(.landing)) .playground-phase-label {
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(:has(.landing)) .playground-sub,
+html.theme-classy:not(:has(.landing)) .playground-empty {
+  color: var(--text-muted);
+}
+
+html.theme-classy.theme-light:not(:has(.landing)) {
+  color-scheme: light;
+  --bg-primary: #f4f6f8;
+  --bg-deep: #eef1f4;
+  --bg-raised: #ffffff;
+  --surface-1: #ffffff;
+  --surface-2: #f7f9fb;
+  --surface-3: #eef2f6;
+  --surface-active: #e8eef7;
+  --border-subtle: rgba(15, 23, 42, 0.06);
+  --border-default: rgba(15, 23, 42, 0.1);
+  --border-strong: rgba(15, 23, 42, 0.16);
+  --border-active: rgba(37, 99, 235, 0.45);
+  --border-success: rgba(22, 163, 74, 0.35);
+  --brand-blue: #2563eb;
+  --brand-blue-bright: #1d4ed8;
+  --brand-blue-dark: #1d4ed8;
+  --brand-blue-soft: rgba(37, 99, 235, 0.1);
+  --brand-blue-glow: rgba(37, 99, 235, 0.16);
+  --success: #16a34a;
+  --success-bright: #15803d;
+  --success-bg: rgba(22, 163, 74, 0.1);
+  --warning: #d97706;
+  --warning-bright: #b45309;
+  --warning-bg: rgba(217, 119, 6, 0.1);
+  --critical: #dc2626;
+  --critical-bright: #b91c1c;
+  --critical-bg: rgba(220, 38, 38, 0.1);
+  --info: #0891b2;
+  --ai: #7c3aed;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-disabled: #94a3b8;
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.06);
+  --shadow-floating: 0 8px 28px rgba(15, 23, 42, 0.1);
+  --bg: var(--bg-primary);
+  --card: var(--surface-1);
+  --ink: var(--text-primary);
+  --muted: var(--text-muted);
+  --line: var(--border-default);
+  --primary: var(--brand-blue);
+  --primary-deep: var(--brand-blue-dark);
+  --primary-bg: var(--brand-blue-soft);
+  --green: var(--success);
+  --green-bg: var(--success-bg);
+  --amber: var(--warning);
+  --amber-bg: var(--warning-bg);
+  --coral: var(--critical);
+  --coral-bg: var(--critical-bg);
+}
+
+html.theme-classy.theme-light:not(:has(.landing)) .btn-primary {
+  background: var(--brand-blue-dark);
+  color: #fff;
+}
+
+html.theme-classy.theme-light:not(:has(.landing)) .btn-ghost {
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+}

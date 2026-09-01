@@ -87,23 +87,27 @@ async def post_message_stream(
 
         async def _run_turn() -> tuple[list[dict], str | None]:
             async with AsyncSessionLocal() as stream_db:
-                sess = (
-                    await stream_db.execute(
-                        select(ChatSession).where(ChatSession.id == session_id_val)
+                try:
+                    sess = (
+                        await stream_db.execute(
+                            select(ChatSession).where(ChatSession.id == session_id_val)
+                        )
+                    ).scalar_one_or_none()
+                    usr = (
+                        await stream_db.execute(
+                            select(User).options(selectinload(User.role)).where(User.id == user_id)
+                        )
+                    ).scalar_one_or_none()
+                    if not sess or not usr:
+                        raise RuntimeError("Session/user not found")
+                    events = await process_chat_turn(
+                        stream_db, session=sess, user=usr, content=body.content
                     )
-                ).scalar_one_or_none()
-                usr = (
-                    await stream_db.execute(
-                        select(User).options(selectinload(User.role)).where(User.id == user_id)
-                    )
-                ).scalar_one_or_none()
-                if not sess or not usr:
-                    raise RuntimeError("Session/user not found")
-                events = await process_chat_turn(
-                    stream_db, session=sess, user=usr, content=body.content
-                )
-                await stream_db.commit()
-                return events, sess.active_agent_key
+                    await stream_db.commit()
+                    return events, sess.active_agent_key
+                except Exception:
+                    await stream_db.rollback()
+                    raise
 
         turn_task = asyncio.create_task(_run_turn())
         elapsed = 0
@@ -114,16 +118,16 @@ async def post_message_stream(
                     break
                 elapsed += 15
                 if elapsed <= 60:
-                    msg = "Still working… scoring competitors in parallel."
+                    msg = "Still working… this step talks to keyword and crawl APIs."
                 elif elapsed <= 180:
                     msg = (
-                        f"Still analyzing ({elapsed}s)… 16-parameter competitor "
-                        "scores take a couple of minutes."
+                        f"Still analyzing ({elapsed}s)… keyword research and "
+                        "site data can take a couple of minutes."
                     )
                 else:
                     msg = (
-                        f"Almost there ({elapsed}s)… finishing competitor tiers "
-                        "and recommendations."
+                        f"Almost there ({elapsed}s)… finishing scoring and "
+                        "the report card."
                     )
                 yield _sse(
                     {
@@ -134,7 +138,15 @@ async def post_message_stream(
 
             events, active_agent = turn_task.result()
         except Exception as exc:  # noqa: BLE001
-            yield _sse({"type": "error", "content": str(exc)[:300]})
+            # Prefer the original DB failure over the follow-on PendingRollbackError.
+            root = exc
+            cause = getattr(exc, "__cause__", None) or getattr(exc, "orig", None)
+            if cause is not None:
+                root = cause
+            msg = str(root) or str(exc)
+            if "rolled back" in msg.lower() and cause is not None:
+                msg = str(cause)
+            yield _sse({"type": "error", "content": msg[:400]})
             yield _sse({"type": "done"})
             return
 

@@ -147,7 +147,6 @@ async def compute_competitor_score(db: AsyncSession, client_id: UUID) -> tuple[D
 
 
 async def recompute_readiness(db: AsyncSession, client_id: UUID) -> ClientDigitalProfile:
-    settings = get_settings()
     scores = {
         "discovery": await compute_discovery_score(db, client_id),
         "tracking": await compute_tracking_score(db, client_id),
@@ -174,9 +173,8 @@ async def recompute_readiness(db: AsyncSession, client_id: UUID) -> ClientDigita
     )
     profile = result.scalar_one()
     profile.overall_readiness_score = Decimal(str(round(float(overall), 2)))
-    # Gate flip only via explicit QA approval — never auto
-    if profile.ready_for_phase5 and float(profile.overall_readiness_score) < settings.readiness_threshold:
-        profile.ready_for_phase5 = False
+    # Score is informational; Phase 5+ still require predecessor approve gates.
+    profile.ready_for_phase5 = True
     await db.flush()
     return profile
 
@@ -189,7 +187,7 @@ def readiness_payload(profile: ClientDigitalProfile, phase_scores: dict) -> dict
     return {
         "overall": float(profile.overall_readiness_score or 0),
         "threshold": settings.readiness_threshold,
-        "ready_for_phase5": profile.ready_for_phase5,
+        "ready_for_phase5": True,
         "phases": phase_scores,
         "missing": missing,
         "statuses": {
@@ -197,12 +195,15 @@ def readiness_payload(profile: ClientDigitalProfile, phase_scores: dict) -> dict
             "tracking": profile.tracking_status,
             "website": profile.website_status,
             "competitor": profile.competitor_status,
+            "search_demand": profile.search_demand_status,
+            "seo_strategy": profile.seo_strategy_status,
+            "site_architecture": profile.site_architecture_status,
+            "technical_seo": profile.technical_seo_status,
+            "content_audit": profile.content_audit_status,
+            "content_planning": profile.content_planning_status,
+            "content_production": profile.content_production_status,
+            "on_page_seo": profile.on_page_seo_status,
+            "publishing": profile.publishing_status,
         },
-        "can_gate": (
-            profile.discovery_status == "complete"
-            and profile.tracking_status == "complete"
-            and profile.website_status == "complete"
-            and profile.competitor_status == "complete"
-            and float(profile.overall_readiness_score or 0) >= settings.readiness_threshold
-        ),
+        "can_gate": False,
     }

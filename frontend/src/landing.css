@@ -1,15 +1,18 @@
 /* Radius OS marketing landing — scoped, scrollable */
 
 .landing {
-  --lp-ink: #071c1f;
-  --lp-muted: #3d565a;
-  --lp-cream: #e8f0ef;
-  --lp-teal: #028090;
-  --lp-teal-deep: #03565f;
-  --lp-sand: #c4a574;
-  --lp-surface: #f2f7f6;
-  --lp-font-display: "Fraunces", Georgia, serif;
-  --lp-font-body: "Manrope", system-ui, sans-serif;
+  /* Aliases, not copies. These were duplicate hex literals identical to the root
+     tokens, so retuning the brand teal in styles.css silently left the landing page
+     on the old colour. The --lp-* names stay so no markup changes. */
+  --lp-ink: var(--ink);
+  --lp-muted: var(--muted);
+  --lp-cream: var(--gray-bg);
+  --lp-teal: var(--primary);
+  --lp-teal-deep: var(--primary-deep);
+  --lp-sand: var(--sand);
+  --lp-surface: var(--bg);
+  --lp-font-display: var(--font-display);
+  --lp-font-body: var(--font-body);
   min-height: 100%;
   background: var(--lp-surface);
   color: var(--lp-ink);
@@ -70,7 +73,7 @@
 
 .landing-nav-cta {
   padding: 8px 16px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: rgba(255, 255, 255, 0.14);
   border: 1px solid rgba(255, 255, 255, 0.35);
   backdrop-filter: blur(8px);
@@ -313,6 +316,37 @@
   display: grid;
   gap: 0;
   border-top: 1px solid rgba(7, 28, 31, 0.12);
+}
+
+/* Separates the two kinds of phase without shouting — the distinction is the point,
+   so it gets a label rather than another colour. */
+.landing-group-label {
+  margin: 34px 0 10px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--lp-muted);
+}
+
+.landing-group-label:first-of-type {
+  margin-top: 26px;
+}
+
+/* Foundations are not a sequence, so they take a mark instead of a number:
+   a hollow square that reads as "a thing that sits underneath", not "step N". */
+.landing-phase-mark {
+  width: 11px;
+  height: 11px;
+  margin-top: 9px;
+  justify-self: start;
+  border: 2px solid var(--lp-sand);
+  border-radius: 2px;
+  background: transparent;
+}
+
+.landing-phase-list-flat .landing-phase-item {
+  grid-template-columns: 72px 1fr;
 }
 
 .landing-phase-item {

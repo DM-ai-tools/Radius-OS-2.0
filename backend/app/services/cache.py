@@ -20,7 +20,12 @@ def get_redis():
     try:
         import redis
 
-        _client = redis.Redis.from_url(settings.redis_url, decode_responses=True)
+        _client = redis.Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
         _client.ping()
         return _client
     except Exception as exc:  # noqa: BLE001

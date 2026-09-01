@@ -9,8 +9,9 @@ from app.models.findings import (
     TrackingAudit,
     WebsiteAudit,
 )
-from app.models.governance import AuditTrail, FindingsLedger, ReadinessScore
+from app.models.governance import AuditTrail, FindingsLedger, PhaseValidation, ReadinessScore
 from app.models.integrations import ApiCredential, ContentEmbedding
+from app.models.operations import ApiUsageLog
 
 __all__ = [
     "Role",
@@ -30,6 +31,8 @@ __all__ = [
     "FindingsLedger",
     "AuditTrail",
     "ReadinessScore",
+    "PhaseValidation",
     "ApiCredential",
     "ContentEmbedding",
+    "ApiUsageLog",
 ]

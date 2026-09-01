@@ -24,6 +24,49 @@ PARAMS = [
     ("ad_spend", "Ad Spend & Budget Intelligence", 0.06),
 ]
 
+# Architecture v1.9 — service-level comparison (not one composite only)
+SERVICE_CATEGORIES: dict[str, list[str]] = {
+    "seo": ["digital_presence", "brand_authority", "industry_specialization", "technology_stack"],
+    "google_ads": ["performance_marketing", "ad_spend", "growth_indicators"],
+    "meta": ["creative_strength", "performance_marketing", "digital_presence"],
+    "email_marketing": ["client_retention", "client_profile", "digital_presence"],
+    "cro": ["creative_strength", "technology_stack", "innovation"],
+}
+
+
+def service_scores_from_params(parameters: dict[str, dict[str, Any]]) -> dict[str, float]:
+    """Average 0–10 param scores into service categories (Architecture v1.9)."""
+    out: dict[str, float] = {}
+    for service, keys in SERVICE_CATEGORIES.items():
+        vals = []
+        for k in keys:
+            cell = parameters.get(k) or {}
+            try:
+                vals.append(float(cell.get("score", 0)))
+            except (TypeError, ValueError):
+                continue
+        out[service] = round(sum(vals) / len(vals), 1) if vals else 0.0
+    return out
+
+
+def best_competitor_by_service(
+    scorecards: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Pick the strongest competitor per service category."""
+    best: dict[str, dict[str, Any]] = {}
+    for s in scorecards:
+        services = s.get("service_scores") or service_scores_from_params(s.get("parameters") or {})
+        for svc, sc in services.items():
+            cur = best.get(svc)
+            if not cur or float(sc) > float(cur.get("score") or 0):
+                best[svc] = {
+                    "service": svc,
+                    "competitor": s.get("name"),
+                    "url": s.get("url"),
+                    "score": float(sc),
+                }
+    return best
+
 
 def _stable_score(seed: str, lo: int = 3, hi: int = 9) -> int:
     h = int(hashlib.md5(seed.encode()).hexdigest()[:8], 16)
@@ -78,7 +121,7 @@ async def score_entity_live(
     from app.config import get_settings
     from app.integrations.llm import synthesize_json
     from app.integrations.web_fetch import fetch_url, page_text_excerpt, parse_html
-    from app.skills import skill_system_preamble
+    from app.agents.prompts import skill_system_preamble
 
     if get_settings().use_mock_providers or get_settings().use_mock_llm:
         return score_entity(name, url, is_client=is_client, industry=industry)
@@ -91,6 +134,8 @@ async def score_entity_live(
     keys = [p[0] for p in PARAMS]
     labels = {p[0]: p[1] for p in PARAMS}
     industry_ctx = (industry or "infer from site — any vertical").strip()
+    # Architecture v1.9: Competitor Research forced to Gemini 2.5 Pro
+    competitor_model = get_settings().competitor_model
     payload = await synthesize_json(
         skill_system_preamble("competitor_market_agent")
         + "\n\nScore EACH of the 16 parameters on an INTEGER scale of 0 to 10 "
@@ -116,6 +161,7 @@ async def score_entity_live(
             f"Return JSON object keyed by: {keys}. Each value = "
             '{"score": <integer 0-10>, "evidence": "short string"}.'
         ),
+        model=competitor_model,
     )
     if not payload:
         # Still prefer mid-range over zeros when the live site was unreachable
@@ -295,11 +341,13 @@ async def build_tiered_analysis(
                 cs = score_entity(c["name"], c["url"], industry=industry)
             d = derived_scores(client_scores, cs)
             composite, tier, tier_name = composite_and_tier(d)
+            svc = service_scores_from_params(cs)
             return {
                 "name": c["name"],
                 "url": c["url"],
                 "source": c.get("source", "search"),
                 "parameters": cs,
+                "service_scores": svc,
                 "derived": d,
                 "composite": composite,
                 "tier": tier,
@@ -467,6 +515,12 @@ async def build_tiered_analysis(
         ],
     }
 
+    client_svc = service_scores_from_params(client_scores)
+    for s in scorecards:
+        if "service_scores" not in s:
+            s["service_scores"] = service_scores_from_params(s.get("parameters") or {})
+    by_service = best_competitor_by_service(relevant)
+
     from datetime import date
 
     return {
@@ -481,6 +535,16 @@ async def build_tiered_analysis(
             "url": resolved_client_url,
             "parameters": client_scores,
             "maturity_score": client_derived["client_maturity"],
+            "service_scores": client_svc,
+        },
+        "service_level_comparison": {
+            "categories": list(SERVICE_CATEGORIES.keys()),
+            "client": client_svc,
+            "best_by_service": by_service,
+            "note": (
+                "Architecture v1.9: benchmark each service against the competitor "
+                "that is strongest in that category — not one overall composite."
+            ),
         },
         "scorecards": relevant,
         "excluded_tier5": [{"name": s["name"], "composite": s["composite"]} for s in excluded],

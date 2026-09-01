@@ -81,47 +81,46 @@ export default function TrackingCard({
 
   if (cardType === "oauth_request") {
     const providers = (payload.providers || []) as string[];
-    const scopes = (payload.scopes || {}) as Record<string, string>;
     const providerStatus = (payload.provider_status || {}) as Record<string, string>;
     return (
       <CardShell payload={payload}>
         <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
-          {String(payload.message || "")}
+          {String(
+            payload.message ||
+              "Google APIs are optional. Skip them — tracking continues from live-site HTML."
+          )}
         </p>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
           {providers.map((p) => (
             <div key={p} className="field-row">
               <div className="key">
                 {p.replaceAll("_", " ")}{" "}
                 <span className="status-pill unverified">
-                  {providerStatus[p] || "Not granted"}
+                  {providerStatus[p] || "Skipped"}
                 </span>
               </div>
-              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>
-                {scopes[p] || "read access"}
-              </div>
-              <button
-                className="btn btn-secondary"
-                disabled={!canGrant}
-                onClick={() => onGrant(p)}
-              >
-                Connect {p.replaceAll("_", " ")}
-              </button>
             </div>
           ))}
         </div>
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={!canGrant}
+          onClick={() => onGrant("skip")}
+        >
+          Continue without Google
+        </button>
       </CardShell>
     );
   }
 
   if (cardType === "tracking_t1_access") {
     const platforms = (payload.platforms || []) as Platform[];
-    const oauthKeys = new Set(["ga4", "search_console", "gtm", "google_business"]);
     return (
       <CardShell payload={payload}>
         <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
-          Requests credentials and runs a connection test per platform — access must be
-          active, not just requested.
+          Google platforms are optional. CMS/hosting notes come from the CDD. Tag checks
+          use the live site — no GA4 / GSC / GTM login required.
         </p>
         <div className="table-wrap">
           <table className="data">
@@ -130,7 +129,6 @@ export default function TrackingCard({
                 <th>Platform</th>
                 <th>Status</th>
                 <th>Detail</th>
-                <th />
               </tr>
             </thead>
             <tbody>
@@ -144,18 +142,6 @@ export default function TrackingCard({
                     </span>
                   </td>
                   <td style={{ fontSize: 12, color: "var(--muted)" }}>{p.detail}</td>
-                  <td>
-                    {oauthKeys.has(p.key) && p.status !== "connected" ? (
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        disabled={!canGrant}
-                        onClick={() => onGrant(p.key)}
-                      >
-                        Connect
-                      </button>
-                    ) : null}
-                  </td>
                 </tr>
               ))}
             </tbody>

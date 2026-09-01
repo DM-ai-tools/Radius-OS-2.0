@@ -11,9 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.integrations.providers import validate_tracking
 from app.integrations.web_fetch import detect_tracking_snippets, fetch_url, parse_html
 from app.ml.scoring import tracking_anomaly_flags
-from app.models import ApiCredential, Client, ClientDigitalProfile, FindingsLedger, TrackingAudit
+from app.models import ApiCredential, Client, FindingsLedger, TrackingAudit
+from app.services.agent_runtime import get_profile
 from app.services.audit import log_event
 from app.services.readiness import compute_tracking_score, recompute_readiness
+from app.services.role_skills import required_role_for
 from app.services.tracking_workflow import (
     KNOWN_CHANGE_FIELDS,
     build_t1_platforms,
@@ -22,7 +24,7 @@ from app.services.tracking_workflow import (
     build_t4_baseline,
     compute_tracking_blockers,
 )
-from app.skills import load_skill
+from app.agents.prompts import load_skill
 
 PROVIDER_ELEMENTS = {
     "ga4": ("ga4_base_tag", "conversion_event", "cross_domain_tracking"),
@@ -63,11 +65,26 @@ async def run_tracking(
     _ = load_skill("tracking_access_agent")
     _ = session_id, user_id
     events: list[dict] = []
-    profile = (
-        await db.execute(
-            select(ClientDigitalProfile).where(ClientDigitalProfile.client_id == client.id)
+    profile = await get_profile(db, client.id)
+
+    from app.services.agent_handoff import blocked_events, consume_events
+
+    events.extend(
+        consume_events(
+            "tracking_access_agent",
+            pack_notes=[f"discovery={profile.discovery_status}"],
         )
-    ).scalar_one()
+    )
+    if profile.discovery_status != "complete":
+        events.extend(
+            blocked_events(
+                "tracking_access_agent",
+                "Approve Phase 1 Discovery first so tracking uses locked commercial scope.",
+                route_to="discovery_agent",
+            )
+        )
+        return events
+
     profile.tracking_status = "in_progress"
 
     scope = _scoped_providers(message)
@@ -141,26 +158,13 @@ async def run_tracking(
     if missing_oauth:
         events.append(
             {
-                "type": "structured_card",
-                "payload": {
-                    "card_type": "oauth_request",
-                    "title": "T1 — Grant OAuth access",
-                    "step": "T1",
-                    "mode": "AUTOMATED",
-                    "providers": missing_oauth,
-                    "provider_status": provider_status,
-                    "scopes": {
-                        "ga4": "read — verify conversion events are firing correctly",
-                        "search_console": "read — confirm property verification and query data",
-                        "gtm": "read — compare live container vs latest published version",
-                        "google_business": "manage — verify GBP access and location data",
-                    },
-                    "message": (
-                        "Connect with Google for the platforms below. "
-                        "Missing access is marked unverified — the pipeline continues."
-                    ),
-                    "agent_key": "tracking_access_agent",
-                },
+                "type": "system_notice",
+                "content": (
+                    "Google APIs not connected ("
+                    + ", ".join(missing_oauth)
+                    + "). Continuing without GA4 / GSC / GTM / Business Profile — "
+                    "tag checks use live-site HTML only. Historical metrics stay empty."
+                ),
             }
         )
 
@@ -396,11 +400,7 @@ async def build_tracking_signoff_events(
 ) -> list[dict]:
     """T6 — Readiness scoring & sign-off after known-changes submitted."""
     events: list[dict] = []
-    profile = (
-        await db.execute(
-            select(ClientDigitalProfile).where(ClientDigitalProfile.client_id == client_id)
-        )
-    ).scalar_one()
+    profile = await get_profile(db, client_id)
     client = (await db.execute(select(Client).where(Client.id == client_id))).scalar_one()
 
     if known_changes is not None:
@@ -457,7 +457,7 @@ async def build_tracking_signoff_events(
         "rows": rows_out,
         "agent_key": "tracking_access_agent",
         "actions": ["approve", "flag_for_client"],
-        "required_role": "technical_seo_specialist",
+        "required_role": required_role_for("tracking_access_agent"),
     }
 
     events.append(

@@ -45,7 +45,7 @@ const TIER_LABELS: Record<string, string> = {
   "4": "TIER 4 — LOCAL COMPETITORS (Aware, Not Primary Focus)",
 };
 
-export default function CompetitorCard({ payload, canAct, onAction }: Props) {
+export default function CompetitorCard({ payload, canAct, onAction, onAddManual }: Props) {
   const tierOverview = (payload.tier_overview || []) as TierRow[];
   const scorecards = (payload.scorecards || []) as Scorecard[];
   const recommendations = (payload.recommendations || {}) as {
@@ -59,6 +59,13 @@ export default function CompetitorCard({ payload, canAct, onAction }: Props) {
     name?: string;
     url?: string;
     parameters?: Record<string, ParamScore>;
+    service_scores?: Record<string, number>;
+  };
+  const serviceLevel = (payload.service_level_comparison || {}) as {
+    categories?: string[];
+    client?: Record<string, number>;
+    best_by_service?: Record<string, { competitor?: string; score?: number }>;
+    note?: string;
   };
   const heatmap = (payload.heatmap || {}) as {
     labels?: string[];
@@ -90,17 +97,50 @@ export default function CompetitorCard({ payload, canAct, onAction }: Props) {
   );
   const [showHeatmap, setShowHeatmap] = useState(true);
   const [showMonitoring, setShowMonitoring] = useState(true);
+  const [manualName, setManualName] = useState("");
+  const [manualUrl, setManualUrl] = useState("");
 
   const target = (payload.target_business || {}) as { name?: string; url?: string };
   const sources = (payload.discovery_sources || []) as string[];
+  const inviteManual = Boolean(payload.invite_manual) || Boolean(onAddManual);
 
   if (payload.empty) {
     return (
       <div className="structured-card checkpoint competitor">
         <h3 className="card-title">Tiered Competitor Parameter Analysis</h3>
         <p style={{ fontSize: 13, color: "var(--muted)" }}>
-          No competitors found automatically yet. Re-run competitor analysis after discovery.
+          No competitors found automatically yet. Add Discovery competitors or re-run after
+          industry context is set (Architecture v1.9 operator override).
         </p>
+        {inviteManual && onAddManual ? (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            <input
+              placeholder="Competitor name"
+              value={manualName}
+              onChange={(e) => setManualName(e.target.value)}
+              style={{ flex: 1, minWidth: 120 }}
+            />
+            <input
+              placeholder="https://…"
+              value={manualUrl}
+              onChange={(e) => setManualUrl(e.target.value)}
+              style={{ flex: 2, minWidth: 160 }}
+            />
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                if (manualName.trim() && manualUrl.trim()) {
+                  onAddManual(manualName.trim(), manualUrl.trim());
+                  setManualName("");
+                  setManualUrl("");
+                }
+              }}
+            >
+              Add competitor
+            </button>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -126,6 +166,26 @@ export default function CompetitorCard({ payload, canAct, onAction }: Props) {
           <p style={{ fontSize: 13, lineHeight: 1.5, margin: 0 }}>
             {String(payload.executive_summary)}
           </p>
+        </section>
+      ) : null}
+
+      {serviceLevel.best_by_service && Object.keys(serviceLevel.best_by_service).length ? (
+        <section className="report-section">
+          <h4>Service-level comparison (v1.9)</h4>
+          {serviceLevel.note ? (
+            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>{serviceLevel.note}</p>
+          ) : null}
+          <ul className="missing-list">
+            {Object.entries(serviceLevel.best_by_service).map(([svc, row]) => (
+              <li key={svc}>
+                <strong>{svc}</strong>: best = {String(row.competitor || "—")} (
+                {String(row.score ?? "—")}/10)
+                {serviceLevel.client?.[svc] != null
+                  ? ` · client ${serviceLevel.client[svc]}/10`
+                  : ""}
+              </li>
+            ))}
+          </ul>
         </section>
       ) : null}
 
@@ -515,6 +575,43 @@ export default function CompetitorCard({ payload, canAct, onAction }: Props) {
           Tier 5 excluded from detail: {excluded.map((e) => e.name).join(", ")}
         </p>
       )}
+
+      {inviteManual && onAddManual ? (
+        <section className="report-section">
+          <h4>Operator override — add competitor</h4>
+          <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
+            Architecture v1.9: Discovery-listed competitors are scored first; auto-discovery
+            supplements when fewer than six are on file. Add more here for the next scan.
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input
+              placeholder="Competitor name"
+              value={manualName}
+              onChange={(e) => setManualName(e.target.value)}
+              style={{ flex: 1, minWidth: 120 }}
+            />
+            <input
+              placeholder="https://…"
+              value={manualUrl}
+              onChange={(e) => setManualUrl(e.target.value)}
+              style={{ flex: 2, minWidth: 160 }}
+            />
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => {
+                if (manualName.trim() && manualUrl.trim()) {
+                  onAddManual(manualName.trim(), manualUrl.trim());
+                  setManualName("");
+                  setManualUrl("");
+                }
+              }}
+            >
+              Add for next run
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {canAct && (
         <div className="card-actions">

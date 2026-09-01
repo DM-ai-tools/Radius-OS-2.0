@@ -11,10 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.integrations.llm import live_pre_research
 from app.models import (
     Client,
-    ClientDigitalProfile,
     DiscoveryResponse,
     FindingsLedger,
 )
+from app.services.agent_runtime import get_profile
 from app.services.audit import log_event
 from app.services.discovery_fields import (
     CLIENT_ONLY_FIELDS,
@@ -24,7 +24,8 @@ from app.services.discovery_fields import (
     field_ui_meta,
 )
 from app.services.readiness import compute_discovery_score, recompute_readiness
-from app.skills import load_skill
+from app.services.role_skills import required_role_for
+from app.agents.prompts import load_skill
 
 
 def _conf_label(confidence: float | None) -> str:
@@ -48,11 +49,7 @@ async def run_discovery(
     """Execute D1 + D2 emission. D3/D4 follow questionnaire submit. D5 on approve."""
     _ = load_skill("discovery_agent")  # ensure skill contract is loadable
     events: list[dict] = []
-    profile = (
-        await db.execute(
-            select(ClientDigitalProfile).where(ClientDigitalProfile.client_id == client.id)
-        )
-    ).scalar_one()
+    profile = await get_profile(db, client.id)
 
     lowered = message.lower()
     confirm_rerun = any(
@@ -84,7 +81,7 @@ async def run_discovery(
                     "prior_marketing_context": profile.marketing_context or {},
                     "agent_key": "discovery_agent",
                     "actions": [],
-                    "required_role": "client_success_manager",
+                    "required_role": required_role_for("discovery_agent"),
                     "hint": 'Type: confirm re-run discovery',
                 },
             }
@@ -115,9 +112,14 @@ async def run_discovery(
         client.primary_url,
         industry=client.industry,
     )
-    discrepancy_by_field = {
-        d["field_key"]: d["explanation"] for d in research.get("discrepancies", [])
-    }
+    discrepancy_by_field = {}
+    for item in research.get("discrepancies") or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("field_key") or "").strip()
+        if not key:
+            continue
+        discrepancy_by_field[key] = str(item.get("explanation") or "").strip()
 
     # Persist inferred industry so competitor/tracking phases stay vertical-aware
     inferred_payload = research.get("inferred_industry") or {}
@@ -137,12 +139,14 @@ async def run_discovery(
     for field_key, payload in research.items():
         if field_key == "discrepancies":
             continue
-        conf = float(payload.get("confidence", 0.5))
+        if not isinstance(payload, dict):
+            payload = {"value": payload, "confidence": 0.3}
+        conf = float(payload.get("confidence", 0.5) or 0.5)
         row = DiscoveryResponse(
             client_id=client.id,
             source="pre_research",
             field_key=field_key,
-            field_value={"value": payload["value"]},
+            field_value={"value": payload.get("value")},
             confidence=Decimal(str(conf)),
             discrepancy_flag=field_key in discrepancy_by_field,
             status="pending",
@@ -150,7 +154,7 @@ async def run_discovery(
         db.add(row)
         research_rows.append(row)
         draft_fields[field_key] = {
-            "value": payload["value"],
+            "value": payload.get("value"),
             "confidence": _conf_label(conf),
             "confidence_score": conf,
             "source": "pre_research",
@@ -211,7 +215,7 @@ async def run_discovery(
         "discrepancies": research.get("discrepancies", []),
         "agent_key": "discovery_agent",
         "actions": [],
-        "required_role": "client_success_manager",
+        "required_role": required_role_for("discovery_agent"),
         "step": "D1",
     }
     events.append(
@@ -298,7 +302,7 @@ async def run_discovery(
         "field_catalog": field_ui_meta(),
         "agent_key": "discovery_agent",
         "actions": ["submit_questionnaire", "upload_cdd"],
-        "required_role": "client_success_manager",
+        "required_role": required_role_for("discovery_agent"),
         "step": "D2",
         "prior_approved": (
             {
@@ -346,11 +350,7 @@ async def build_discovery_signoff_events(
 ) -> list[dict]:
     """D3 completeness + D4 sign-off cards after questionnaire submit."""
     events: list[dict] = []
-    profile = (
-        await db.execute(
-            select(ClientDigitalProfile).where(ClientDigitalProfile.client_id == client_id)
-        )
-    ).scalar_one()
+    profile = await get_profile(db, client_id)
     client = (
         await db.execute(select(Client).where(Client.id == client_id))
     ).scalar_one()
@@ -381,7 +381,9 @@ async def build_discovery_signoff_events(
     # Enrich discrepancies when research != confirmed
     for key, cval in confirmed.items():
         if key in from_research and from_research[key] != cval:
-            if not any(d["field_key"] == key for d in discrepancies):
+            if not any(
+                isinstance(d, dict) and d.get("field_key") == key for d in discrepancies
+            ):
                 discrepancies.append(
                     {
                         "field_key": key,
@@ -433,7 +435,7 @@ async def build_discovery_signoff_events(
         "missing_fields": missing,
         "agent_key": "discovery_agent",
         "actions": ["approve", "edit", "reject"],
-        "required_role": "client_success_manager",
+        "required_role": required_role_for("discovery_agent"),
         "client_name": client.display_name,
         "step": "D4",
     }

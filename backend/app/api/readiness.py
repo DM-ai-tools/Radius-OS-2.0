@@ -3,11 +3,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.config import get_settings
 from app.db import get_db
-from app.deps import get_current_user, require_permission
+from app.deps import get_current_user
 from app.models import ClientDigitalProfile, User
 from app.schemas.session import ReadinessGateRequest
 from app.services.audit import log_event
@@ -59,48 +57,24 @@ async def readiness_gate(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    user = (
-        await db.execute(select(User).options(selectinload(User.role)).where(User.id == user.id))
-    ).scalar_one()
-    await require_permission(user, db, "readiness_gate", need_approve=True)
-    settings = get_settings()
+    """Deprecated: recomputes readiness score for older clients.
+
+    Unlock is informational — Phase 5+ still hard-gate on predecessor approve.
+    """
+    _ = body
     profile = await recompute_readiness(db, client_id)
     await db.refresh(profile)
-
-    if body.approve:
-        statuses = [
-            profile.discovery_status,
-            profile.tracking_status,
-            profile.website_status,
-            profile.competitor_status,
-        ]
-        if any(s != "complete" for s in statuses):
-            raise HTTPException(400, "All four phases must be complete before the gate")
-        if float(profile.overall_readiness_score or 0) < settings.readiness_threshold:
-            raise HTTPException(
-                400,
-                f"Readiness score {profile.overall_readiness_score} below threshold "
-                f"{settings.readiness_threshold}",
-            )
-        profile.ready_for_phase5 = True
-        await log_event(
-            db,
-            client_id=client_id,
-            actor_type="user",
-            actor_id=user.id,
-            event_type="readiness_gate_passed",
-            event_detail={"score": float(profile.overall_readiness_score or 0), "note": body.note},
-        )
-    else:
-        profile.ready_for_phase5 = False
-        await log_event(
-            db,
-            client_id=client_id,
-            actor_type="user",
-            actor_id=user.id,
-            event_type="readiness_gate_rejected",
-            event_detail={"note": body.note},
-        )
+    await log_event(
+        db,
+        client_id=client_id,
+        actor_type="user",
+        actor_id=user.id,
+        event_type="readiness_recomputed",
+        event_detail={
+            "score": float(profile.overall_readiness_score or 0),
+            "ready_for_phase5": profile.ready_for_phase5,
+        },
+    )
     await db.flush()
     return {
         "ready_for_phase5": profile.ready_for_phase5,

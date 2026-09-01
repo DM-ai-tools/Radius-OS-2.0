@@ -21,6 +21,7 @@ class FindingsLedger(Base):
     source_id: Mapped[uuid.UUID] = mapped_column(GUID(), nullable=False)
     confidence: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, default="pending", index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -53,4 +54,26 @@ class ReadinessScore(Base):
     missing_fields: Mapped[dict | None] = mapped_column(JSONType)
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class PhaseValidation(Base):
+    """Traceable QC result for a phase output iteration."""
+
+    __tablename__ = "phase_validations"
+
+    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("clients.id"), nullable=False, index=True
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("chat_sessions.id"), nullable=True, index=True
+    )
+    agent_key: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    iteration: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    decision: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    result: Mapped[dict | None] = mapped_column(JSONType)
+    output_fingerprint: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
     )

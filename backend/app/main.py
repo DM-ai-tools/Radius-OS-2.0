@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, chat, clients, findings, oauth, readiness, sessions
+from app.api import auth, chat, clients, cost_tracker, engine_room, findings, integrations, oauth, readiness, sessions, technical_seo, workbook
 from app.config import get_settings
 from app.db import Base, AsyncSessionLocal, engine
 from app.logging_config import get_logger, setup_logging
@@ -21,17 +21,23 @@ settings = get_settings()
 
 
 def _resolve_static_dir() -> Path | None:
-    """Return SPA build dir when present (production Docker); None in API-only/dev."""
+    """Return SPA build dir when present (production Docker); None in API-only/dev.
+
+    In local development, auto-serving ``frontend/dist`` causes 404s on hashed
+    Vite assets when the live UI is on the Vite dev server (5173). Only serve
+    static when ``STATIC_DIR`` is set or ``ENVIRONMENT=production``.
+    """
     candidates: list[Path] = []
     if settings.static_dir:
         candidates.append(Path(settings.static_dir))
-    candidates.extend(
-        [
-            Path("/app/static"),
-            Path(__file__).resolve().parent.parent / "static",
-            Path(__file__).resolve().parents[2] / "frontend" / "dist",
-        ]
-    )
+    if settings.environment == "production":
+        candidates.extend(
+            [
+                Path("/app/static"),
+                Path(__file__).resolve().parent.parent / "static",
+                Path(__file__).resolve().parents[2] / "frontend" / "dist",
+            ]
+        )
     seen: set[str] = set()
     for path in candidates:
         key = str(path)
@@ -53,6 +59,9 @@ async def lifespan(_: FastAPI):
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+            from app.db import ensure_phase56_columns
+
+            await ensure_phase56_columns()
             async with AsyncSessionLocal() as db:
                 await seed_all(db, seed_demo_data=settings.environment != "production")
                 await db.commit()
@@ -85,7 +94,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Radius OS Onboarding & Audit Agent",
-    description="Phase 1–4 orchestration API",
+    description="Phase 1–6 orchestration API",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -104,8 +113,13 @@ app.include_router(clients.router, prefix=prefix)
 app.include_router(sessions.router, prefix=prefix)
 app.include_router(findings.router, prefix=prefix)
 app.include_router(oauth.router, prefix=prefix)
+app.include_router(integrations.router, prefix=prefix)
 app.include_router(readiness.router, prefix=prefix)
 app.include_router(chat.router, prefix=prefix)
+app.include_router(engine_room.router, prefix=prefix)
+app.include_router(cost_tracker.router, prefix=prefix)
+app.include_router(technical_seo.router, prefix=prefix)
+app.include_router(workbook.router, prefix=prefix)
 
 
 @app.get("/health")
@@ -116,28 +130,36 @@ async def health():
     Postgres/Redis status is reported in the body for diagnostics; Railway only
     needs a successful HTTP response to mark the replica healthy.
     """
+    import asyncio
+
     from sqlalchemy import text
 
     from app.services.cache import get_redis
 
     db_ok = False
     redis_ok = False
-    try:
+
+    async def _check_db() -> bool:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
-            db_ok = True
+        return True
+
+    try:
+        db_ok = await asyncio.wait_for(_check_db(), timeout=3)
     except Exception:  # noqa: BLE001
         db_ok = False
     try:
-        r = get_redis()
-        redis_ok = bool(r and r.ping())
+        # Sync Redis must not block the event loop (socket timeouts on client).
+        r = await asyncio.to_thread(get_redis)
+        redis_ok = bool(r and await asyncio.to_thread(r.ping))
     except Exception:  # noqa: BLE001
         redis_ok = False
     static = _resolve_static_dir()
     status = "ok" if db_ok and redis_ok else "degraded"
     return {
         "status": status,
-        "service": "radius-os-phase1-4",
+        "service": "radius-os-phase1-6",
+        "build": "ungated-phase56",
         "postgres": db_ok,
         "redis": redis_ok,
         "spa": static is not None,
@@ -153,6 +175,7 @@ _API_PREFIXES = {
     "redoc",
     "openapi.json",
     "assets",
+    "media",
 }
 
 
@@ -181,6 +204,10 @@ if _static_dir is not None:
     if _assets.is_dir():
         app.mount("/assets", StaticFiles(directory=_assets), name="spa-assets")
     log.info("spa_static_enabled", path=str(_static_dir))
+
+_draft_media = Path(__file__).resolve().parents[1] / "data" / "draft_images"
+_draft_media.mkdir(parents=True, exist_ok=True)
+app.mount("/media/drafts", StaticFiles(directory=_draft_media), name="draft-images")
 
 
 @app.get("/{full_path:path}")

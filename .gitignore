@@ -12,6 +12,7 @@ backend/tests/*.db
 node_modules/
 frontend/dist/
 frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
 .DS_Store
 *.log
 .coverage
@@ -22,3 +23,14 @@ htmlcov/
 *.swp
 *.swo
 .railway/
+.gstack/
+.claude/
+
+# Local editor / tool caches
+backend/.pytest_cache/
+
+backend/data/draft_images/
+
+# Generated report artifacts from local runs
+*.pdf
+!docs/**/*.pdf

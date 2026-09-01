@@ -1,8 +1,38 @@
-# Radius OS Onboarding & Audit Agent (Phases 1–4)
+# Radius OS — SearchFit SEO Agentic Onboarding (Phases 1–12)
 
-Chat-based agentic application that walks Traffic Radius specialists through Business Discovery, Tracking & Access, Website Situation Analysis, and Competitor & Market Analysis until a human-approved **Client Digital Profile** is ready for Phase 5.
+Chat-based agentic application that walks Traffic Radius specialists from Business Discovery through Publishing & Indexation. Human-approved **Client Digital Profile** summaries feed each later phase via shared memory.
 
-Documentation sources in this folder: `01_TRD`, `02_PRD`, `03_Backend_Schema`, `04_UIUX_Design`, `05_App_Flow`, plus architecture HTML references.
+**Shipped phases:** 01 Discovery → 02 Tracking → 03 Website → 04 Competitor → 05 Keywords → 06a Strategy / 06b Architecture → 07 Technical SEO → 08 Content Audit → 09 Page Planning → 10 Briefs & Drafts → 11 On-Page → 12 Publishing (mock CMS / IndexNow preview).
+
+## Repository layout
+
+```text
+Radius OP/
+├── frontend/                 # React + Vite SPA
+├── backend/
+│   ├── app/
+│   │   ├── agents/           # Phase runners + their SKILL.md prompts, side by side
+│   │   ├── api/              # FastAPI routers
+│   │   ├── services/         # Business logic
+│   │   ├── models/ schemas/ integrations/ orchestration/ tasks/ ml/
+│   │   └── main.py
+│   ├── alembic/              # Migrations
+│   ├── scripts/              # Backend CLIs (e.g. architecture audit)
+│   └── tests/
+├── docs/
+│   ├── product/              # TRD, PRD, schema, UI/UX, flow, agent prompts, briefs
+│   ├── architecture/         # SEO architecture / skills coverage HTML
+│   ├── archive/              # Legacy non-runtime artifacts
+│   └── superpowers/          # Internal plans
+├── scripts/                  # start.sh, setup_postgres.ps1
+├── Dockerfile                # Production API + SPA (Railway)
+├── docker-compose.yml
+└── .env.example
+```
+
+Product docs: [`docs/product/`](docs/product/) (`01_TRD` … `06_Agent_Build`, leadership briefs).  
+Architecture references: [`docs/architecture/`](docs/architecture/).  
+Runtime prompts (SKILL.md) live alongside each agent's code under [`backend/app/agents/`](backend/app/agents/) — e.g. `agents/discovery-agent/SKILL.md` next to `agents/discovery.py`.
 
 ## Stack
 
@@ -79,7 +109,10 @@ The production image serves the React SPA from FastAPI on Railway’s `PORT`.
 2. Ask “run tracking check” → grant access → re-run → Approve baseline.
 3. Ask “run website situation analysis” → Approve.
 4. Ask “run competitor analysis” → Approve landscape.
-5. Ask “readiness gate” → when score ≥ 90 and all phases complete → Ready for Phase 5.
+5. Ask “run technical SEO” → Approve.
+6. Continue through content audit → planning → briefs → on-page → publishing checklist (Phases 8–12).
+
+Phases 13–17 (Local, Links/PR, CRO, Reporting, Continuous) are out of scope for this build.
 
 ## API surface
 

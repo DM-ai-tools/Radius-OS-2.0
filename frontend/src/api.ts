@@ -1,37 +1,101 @@
 const API = import.meta.env.VITE_API_URL || "";
 
-async function request<T>(
-  path: string,
-  opts: RequestInit & { token?: string | null } = {}
-): Promise<T> {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(opts.headers as Record<string, string>),
-  };
-  // Always send JWT when present (auth is enabled)
-  if (opts.token) {
-    headers.Authorization = `Bearer ${opts.token}`;
+function friendlyApiError(detail: unknown, fallback: string): string {
+  const text =
+    typeof detail === "string"
+      ? detail
+      : Array.isArray(detail)
+        ? detail[0]?.msg
+        : fallback;
+  if (!text || text === "Internal Server Error" || text === "Request failed") {
+    return "The API was unavailable (it may have been restarting). Refresh the page and try again.";
   }
+  return text;
+}
+
+// Vestigial sentinel: nothing in the app ever sets the token to "demo", but an older
+// build did. Four call sites checked for it and skipped auth while every other call
+// would have sent `Bearer demo`. Centralised here so all paths agree.
+const DEMO_TOKEN = "demo";
+
+type RequestOpts = RequestInit & { token?: string | null; timeoutMs?: number };
+
+/** Shared transport: headers, auth, timeout, and error shape. Returns the raw Response
+ *  so streaming and blob callers can use the same path as JSON ones. */
+async function requestRaw(path: string, opts: RequestOpts = {}): Promise<Response> {
+  const { token, timeoutMs, ...fetchOpts } = opts;
+  // FormData must set its own multipart boundary — forcing JSON here breaks uploads.
+  const isFormData =
+    typeof FormData !== "undefined" && fetchOpts.body instanceof FormData;
+  const headers: Record<string, string> = {
+    ...(isFormData ? {} : { "Content-Type": "application/json" }),
+    ...(fetchOpts.headers as Record<string, string>),
+  };
+  if (token && token !== DEMO_TOKEN) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  const controller = new AbortController();
+  // timeoutMs 0 = no abort (SSE / long agent runs). Default 20s is time-to-headers only.
+  const ms = timeoutMs === undefined ? 20_000 : timeoutMs;
+  const timer =
+    ms > 0 ? setTimeout(() => controller.abort(), ms) : null;
   let res: Response;
   try {
-    res = await fetch(`${API}${path}`, { ...opts, headers });
-  } catch {
+    res = await fetch(`${API}${path}`, {
+      ...fetchOpts,
+      headers,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error(
+        "The API took too long to respond. Check that the backend on port 8000 is healthy, then try again."
+      );
+    }
     throw new Error(
       "Cannot reach the API server. Make sure the backend is running on port 8000."
     );
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    const detail = err.detail;
-    throw new Error(
-      typeof detail === "string"
-        ? detail
-        : Array.isArray(detail)
-          ? detail[0]?.msg
-          : "Request failed"
-    );
+    throw new Error(friendlyApiError(err.detail, "Request failed"));
   }
-  return res.json();
+  return res;
+}
+
+async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
+  const res = await requestRaw(path, opts);
+  // 204 and other empty bodies are valid responses (e.g. DELETE); res.json() throws.
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+export type ReportDownloadFormat = "pdf" | "docx";
+
+/** Fetch a report file (PDF or Word) and hand it to the browser's downloader.
+ *  Returns the saved filename. */
+async function downloadReportFile(
+  path: string,
+  token: string | null,
+  fallbackName: string
+): Promise<string> {
+  // Server-side rendering of a full report bundle exceeds the default budget.
+  const res = await requestRaw(path, { token, timeoutMs: 120_000 });
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const filename = disposition.match(/filename="([^"]+)"/i)?.[1] || fallbackName;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+  return filename;
 }
 
 export type Permission = {
@@ -65,6 +129,7 @@ export type PlaygroundSection = {
   status: string;
   empty_hint: string;
   data: unknown;
+  report_kind?: string;
 };
 
 export type Playground = {
@@ -74,6 +139,91 @@ export type Playground = {
   permissions: Permission[];
   allowed_skills: { agent_key: string; label: string }[];
   sections: PlaygroundSection[];
+};
+
+export type EngineRoomPayload = {
+  generated_at: string;
+  window_days: number;
+  summary: {
+    agents_total: number;
+    agents_ok: number;
+    open_issues: number;
+    api_calls: number;
+    estimated_cost_usd: number;
+    clients: number;
+  };
+  agents: Array<{
+    agent_key: string;
+    label: string;
+    phase: number | null;
+    registered: boolean;
+    feature_enabled: boolean;
+    status: string;
+  }>;
+  integrations: Array<{ provider: string; configured: boolean; mock: boolean }>;
+  recent_jobs: Array<Record<string, unknown>>;
+  validation_issues: Array<Record<string, unknown>>;
+  api_errors: Array<Record<string, unknown>>;
+  recent_api_calls: Array<Record<string, unknown>>;
+  cost_by_provider: Array<{ provider: string; cost_usd: number; calls: number }>;
+  cost_by_agent: Array<{ agent_key: string; cost_usd: number; calls: number }>;
+  issues: Array<{
+    severity: string;
+    source: string;
+    agent_key?: string;
+    message: string;
+    at: string | null;
+  }>;
+  feature_flags: Record<string, boolean>;
+};
+
+export type CostTrackerPayload = {
+  generated_at: string;
+  window_days: number;
+  summary: {
+    api_calls: number;
+    estimated_cost_usd: number;
+    clients_with_usage: number;
+  };
+  cost_by_vendor: Array<{ vendor: string; cost_usd: number; calls: number }>;
+  cost_by_model: Array<{
+    vendor: string;
+    provider: string;
+    model: string;
+    cost_usd: number;
+    calls: number;
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+  }>;
+  cost_by_provider: Array<{ provider: string; cost_usd: number; calls: number }>;
+  cost_by_agent: Array<{ agent_key: string; cost_usd: number; calls: number }>;
+  cost_by_client: Array<{
+    client_id: string | null;
+    client_name: string;
+    cost_usd: number;
+    calls: number;
+  }>;
+  recent_api_calls: Array<Record<string, unknown>>;
+};
+
+export type ClientCostPayload = {
+  client_id: string;
+  window_days: number;
+  estimated_cost_usd: number;
+  call_count: number;
+  cost_by_vendor: Array<{ vendor: string; cost_usd: number; calls: number }>;
+  cost_by_model: Array<{
+    vendor: string;
+    provider: string;
+    model: string;
+    cost_usd: number;
+    calls: number;
+    prompt_tokens?: number | null;
+    completion_tokens?: number | null;
+  }>;
+  cost_by_provider: Array<{ provider: string; cost_usd: number; calls: number }>;
+  cost_by_agent: Array<{ agent_key: string; cost_usd: number; calls: number }>;
+  calls: Array<Record<string, unknown>>;
 };
 
 export type Client = {
@@ -93,6 +243,15 @@ export type Profile = {
   tracking_status: string;
   website_status: string;
   competitor_status: string;
+  search_demand_status?: string;
+  seo_strategy_status?: string;
+  site_architecture_status?: string;
+  technical_seo_status?: string;
+  content_audit_status?: string;
+  content_planning_status?: string;
+  content_production_status?: string;
+  on_page_seo_status?: string;
+  publishing_status?: string;
   overall_readiness_score: number | null;
   ready_for_phase5: boolean;
   commercial_scope?: Record<string, unknown>;
@@ -100,7 +259,25 @@ export type Profile = {
   tracking_baseline?: Record<string, unknown>;
   website_situation_summary?: Record<string, unknown>;
   competitive_landscape_summary?: Record<string, unknown>;
+  search_demand_summary?: Record<string, unknown>;
+  seo_strategy_summary?: Record<string, unknown>;
+  site_architecture_summary?: Record<string, unknown>;
+  technical_seo_summary?: Record<string, unknown>;
+  content_audit_summary?: Record<string, unknown>;
+  content_planning_summary?: Record<string, unknown>;
+  content_production_summary?: Record<string, unknown>;
+  on_page_seo_summary?: Record<string, unknown>;
+  publishing_summary?: Record<string, unknown>;
   updated_at: string;
+};
+
+export type WordPressStatus = {
+  connected: boolean;
+  base_url?: string;
+  username?: string;
+  wp_user?: string | null;
+  can_publish?: boolean | null;
+  error?: string | null;
 };
 
 export type ChatEvent = {
@@ -187,29 +364,8 @@ export const api = {
       token,
       body: JSON.stringify(body),
     }),
-  deleteClient: async (token: string | null, id: string) => {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (token && token !== "demo") {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    const res = await fetch(`${API}/api/v1/clients/${id}`, {
-      method: "DELETE",
-      headers,
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      const detail = err.detail;
-      throw new Error(
-        typeof detail === "string"
-          ? detail
-          : Array.isArray(detail)
-            ? detail[0]?.msg
-            : "Delete failed"
-      );
-    }
-  },
+  deleteClient: (token: string | null, id: string) =>
+    request<void>(`/api/v1/clients/${id}`, { method: "DELETE", token }),
   createSession: (token: string, client_id: string) =>
     request<{ id: string }>("/api/v1/sessions", {
       method: "POST",
@@ -251,29 +407,13 @@ export const api = {
     content: string,
     onEvent: (ev: ChatEvent) => void | Promise<void>
   ) => {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    };
-    if (token && token !== "demo") {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    const res = await fetch(`${API}/api/v1/sessions/${session_id}/messages/stream`, {
+    const res = await requestRaw(`/api/v1/sessions/${session_id}/messages/stream`, {
       method: "POST",
-      headers,
+      token,
+      headers: { Accept: "text/event-stream" },
       body: JSON.stringify({ content }),
+      timeoutMs: 0,
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      const detail = err.detail;
-      throw new Error(
-        typeof detail === "string"
-          ? detail
-          : Array.isArray(detail)
-            ? detail[0]?.msg
-            : "Stream failed"
-      );
-    }
     if (!res.body) {
       throw new Error("No stream body");
     }
@@ -315,6 +455,13 @@ export const api = {
       resolved: number;
       overall_readiness_score: number;
       phase_statuses: Record<string, string>;
+      handoff?: {
+        from_agent: string;
+        to_agent?: string | null;
+        to_label?: string | null;
+        prompt?: string | null;
+        message: string;
+      };
     }>(`/api/v1/clients/${client_id}/phases/${agent_key}/review`, {
       method: "POST",
       token,
@@ -355,10 +502,30 @@ export const api = {
       body: JSON.stringify({ client_id, provider }),
     }),
   oauthConfig: (token: string) =>
-    request<{ configured: boolean; providers: string[]; labels: Record<string, string> }>(
-      `/api/v1/oauth/config`,
-      { token }
-    ),
+    request<{
+      configured: boolean;
+      providers: string[];
+      labels: Record<string, string>;
+      redirect_uri?: string;
+    }>(`/api/v1/oauth/config`, { token }),
+  /** Each client connects their own WordPress site — no shared/global site. */
+  wordpressStatus: (token: string, client_id: string) =>
+    request<WordPressStatus>(`/api/v1/clients/${client_id}/integrations/wordpress`, { token }),
+  wordpressConnect: (
+    token: string,
+    client_id: string,
+    body: { base_url: string; username: string; app_password: string }
+  ) =>
+    request<WordPressStatus>(`/api/v1/clients/${client_id}/integrations/wordpress`, {
+      method: "POST",
+      token,
+      body: JSON.stringify(body),
+    }),
+  wordpressDisconnect: (token: string, client_id: string) =>
+    request<WordPressStatus>(`/api/v1/clients/${client_id}/integrations/wordpress`, {
+      method: "DELETE",
+      token,
+    }),
   submitQuestionnaire: (token: string, client_id: string, fields: Record<string, unknown>) =>
     request<{ ok: boolean; fields: string[]; events: ChatEvent[] }>(
       `/api/v1/clients/${client_id}/questionnaire`,
@@ -377,32 +544,21 @@ export const api = {
         body: JSON.stringify({ fields }),
       }
     ),
-  importDiscoveryDocument: async (token: string, client_id: string, file: File) => {
+  importDiscoveryDocument: (token: string, client_id: string, file: File) => {
     const form = new FormData();
     form.append("file", file);
-    const API = import.meta.env.VITE_API_URL || "";
-    const res = await fetch(`${API}/api/v1/clients/${client_id}/discovery/import-document`, {
-      method: "POST",
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      body: form,
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      const detail = err.detail;
-      throw new Error(
-        typeof detail === "string"
-          ? detail
-          : Array.isArray(detail)
-            ? detail[0]?.msg
-            : "Upload failed"
-      );
-    }
-    return res.json() as Promise<{
+    return request<{
       ok: boolean;
       filename: string;
       fields: Record<string, unknown>;
       client: Client;
-    }>;
+    }>(`/api/v1/clients/${client_id}/discovery/import-document`, {
+      method: "POST",
+      token,
+      body: form,
+      // Parsing a spreadsheet server-side outruns the default 20s budget.
+      timeoutMs: 120_000,
+    });
   },
   addCompetitor: (token: string, client_id: string, name: string, url: string) =>
     request(`/api/v1/clients/${client_id}/competitors/manual`, {
@@ -410,4 +566,50 @@ export const api = {
       token,
       body: JSON.stringify({ name, url }),
     }),
+  /** Download latest structured report per phase as a single PDF or Word document. */
+  downloadReports: async (
+    token: string | null,
+    client_id: string,
+    format: ReportDownloadFormat = "pdf"
+  ) => {
+    const filename = await downloadReportFile(
+      `/api/v1/clients/${client_id}/reports/export?format=${format}`,
+      token,
+      `reports.${format}`
+    );
+    return { filename, report_count: null as number | null };
+  },
+  /** Download one phase report as PDF or Word by card_type. */
+  downloadReport: async (
+    token: string | null,
+    client_id: string,
+    card_type: string,
+    format: ReportDownloadFormat = "pdf"
+  ) => {
+    const filename = await downloadReportFile(
+      `/api/v1/clients/${client_id}/reports/${encodeURIComponent(card_type)}/export?format=${format}`,
+      token,
+      `report.${format}`
+    );
+    return { filename };
+  },
+
+  engineRoom: (token: string | null, days = 7) =>
+    request<EngineRoomPayload>(`/api/v1/engine-room?days=${days}`, { token, timeoutMs: 30_000 }),
+
+  costTracker: (token: string | null, days = 7) =>
+    request<CostTrackerPayload>(`/api/v1/cost-tracker?days=${days}`, { token, timeoutMs: 30_000 }),
+
+  clientCosts: (token: string | null, clientId: string, days = 30) =>
+    request<ClientCostPayload>(`/api/v1/cost-tracker/clients/${clientId}?days=${days}`, {
+      token,
+      timeoutMs: 30_000,
+    }),
+
+  downloadWorkbook: (token: string | null, clientId: string) =>
+    downloadReportFile(
+      `/api/v1/clients/${clientId}/workbook/export`,
+      token,
+      "Category_Mapping_Search_Demand.xlsx"
+    ),
 };

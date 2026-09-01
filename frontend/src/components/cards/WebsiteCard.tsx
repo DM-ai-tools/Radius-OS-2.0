@@ -36,7 +36,7 @@ function TechnicalTab({ data }: { data: Record<string, unknown> }) {
       <MetricGrid
         items={[
           {
-            label: "Pages found",
+            label: "Unique pages",
             value: data.pages_found,
             tone: Number(data.pages_found) <= 1 ? "warn" : "neutral",
           },

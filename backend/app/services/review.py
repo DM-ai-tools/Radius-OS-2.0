@@ -84,6 +84,22 @@ async def _apply_review(
     return ledger
 
 
+async def _assert_not_self_review(user: User, ledger: FindingsLedger) -> None:
+    """Architecture v1.9: domain reviewer is never the person who drafted it.
+
+    Head of Department may override (escalation lead).
+    """
+    role_name = getattr(getattr(user, "role", None), "name", None) or ""
+    if role_name == "head_of_department":
+        return
+    if ledger.created_by and ledger.created_by == user.id:
+        raise HTTPException(
+            403,
+            "Architecture v1.9: the person who drafted this finding cannot approve it. "
+            "Ask a domain reviewer or HoD to sign off.",
+        )
+
+
 async def review_finding(
     db: AsyncSession,
     *,
@@ -104,6 +120,19 @@ async def review_finding(
         raise HTTPException(404, "Finding not found")
 
     await require_permission(user, db, ledger.agent_key, need_approve=True)
+    if action in ("approve", "edit"):
+        await _assert_not_self_review(user, ledger)
+        from app.services.phase_validation import latest_validation_blocks_approve
+
+        blocked = await latest_validation_blocks_approve(
+            db, client_id=ledger.client_id, agent_key=ledger.agent_key
+        )
+        if blocked is not None:
+            raise HTTPException(
+                400,
+                f"{ledger.agent_key} failed validation ({blocked.decision}) and cannot be approved. "
+                f"{blocked.summary or 'Re-run the phase after correcting the issues.'}",
+            )
     return await _apply_review(db, user=user, ledger=ledger, action=action, edits=edits, note=note)
 
 
@@ -118,7 +147,24 @@ async def approve_phase_batch(
     note: str | None = None,
 ) -> dict:
     """Approve/reject all pending findings for an agent on a client (card-level action)."""
+    user = (
+        await db.execute(select(User).options(selectinload(User.role)).where(User.id == user.id))
+    ).scalar_one()
     await require_permission(user, db, agent_key, need_approve=True)
+
+    if action in ("approve", "edit"):
+        from app.services.phase_validation import latest_validation_blocks_approve
+
+        blocked = await latest_validation_blocks_approve(
+            db, client_id=client_id, agent_key=agent_key
+        )
+        if blocked is not None:
+            raise HTTPException(
+                400,
+                f"{agent_key} failed validation ({blocked.decision}) and cannot be approved. "
+                f"{blocked.summary or 'Re-run the phase after correcting the issues.'}",
+            )
+
     result = await db.execute(
         select(FindingsLedger).where(
             FindingsLedger.client_id == client_id,
@@ -127,8 +173,59 @@ async def approve_phase_batch(
         )
     )
     ledgers = list(result.scalars().all())
-    if not ledgers and action != "approve":
-        raise HTTPException(404, "No pending findings")
+    if not ledgers and action == "approve":
+        superseded = (
+            await db.execute(
+                select(FindingsLedger)
+                .where(
+                    FindingsLedger.client_id == client_id,
+                    FindingsLedger.agent_key == agent_key,
+                    FindingsLedger.status == "superseded",
+                )
+                .order_by(FindingsLedger.created_at.desc())
+            )
+        ).scalars().all()
+        if superseded:
+            newest = superseded[0].created_at
+            batch = [
+                row
+                for row in superseded
+                if newest is not None
+                and row.created_at is not None
+                and abs((row.created_at - newest).total_seconds()) < 120
+            ]
+            for row in batch:
+                row.status = "pending"
+            ledgers = batch
+    if not ledgers:
+        if action != "approve":
+            raise HTTPException(404, "No pending findings")
+        # Approving with nothing pending is only valid as an idempotent re-approve of a
+        # phase that already produced findings. A blocked/empty run has none — marking it
+        # "complete" would tell downstream phases their upstream pack is ready when it is
+        # empty, silently propagating hollow deliverables through the rest of the chain.
+        already_resolved = (
+            await db.execute(
+                select(FindingsLedger.id)
+                .where(
+                    FindingsLedger.client_id == client_id,
+                    FindingsLedger.agent_key == agent_key,
+                    FindingsLedger.status.in_(("approved", "edited")),
+                )
+                .limit(1)
+            )
+        ).first()
+        if not already_resolved:
+            raise HTTPException(
+                400,
+                f"{agent_key} produced no findings to approve — it was blocked or "
+                "returned an empty result. Run the upstream phase it asked for, "
+                "then re-run this phase before approving.",
+            )
+
+    if action in ("approve", "edit"):
+        for ledger in ledgers:
+            await _assert_not_self_review(user, ledger)
 
     for ledger in ledgers:
         await _apply_review(
@@ -151,17 +248,32 @@ async def approve_phase_batch(
         await _set_phase_status(db, client_id, agent_key, "in_progress")
 
     profile = await recompute_readiness(db, client_id)
-    return {
+    phase_statuses = {
+        "discovery": profile.discovery_status,
+        "tracking": profile.tracking_status,
+        "website": profile.website_status,
+        "competitor": profile.competitor_status,
+        "search_demand": profile.search_demand_status,
+        "seo_strategy": profile.seo_strategy_status,
+        "site_architecture": profile.site_architecture_status,
+        "technical_seo": profile.technical_seo_status,
+        "content_audit": profile.content_audit_status,
+        "content_planning": profile.content_planning_status,
+        "content_production": profile.content_production_status,
+        "on_page_seo": profile.on_page_seo_status,
+        "publishing": profile.publishing_status,
+    }
+    out: dict = {
         "resolved": len(ledgers),
         "agent_key": agent_key,
         "overall_readiness_score": float(profile.overall_readiness_score or 0),
-        "phase_statuses": {
-            "discovery": profile.discovery_status,
-            "tracking": profile.tracking_status,
-            "website": profile.website_status,
-            "competitor": profile.competitor_status,
-        },
+        "phase_statuses": phase_statuses,
     }
+    if action in ("approve", "edit"):
+        from app.services.agent_handoff import approve_handoff
+
+        out["handoff"] = approve_handoff(agent_key, phase_statuses=phase_statuses)
+    return out
 
 
 async def _update_source_status(
@@ -220,6 +332,15 @@ async def _set_phase_status(db: AsyncSession, client_id: UUID, agent_key: str, s
         "tracking_access_agent": "tracking_status",
         "website_situation_agent": "website_status",
         "competitor_market_agent": "competitor_status",
+        "search_demand": "search_demand_status",
+        "content_strategy": "seo_strategy_status",
+        "site_architecture": "site_architecture_status",
+        "technical_seo": "technical_seo_status",
+        "content_audit": "content_audit_status",
+        "content_planning": "content_planning_status",
+        "content_production": "content_production_status",
+        "on_page_seo": "on_page_seo_status",
+        "publishing": "publishing_status",
     }
     field = mapping.get(agent_key)
     if field:
@@ -379,21 +500,99 @@ async def _rollup_to_profile(
         from app.services.cache import cache_get, competitor_cache_key
 
         cached = cache_get(competitor_cache_key(str(client_id))) or {}
-        profile.competitive_landscape_summary = {
-            "analysis_mode": cached.get("analysis_mode", "tiered_16_parameter"),
-            "tier_overview": cached.get("tier_overview", []),
-            "recommendations": cached.get("recommendations", {}),
-            "client_baseline_maturity": (cached.get("client_baseline") or {}).get(
-                "maturity_score"
-            ),
-            "competitors": [
-                {
-                    "name": c.name,
-                    "url": c.url,
-                    "cluster": c.positioning_cluster,
-                    "source": c.source,
-                }
-                for c in comps
-            ],
-        }
+        from app.services.memory_packs import slim_competitor_memory
+
+        profile.competitive_landscape_summary = slim_competitor_memory(
+            {
+                "analysis_mode": cached.get("analysis_mode", "tiered_16_parameter"),
+                "tier_overview": cached.get("tier_overview", []),
+                "recommendations": cached.get("recommendations", {}),
+                "client_baseline_maturity": (cached.get("client_baseline") or {}).get(
+                    "maturity_score"
+                ),
+                "competitors": [
+                    {
+                        "name": c.name,
+                        "url": c.url,
+                        "cluster": c.positioning_cluster,
+                        "source": c.source,
+                    }
+                    for c in comps
+                ],
+            }
+        )
+
+    elif agent_key == "search_demand":
+        from app.services.memory_packs import slim_search_demand_memory
+
+        current = dict(profile.search_demand_summary or {})
+        if edits:
+            current.update(edits)
+        # Keep full detail on the chat card; store essentials in shared memory
+        profile.search_demand_summary = slim_search_demand_memory(current)
+
+    elif agent_key == "content_strategy":
+        from app.services.memory_packs import slim_seo_strategy_memory
+
+        current = dict(profile.seo_strategy_summary or {})
+        if edits:
+            current.update(edits)
+        profile.seo_strategy_summary = slim_seo_strategy_memory(current)
+
+    elif agent_key == "site_architecture":
+        from app.services.memory_packs import slim_site_architecture_memory
+
+        current = dict(profile.site_architecture_summary or {})
+        if edits:
+            current.update(edits)
+        profile.site_architecture_summary = slim_site_architecture_memory(current)
+
+    elif agent_key == "technical_seo":
+        from app.services.memory_packs import slim_technical_seo_memory
+
+        current = dict(profile.technical_seo_summary or {})
+        if edits:
+            current.update(edits)
+        profile.technical_seo_summary = slim_technical_seo_memory(current)
+
+    elif agent_key == "content_audit":
+        from app.services.memory_packs import slim_content_audit_memory
+
+        current = dict(profile.content_audit_summary or {})
+        if edits:
+            current.update(edits)
+        profile.content_audit_summary = slim_content_audit_memory(current)
+
+    elif agent_key == "content_planning":
+        from app.services.memory_packs import slim_content_planning_memory
+
+        current = dict(profile.content_planning_summary or {})
+        if edits:
+            current.update(edits)
+        profile.content_planning_summary = slim_content_planning_memory(current)
+
+    elif agent_key == "content_production":
+        from app.services.memory_packs import slim_content_production_memory
+
+        current = dict(profile.content_production_summary or {})
+        if edits:
+            current.update(edits)
+        profile.content_production_summary = slim_content_production_memory(current)
+
+    elif agent_key == "on_page_seo":
+        from app.services.memory_packs import slim_on_page_seo_memory
+
+        current = dict(profile.on_page_seo_summary or {})
+        if edits:
+            current.update(edits)
+        profile.on_page_seo_summary = slim_on_page_seo_memory(current)
+
+    elif agent_key == "publishing":
+        from app.services.memory_packs import slim_publishing_memory
+
+        current = dict(profile.publishing_summary or {})
+        if edits:
+            current.update(edits)
+        profile.publishing_summary = slim_publishing_memory(current)
+
     await db.flush()

@@ -3,26 +3,75 @@ import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../auth";
 import AuthModal from "../components/AuthModal";
 
-const PHASES = [
+// Architecture v1.9 splits the pipeline into foundations (established once, read by
+// everything downstream) and a genuinely order-dependent execution band. Keep that
+// distinction here: only the band is numbered, because only there does order carry
+// information the reader needs.
+const FOUNDATIONS = [
+  {
+    title: "Discovery",
+    body: "Commercial scope, products, and positioning read off the live site — then confirmed with the client, not assumed.",
+  },
+  {
+    title: "Tracking & access",
+    body: "Analytics, Search Console, and conversion health verified before any strategy gets ahead of the data.",
+  },
+  {
+    title: "Competitors",
+    body: "Tiered landscape every role re-runs against their own task — content compares content, technical benchmarks site health.",
+  },
+];
+
+const SEQUENCE = [
   {
     n: "01",
-    title: "Discovery",
-    body: "Map commercial scope, products, and positioning from the live site — then confirm with the client.",
+    title: "Website situation",
+    body: "Crawl, authority, and anomaly signals in one audit the technical specialist signs off.",
   },
   {
     n: "02",
-    title: "Tracking & access",
-    body: "Verify analytics, Search Console, and measurement health before strategy gets ahead of the data.",
+    title: "Search demand",
+    body: "Keyword clusters from live Ahrefs / DataForSEO metrics — scored into best, evergreen, trend, and avoid. Volumes are never invented.",
   },
   {
     n: "03",
-    title: "Website situation",
-    body: "Crawl, authority, and anomaly signals in one audit the technical specialist can sign off.",
+    title: "Content audit",
+    body: "What already exists, and what it should become: keep, refresh, consolidate, or retire.",
   },
   {
     n: "04",
-    title: "Competitors",
-    body: "Tiered 16-parameter landscape — who to benchmark, who threatens you next, what to close first.",
+    title: "Content strategy",
+    body: "Pillars, priority queue, and calendar — built on the audit so decay and cannibalisation are visible first.",
+  },
+  {
+    n: "05",
+    title: "Site architecture",
+    body: "Hubs, click depth, and URL ownership. Architecture wins every URL conflict downstream.",
+  },
+  {
+    n: "06",
+    title: "Technical SEO",
+    body: "Crawlability, indexation, and the redirect work the new URL tree implies.",
+  },
+  {
+    n: "07",
+    title: "Content planning",
+    body: "Strategy and architecture merged into one locked roadmap — every page carries a URL, parent, and disposition.",
+  },
+  {
+    n: "08",
+    title: "Content production",
+    body: "Writer-ready briefs off the locked roadmap: intent, outline, coverage, and internal link targets.",
+  },
+  {
+    n: "09",
+    title: "On-page SEO",
+    body: "Titles, metas, headings, schema, and internal links — with competitor brand terms blocked from client copy.",
+  },
+  {
+    n: "10",
+    title: "Publishing",
+    body: "The client's own brand rendered into a dry-run preview, then a WordPress draft that is read back and verified.",
   },
 ];
 
@@ -143,7 +192,7 @@ export default function LandingPage() {
                 Enter workspace
               </button>
               <a href="#phases" className="landing-btn landing-btn-ghost">
-                See the four phases
+                See how it runs
               </a>
             </div>
           </div>
@@ -156,17 +205,41 @@ export default function LandingPage() {
         >
           <div className="landing-section-inner">
             <p className="landing-kicker">The path</p>
-            <h2 className="landing-h2">Four phases. One readiness gate.</h2>
+            <h2 className="landing-h2">
+              Three foundations. Ten steps that must run in order.
+            </h2>
             <p className="landing-section-lede">
-              Each agent ships a checkpoint your team can approve, edit, or reject
-              before the next phase unlocks.
+              Not every phase is the same kind of work. Three are foundations —
+              established once, then read by everything downstream. The rest is a
+              genuinely order-dependent band where each step consumes the last
+              one's locked output. Every step stops at a human before shared
+              memory updates.
             </p>
+
+            <p className="landing-group-label">Foundations · referenced throughout</p>
+            <ul className="landing-phase-list landing-phase-list-flat">
+              {FOUNDATIONS.map((p, i) => (
+                <li
+                  key={p.title}
+                  className="landing-phase-item"
+                  style={{ transitionDelay: `${i * 90}ms` }}
+                >
+                  <span className="landing-phase-mark" aria-hidden="true" />
+                  <div>
+                    <h3>{p.title}</h3>
+                    <p>{p.body}</p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+
+            <p className="landing-group-label">Sequential band · output feeds the next step</p>
             <ol className="landing-phase-list">
-              {PHASES.map((p, i) => (
+              {SEQUENCE.map((p, i) => (
                 <li
                   key={p.n}
                   className="landing-phase-item"
-                  style={{ transitionDelay: `${i * 90}ms` }}
+                  style={{ transitionDelay: `${(i + 3) * 70}ms` }}
                 >
                   <span className="landing-phase-n">{p.n}</span>
                   <div>
@@ -199,6 +272,7 @@ export default function LandingPage() {
               <li>Commercial scope retained across re-runs</li>
               <li>Technical, authority, and anomaly tabs for website sign-off</li>
               <li>16-parameter competitor tiers with monitoring plan</li>
+              <li>Keyword opportunities → content calendar → URL architecture</li>
             </ul>
           </div>
         </section>
@@ -232,7 +306,7 @@ export default function LandingPage() {
 
       <footer className="landing-footer">
         <span>Radius OS</span>
-        <span>Phases 1–4 · Role-gated skills · Shared memory</span>
+        <span>Discovery to publish · Role-gated skills · Shared memory</span>
       </footer>
 
       <AuthModal

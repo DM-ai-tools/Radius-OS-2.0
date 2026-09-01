@@ -83,18 +83,17 @@ def build_t1_platforms(
         cdd_note = cdd_by_platform.get(key)
         if key in oauth_keys:
             connected = bool(has_credentials.get(key))
-            status = "connected" if connected else "not_connected"
-            if key == "google_business":
+            status = "connected" if connected else "skipped"
+            if connected:
                 detail = (
                     "OAuth credential on file — Google Business Profile access granted."
-                    if connected
-                    else "No OAuth credential — grant Business Profile manager access to verify."
+                    if key == "google_business"
+                    else "OAuth credential on file — connection test passed."
                 )
             else:
                 detail = (
-                    "OAuth credential on file — connection test passed."
-                    if connected
-                    else "No OAuth credential — grant read access to verify."
+                    "Optional. Not connected — tracking continues from live-site HTML "
+                    "(no Google login required)."
                 )
             if cdd_note:
                 detail = f"CDD: {cdd_note}. {detail}"
@@ -255,12 +254,13 @@ def build_t4_baseline(
             "Credentials present — full GSC/GA4 history pull can be attached when Data API is configured; "
             "structure is ready for the Client Digital Profile."
             if available
-            else "Grant GA4 and/or Search Console access, then re-check to populate history."
+            else "GA4 / Search Console not connected — historical metrics stay empty. "
+            "Live HTML tag audit still ran. You can approve T6 without Google APIs."
         )
     )
     return {
         "title": "T4 — Historical baseline extraction",
-        "subtitle": "GSC API + GA4 API",
+        "subtitle": "GSC API + GA4 API (optional)",
         "mode": "AUTOMATED",
         "client": display_name,
         "window_months": "6–12",
@@ -269,20 +269,22 @@ def build_t4_baseline(
         "access": {"ga4": has_ga4, "search_console": has_gsc},
         "metrics": metrics,
         "note": note,
-        "status": "ready_structure" if available else "blocked_pending_access",
+        "status": "ready_structure" if available else "skipped_no_api",
     }
 
 
 def compute_tracking_blockers(rows: list[dict[str, Any]]) -> list[str]:
+    """Hard blockers are live-page failures only. Missing Google OAuth is optional."""
     blockers = []
+    oauth_optional = {"conversion_event", "search_console_access"}
     for r in rows:
-        if r.get("check_result") in ("fail", "unverified") and r.get("element") in (
-            "ga4_base_tag",
-            "conversion_event",
-            "search_console_access",
-        ):
+        el = r.get("element")
+        result = r.get("check_result")
+        if el in oauth_optional:
+            continue
+        if result == "fail" and el == "ga4_base_tag":
             blockers.append(
-                f"{r['element']}: {r.get('check_result')} — "
+                f"{el}: {result} — "
                 f"{(r.get('detail') or {}).get('message', 'needs attention')}"
             )
     return blockers

@@ -22,7 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
-    && pip uninstall -y pytest pytest-asyncio || true
+    && pip uninstall -y pytest pytest-asyncio || true \
+    && apt-get purge -y build-essential \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY backend/ .
 COPY --from=frontend /frontend/dist /app/static
@@ -46,7 +49,7 @@ ENV PYTHONPATH=/app \
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD curl -fsS "http://127.0.0.1:${PORT:-8000}/health" || exit 1
+    CMD-SHELL curl -fsS "http://127.0.0.1:$${PORT:-8000}/health" || exit 1
 
 # Prefer shell form so $PORT is expanded if Railway wraps the command
 CMD ["sh", "/start.sh"]

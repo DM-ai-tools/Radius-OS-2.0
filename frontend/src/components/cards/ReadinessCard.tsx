@@ -1,11 +1,10 @@
 type Props = {
   payload: Record<string, unknown>;
-  isQa: boolean;
-  onGate: () => void;
 };
 
-export default function ReadinessCard({ payload, isQa, onGate }: Props) {
+export default function ReadinessCard({ payload }: Props) {
   const phases = (payload.phases || {}) as Record<string, { score: number; missing: string[] }>;
+  const ready = Boolean(payload.ready_for_phase5);
   return (
     <div className="structured-card">
       <h3 className="card-title">{String(payload.title || "Readiness Score")}</h3>
@@ -14,6 +13,7 @@ export default function ReadinessCard({ payload, isQa, onGate }: Props) {
       </div>
       <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
         Threshold {Number(payload.threshold || 90)}%
+        {ready ? " · Phase 5–6 unlocked" : ""}
       </div>
       {Object.entries(phases).map(([phase, data]) => (
         <div className="bar-row" key={phase}>
@@ -35,13 +35,6 @@ export default function ReadinessCard({ payload, isQa, onGate }: Props) {
           <li key={m}>{m}</li>
         ))}
       </ul>
-      {isQa && Boolean(payload.can_gate) && (
-        <div className="card-actions">
-          <button className="btn btn-primary" onClick={onGate}>
-            Ready for Phase 5
-          </button>
-        </div>
-      )}
     </div>
   );
 }

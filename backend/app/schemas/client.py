@@ -103,10 +103,28 @@ class ProfileOut(BaseModel):
     tracking_baseline: dict | None
     website_situation_summary: dict | None
     competitive_landscape_summary: dict | None
+    search_demand_summary: dict | None = None
+    seo_strategy_summary: dict | None = None
+    site_architecture_summary: dict | None = None
+    technical_seo_summary: dict | None = None
+    content_audit_summary: dict | None = None
+    content_planning_summary: dict | None = None
+    content_production_summary: dict | None = None
+    on_page_seo_summary: dict | None = None
+    publishing_summary: dict | None = None
     discovery_status: str
     tracking_status: str
     website_status: str
     competitor_status: str
+    search_demand_status: str = "not_started"
+    seo_strategy_status: str = "not_started"
+    site_architecture_status: str = "not_started"
+    technical_seo_status: str = "not_started"
+    content_audit_status: str = "not_started"
+    content_planning_status: str = "not_started"
+    content_production_status: str = "not_started"
+    on_page_seo_status: str = "not_started"
+    publishing_status: str = "not_started"
     overall_readiness_score: Decimal | None
     ready_for_phase5: bool
     updated_at: datetime

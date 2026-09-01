@@ -87,6 +87,15 @@ def agent_feature_enabled(agent_key: str) -> bool:
         "tracking_access_agent": s.feature_tracking_agent,
         "website_situation_agent": s.feature_website_agent,
         "competitor_market_agent": s.feature_competitor_agent,
+        "search_demand": s.feature_search_demand_agent,
+        "content_strategy": s.feature_content_strategy_agent,
+        "site_architecture": s.feature_site_architecture_agent,
+        "technical_seo": s.feature_technical_seo_agent,
+        "content_audit": s.feature_content_audit_agent,
+        "content_planning": s.feature_content_planning_agent,
+        "content_production": s.feature_content_production_agent,
+        "on_page_seo": s.feature_on_page_seo_agent,
+        "publishing": s.feature_publishing_agent,
         "readiness_gate": True,
     }
     return flags.get(agent_key, False)

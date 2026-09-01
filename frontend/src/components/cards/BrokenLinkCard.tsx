@@ -73,8 +73,8 @@ export default function BrokenLinkCard({ payload, canAct, onAction }: Props) {
         <>
           <h4 style={{ margin: "12px 0 6px", fontSize: 13 }}>Quick fixes</h4>
           <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-            {fixes.map((f) => (
-              <li key={f}>{f}</li>
+            {fixes.map((f, i) => (
+              <li key={`${i}-${f}`}>{f}</li>
             ))}
           </ol>
         </>

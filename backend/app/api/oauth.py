@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -88,10 +88,14 @@ async def _store_credential(
 
 @router.get("/config")
 async def oauth_config(_: User = Depends(get_current_user)):
+    from app.config import get_settings
+
+    s = get_settings()
     return {
         "configured": oauth_configured(),
         "providers": list(OAUTH_PROVIDERS),
         "labels": PROVIDER_LABELS,
+        "redirect_uri": s.oauth_redirect_uri,
     }
 
 

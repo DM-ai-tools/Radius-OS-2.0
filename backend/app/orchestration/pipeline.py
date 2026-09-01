@@ -1,4 +1,4 @@
-"""Orchestration steps 01–09 scoped to Phases 1–4."""
+"""Orchestration steps scoped to Phases 1–12."""
 
 from __future__ import annotations
 
@@ -15,9 +15,18 @@ from app.deps import agent_feature_enabled
 from app.integrations.llm import route_agent
 from app.models import ChatMessage, ChatSession, Client, ClientDigitalProfile, RolePermission, User
 from app.services.audit import log_event
+from app.services.role_skills import required_role_for
 
 # Competitor scoring fans out several LLM calls; keep headroom above 5 minutes.
 AGENT_TIMEOUT_SECONDS = 480
+
+
+def agent_timeout_seconds(agent_key: str) -> int:
+    """Per-agent chat-turn budget (seconds)."""
+    settings = get_settings()
+    if agent_key == "technical_seo":
+        return int(getattr(settings, "technical_seo_agent_timeout_seconds", 900) or 900)
+    return int(getattr(settings, "agent_timeout_seconds", AGENT_TIMEOUT_SECONDS) or AGENT_TIMEOUT_SECONDS)
 
 
 async def process_chat_turn(
@@ -58,7 +67,39 @@ async def process_chat_turn(
         "tracking_status": profile.tracking_status,
         "website_status": profile.website_status,
         "competitor_status": profile.competitor_status,
+        "search_demand_status": profile.search_demand_status,
+        "seo_strategy_status": profile.seo_strategy_status,
+        "site_architecture_status": profile.site_architecture_status,
+        "technical_seo_status": profile.technical_seo_status,
+        "content_audit_status": profile.content_audit_status,
+        "content_planning_status": profile.content_planning_status,
+        "content_production_status": profile.content_production_status,
+        "on_page_seo_status": profile.on_page_seo_status,
+        "publishing_status": profile.publishing_status,
     }
+
+    # Chat-box edits to an existing report (add/remove keyword, topic, competitor…)
+    from app.services.chat_revisions import maybe_revise_from_chat
+
+    revision_events = await maybe_revise_from_chat(
+        db,
+        client=client,
+        profile=profile,
+        active_agent_key=session.active_agent_key,
+        message=content,
+    )
+    if revision_events is not None:
+        await _persist_agent_events(db, session, client.id, revision_events)
+        return revision_events
+
+    from app.services.chat_qa import maybe_answer_from_memory
+
+    qa_events = await maybe_answer_from_memory(
+        client=client, profile=profile, message=content
+    )
+    if qa_events is not None:
+        await _persist_agent_events(db, session, client.id, qa_events)
+        return qa_events
 
     # Step 05 — router
     agent_key = await route_agent(content, statuses)
@@ -90,11 +131,11 @@ async def process_chat_turn(
         )
         card = {
             "card_type": "readiness_score",
-            "title": "Readiness Gate",
+            "title": "Readiness Score",
             **payload,
             "agent_key": "readiness_gate",
-            "actions": ["approve"] if payload["can_gate"] else [],
-            "required_role": "seo_qa_lead",
+            "actions": [],
+            "required_role": required_role_for("readiness_gate"),
         }
         events = [
             {
@@ -102,11 +143,14 @@ async def process_chat_turn(
                 "agent_key": "readiness_gate",
                 "content": (
                     f"Overall readiness is {payload['overall']:.0f}% "
-                    f"(threshold {settings.readiness_threshold:.0f}%). "
+                    f"(threshold {settings.readiness_threshold:.0f}% — informational). "
                     + (
-                        "All phases complete — QA Lead can approve the Phase 5 handoff."
-                        if payload["can_gate"]
-                        else "Still missing: " + ", ".join(payload["missing"][:8])
+                        " Foundations look solid — approve Phase 5 Search Demand before "
+                        "Phase 6 Strategy; later phases stay gated in order."
+                        if not payload["missing"]
+                        else " Gaps: "
+                        + ", ".join(payload["missing"][:8])
+                        + ". Close foundations, then run Phase 5 → approve → Phase 6."
                     )
                 ),
             },
@@ -159,23 +203,35 @@ async def process_chat_turn(
     session.active_agent_key = agent_key
     runner = AGENT_RUNNERS[agent_key]
     try:
-        events = await asyncio.wait_for(
-            runner(
-                db,
-                client=client,
-                session_id=session.id,
-                user_id=user.id,
-                message=content,
-            ),
-            timeout=AGENT_TIMEOUT_SECONDS,
-        )
+        from app.services.api_meter import api_meter_context
+        from app.services.phase_validation import run_phase_with_validation
+
+        async with api_meter_context(
+            client_id=client.id,
+            session_id=session.id,
+            agent_key=agent_key,
+        ):
+            events = await asyncio.wait_for(
+                run_phase_with_validation(
+                    db,
+                    runner=runner,
+                    client=client,
+                    profile=profile,
+                    session_id=session.id,
+                    user_id=user.id,
+                    agent_key=agent_key,
+                    message=content,
+                ),
+                timeout=agent_timeout_seconds(agent_key),
+            )
     except asyncio.TimeoutError:
+        budget_min = agent_timeout_seconds(agent_key) // 60
         events = [
             {
                 "type": "error",
                 "content": (
                     f"{agent_key} is taking longer than expected and was stopped after "
-                    f"{AGENT_TIMEOUT_SECONDS // 60} minutes. Try again, or narrow the "
+                    f"{budget_min} minutes. Try again, or narrow the "
                     "request (e.g. crawl only / SEO audit only)."
                 ),
             }

@@ -23,13 +23,14 @@ from app.models import (
     AgentJob,
     BacklinkSnapshot,
     Client,
-    ClientDigitalProfile,
     FindingsLedger,
     WebsiteAudit,
 )
+from app.services.agent_runtime import get_profile
 from app.services.audit import log_event
 from app.services.readiness import recompute_readiness
-from app.skills import load_skill
+from app.services.role_skills import required_role_for
+from app.agents.prompts import load_skill
 
 
 def _parse_scope(message: str) -> set[str]:
@@ -131,11 +132,26 @@ async def run_website(
     _ = load_skill("seo_audit")
     _ = user_id
     events: list[dict] = []
-    profile = (
-        await db.execute(
-            select(ClientDigitalProfile).where(ClientDigitalProfile.client_id == client.id)
+    profile = await get_profile(db, client.id)
+
+    from app.services.agent_handoff import blocked_events, consume_events
+
+    events.extend(
+        consume_events(
+            "website_situation_agent",
+            pack_notes=[f"tracking={profile.tracking_status}"],
         )
-    ).scalar_one()
+    )
+    if profile.tracking_status != "complete":
+        events.extend(
+            blocked_events(
+                "website_situation_agent",
+                "Approve Phase 2 Tracking first so website analysis uses a verified baseline.",
+                route_to="tracking_access_agent",
+            )
+        )
+        return events
+
     profile.website_status = "in_progress"
     scope = _parse_scope(message)
 
@@ -161,13 +177,17 @@ async def run_website(
                 "type": "system_notice",
                 "content": (
                     f"Comprehensive SEO audit for {client.primary_url} — "
-                    "discovering all site pages (sitemap + crawl), then checking "
-                    "meta, headings, images, schema, and mobile signals on each…"
+                    "CDD-first hierarchy: Home → service hubs → service pages → "
+                    "sub-service pages (then locations/guides/blog). "
+                    "Primary focus on pages matching products, promotion list, "
+                    "business keywords, and geo from Discovery…"
                 ),
             }
         )
         seo_audit_report = await run_seo_audit(
-            client.primary_url, display_name=client.display_name
+            client.primary_url,
+            display_name=client.display_name,
+            commercial_scope=dict(profile.commercial_scope or {}),
         )
         sa = WebsiteAudit(
             client_id=client.id,
@@ -316,9 +336,9 @@ async def run_website(
             }
         )
 
-        # Reuse multi-page SEO audit inventory when already available (avoids a second research pass)
-        if seo_audit_report and (seo_audit_report.get("pages") or []):
-            sa_pages = seo_audit_report.get("pages") or []
+        # Reuse SEO-audit inventory only when it actually found a real page set.
+        sa_pages = (seo_audit_report or {}).get("pages") or []
+        if len(sa_pages) >= 8:
             crawl = {
                 "pages_found": len(sa_pages),
                 "indexable": sum(
@@ -607,6 +627,24 @@ async def run_website(
             ]
         if draft_summary.get("pages_found") is None:
             draft_summary["pages_found"] = seo_audit_report.get("pages_analyzed")
+        if seo_audit_report.get("page_clusters"):
+            draft_summary["page_clusters"] = [
+                {
+                    "cluster": c.get("cluster"),
+                    "label": c.get("label"),
+                    "count": c.get("count"),
+                    "cdd_count": c.get("cdd_count"),
+                    "avg_score": c.get("avg_score"),
+                }
+                for c in seo_audit_report.get("page_clusters") or []
+                if isinstance(c, dict)
+            ]
+        if seo_audit_report.get("page_hierarchy"):
+            draft_summary["page_hierarchy"] = seo_audit_report.get("page_hierarchy")[:40]
+        draft_summary["cdd_pages_count"] = seo_audit_report.get("cdd_pages_count")
+        draft_summary["cdd_coverage_gaps"] = seo_audit_report.get("cdd_coverage_gaps") or []
+        draft_summary["audit_focus_note"] = seo_audit_report.get("audit_focus_note")
+        draft_summary["business_weighted_score"] = seo_audit_report.get("business_weighted_score")
     if draft_summary:
         draft_summary["_draft"] = True
         profile.website_situation_summary = draft_summary
@@ -640,7 +678,7 @@ async def run_website(
             "agent_key": "website_situation_agent",
             "skill": "broken-link-checker",
             "actions": ["approve", "edit", "reject"] if scope == {"broken_links"} else [],
-            "required_role": "technical_seo_specialist",
+            "required_role": required_role_for("website_situation_agent"),
         }
         events.append(
             {
@@ -666,7 +704,7 @@ async def run_website(
             "agent_key": "website_situation_agent",
             "skill": "on-page-seo",
             "actions": ["approve", "edit", "reject"] if scope == {"on_page"} else [],
-            "required_role": "technical_seo_specialist",
+            "required_role": required_role_for("website_situation_agent"),
         }
         events.append(
             {
@@ -695,7 +733,7 @@ async def run_website(
             "agent_key": "website_situation_agent",
             "skill": "technical-seo-audit",
             "actions": ["approve", "edit", "reject"] if scope == {"technical_seo"} else [],
-            "required_role": "technical_seo_specialist",
+            "required_role": required_role_for("website_situation_agent"),
         }
         events.append(
             {
@@ -720,16 +758,24 @@ async def run_website(
             "pages_analyzed": seo_audit_report.get("pages_analyzed"),
             "overall_score": seo_audit_report.get("overall_score"),
             "score_band": seo_audit_report.get("score_band"),
+            "business_weighted_score": seo_audit_report.get("business_weighted_score"),
+            "audit_focus_note": seo_audit_report.get("audit_focus_note"),
+            "cdd_pages_count": seo_audit_report.get("cdd_pages_count"),
+            "cdd_coverage_gaps": seo_audit_report.get("cdd_coverage_gaps") or [],
             "critical": seo_audit_report.get("critical") or [],
             "warnings": seo_audit_report.get("warnings") or [],
             "opportunities": seo_audit_report.get("opportunities") or [],
             "passing": seo_audit_report.get("passing") or [],
             "pages": seo_audit_report.get("pages") or [],
+            "page_clusters": seo_audit_report.get("page_clusters") or [],
+            "page_hierarchy": seo_audit_report.get("page_hierarchy") or [],
             "agent_key": "website_situation_agent",
             "skill": "seo-audit",
             "actions": ["approve", "edit", "reject"] if scope == {"seo_audit"} else [],
-            "required_role": "technical_seo_specialist",
+            "required_role": required_role_for("website_situation_agent"),
         }
+        cdd_n = int(seo_audit_report.get("cdd_pages_count") or 0)
+        gap_n = len(seo_audit_report.get("cdd_coverage_gaps") or [])
         events.append(
             {
                 "type": "agent_message",
@@ -739,7 +785,11 @@ async def run_website(
                     f"{seo_audit_report.get('overall_score')}/100 "
                     f"({seo_audit_report.get('score_band')}) across "
                     f"{seo_audit_report.get('pages_analyzed')} page(s). "
-                    f"{len(seo_audit_report.get('critical') or [])} critical, "
+                    f"Hierarchy: Home → hubs → services → sub-services "
+                    f"({len(seo_audit_report.get('page_clusters') or [])} tiers). "
+                    f"{cdd_n} CDD-matched money page(s)"
+                    + (f"; {gap_n} CDD coverage gap(s) flagged" if gap_n else "")
+                    + f". {len(seo_audit_report.get('critical') or [])} critical, "
                     f"{len(seo_audit_report.get('warnings') or [])} warnings."
                 ),
             }
@@ -759,9 +809,19 @@ async def run_website(
             "tabs_run": sorted(scope),
             "agent_key": "website_situation_agent",
             "actions": ["approve", "edit", "reject"],
-            "required_role": "technical_seo_specialist",
+            "required_role": required_role_for("website_situation_agent"),
             "audit_ids": audit_ids,
         }
+        if draft_summary.get("pages_found") is not None:
+            card["pages_found"] = draft_summary.get("pages_found")
+        if draft_summary.get("indexable") is not None:
+            card["indexable"] = draft_summary.get("indexable")
+        if draft_summary.get("sample_urls"):
+            card["sample_urls"] = list(draft_summary.get("sample_urls") or [])[:20]
+        if draft_summary.get("note"):
+            card["note"] = draft_summary.get("note")
+        if draft_summary.get("error") or (crawl and crawl.get("error")):
+            card["error"] = draft_summary.get("error") or (crawl or {}).get("error")
         pages = crawl.get("pages_found", 0) if crawl else 0
         events.append(
             {

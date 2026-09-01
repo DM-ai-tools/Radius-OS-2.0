@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
+import re
 from typing import Any
 
 from app.config import get_settings
@@ -183,9 +185,39 @@ async def pull_rankings(domain: str, competitor_domains: list[str]) -> list[dict
                     }
                 )
         return rows
-    # Live: rankings require Ahrefs/Semrush — return empty with honest gap (no fake ranks)
-    log.warning("pull_rankings_live_unavailable", domain=domain, note="Set AHREFS_API_KEY for keyword gaps")
-    return []
+
+    from app.integrations import ahrefs
+
+    client_rows, _ = await ahrefs.organic_keywords(domain, limit=40)
+    client_pos = {
+        (r.get("keyword") or "").lower(): r.get("position") for r in client_rows if r.get("keyword")
+    }
+    rows: list[dict[str, Any]] = []
+    for cd in competitor_domains[:5]:
+        corg, _ = await ahrefs.organic_keywords(cd, limit=30)
+        for r in corg:
+            kw = str(r.get("keyword") or "")
+            if not kw:
+                continue
+            cpos = client_pos.get(kw.lower())
+            rows.append(
+                {
+                    "competitor_domain": cd,
+                    "keyword": kw,
+                    "position": r.get("position"),
+                    "search_volume": r.get("volume"),
+                    "client_position": cpos,
+                    "gap_flag": cpos is None or (isinstance(cpos, int) and cpos > 20),
+                    "source": "ahrefs",
+                }
+            )
+    if not rows:
+        log.warning(
+            "pull_rankings_empty",
+            domain=domain,
+            note="Ahrefs organic keywords returned empty — check AHREFS_API_KEY / plan",
+        )
+    return rows
 
 
 async def validate_tracking(
@@ -232,10 +264,13 @@ async def validate_tracking(
                 results.append(
                     {
                         "element": el,
-                        "check_result": "unverified",
+                        "check_result": "warning",
                         "detail": {
-                            "message": f"{el} could not be verified — OAuth access not granted.",
-                            "fix": "Grant read access via OAuth or upload a GTM container export.",
+                            "message": (
+                                f"{el} skipped — Google API not connected. "
+                                "Tracking continues without this check."
+                            ),
+                            "fix": None,
                         },
                     }
                 )
@@ -351,10 +386,13 @@ async def validate_tracking(
                 results.append(
                     {
                         "element": el,
-                        "check_result": "unverified",
+                        "check_result": "warning",
                         "detail": {
-                            "message": "Conversion events require GA4 OAuth / Data API access.",
-                            "fix": "Grant GA4 read access, then re-check.",
+                            "message": (
+                                "Conversion firing not checked — GA4 API skipped. "
+                                "HTML tag audit still ran."
+                            ),
+                            "fix": None,
                         },
                     }
                 )
@@ -374,10 +412,13 @@ async def validate_tracking(
                 results.append(
                     {
                         "element": el,
-                        "check_result": "unverified",
+                        "check_result": "warning",
                         "detail": {
-                            "message": "Search Console OAuth not granted.",
-                            "fix": "Grant Search Console read access.",
+                            "message": (
+                                "Search Console not connected — optional. "
+                                "Pipeline continues without query/index history."
+                            ),
+                            "fix": None,
                         },
                     }
                 )
@@ -492,9 +533,33 @@ async def crawl_site(url: str) -> dict[str, Any]:
             }
         return None
 
-    # Probe homepage first — bot walls should go straight to Perplexity research
+    # Probe homepage first. SiteGround/WAF often returns 202 on HTML but we can
+    # still build a page list from Google's index (and robots.txt).
     home_probe = await fetch_url(url)
-    if (home_probe.get("error") or "") == "bot_challenge_blocked":
+    home_blocked = (home_probe.get("error") or "") == "bot_challenge_blocked"
+
+    if home_blocked:
+        page_urls = await discover_site_urls(url, max_pages=max_pages)
+        if len(page_urls) >= 2:
+            return {
+                "pages_found": len(page_urls),
+                "indexable": len(page_urls),
+                "redirects": 0,
+                "redirect_chains": 0,
+                "canonical_issues": 0,
+                "broken_links": 0,
+                "notable_changes": [],
+                "severity": "warning",
+                "error": "bot_challenge_blocked",
+                "note": (
+                    f"Live HTML is blocked by a SiteGround / captcha challenge, so tags "
+                    f"could not be fetched. Counted {len(page_urls)} unique pages from "
+                    f"Google's index (site: search) plus any open robots/sitemap URLs."
+                ),
+                "status_samples": [{"url": u, "status": 202} for u in page_urls[:20]],
+                "discovered_urls": page_urls[:80],
+                "source": "indexed_serp",
+            }
         remote = await _remote_crawl()
         if remote:
             return remote
@@ -629,7 +694,7 @@ async def crawl_site(url: str) -> dict[str, Any]:
             "source": "live_crawl",
         }
 
-    pages_found = len({s["url"] for s in status_samples} | set(page_urls))
+    pages_found = len(page_urls)
     severity = (
         "critical"
         if broken > 5 or pages_found == 0
@@ -637,7 +702,10 @@ async def crawl_site(url: str) -> dict[str, Any]:
         if broken or canonical_issues or pages_found <= 1
         else "info"
     )
-    note = None
+    note = (
+        f"Counted {pages_found} unique HTML pages (homepage, nav, posts, products). "
+        "Tag, author, feed, pagination, and duplicate URLs are excluded."
+    )
     if pages_found <= 1:
         remote = await _remote_crawl()
         if remote and int(remote.get("pages_found") or 0) > 1:
@@ -751,7 +819,6 @@ async def check_broken_links(url: str) -> dict[str, Any]:
 
     internal: list[dict] = []
     external: list[dict] = []
-    checked = 0
     async with httpx.AsyncClient(follow_redirects=False, timeout=12) as client:
         try:
             home = await client.get(url)
@@ -771,23 +838,35 @@ async def check_broken_links(url: str) -> dict[str, Any]:
         parser = _LinkParser()
         parser.feed(home.text or "")
         pages_scanned = 1
+
+        targets: list[str] = []
         for href in parser.hrefs[:40]:
             if href.startswith("#") or href.startswith("mailto:") or href.startswith("tel:"):
                 continue
             if href.startswith("//"):
-                target = "https:" + href
+                targets.append("https:" + href)
             elif href.startswith("/"):
-                target = f"https://{domain}{href}"
+                targets.append(f"https://{domain}{href}")
             elif href.startswith("http"):
-                target = href
-            else:
-                continue
-            checked += 1
-            try:
-                resp = await client.head(target)
-                status = resp.status_code
-            except Exception:  # noqa: BLE001
-                status = "timeout"
+                targets.append(href)
+
+        # Was one httpx.head() per link, awaited serially (up to 40 x 12s timeout
+        # == ~8 minutes worst case, blocking the whole chat turn). run_seo_audit
+        # already proves out this semaphore+gather shape elsewhere in this file —
+        # apply it here too so the links are checked concurrently instead.
+        sem = asyncio.Semaphore(8)
+
+        async def _check(target: str) -> tuple[str, int | str]:
+            async with sem:
+                try:
+                    resp = await client.head(target)
+                    return target, resp.status_code
+                except Exception:  # noqa: BLE001
+                    return target, "timeout"
+
+        results = await asyncio.gather(*[_check(t) for t in targets])
+        checked = len(results)
+        for target, status in results:
             row = {
                 "source_page": "/",
                 "broken_url": target,
@@ -1089,6 +1168,9 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
     findings_crawl: list[str] = []
     findings_index: list[str] = []
     findings_sec: list[str] = []
+    findings_mobile: list[str] = []
+    findings_schema: list[str] = []
+    homepage_fetched = False
     async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
         try:
             robots = await client.get(f"https://{domain}/robots.txt")
@@ -1103,6 +1185,8 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
             findings_crawl.append(f"sitemap.xml status {sm.status_code}")
         except Exception as exc:  # noqa: BLE001
             findings_crawl.append(f"sitemap.xml unreachable: {exc}")
+
+        html = ""
         try:
             home = await client.get(url if url.startswith("http") else f"https://{domain}")
             findings_index.append(f"Homepage status {home.status_code}")
@@ -1110,22 +1194,73 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
                 findings_sec.append("HTTPS in use")
             else:
                 findings_sec.append("Homepage not on HTTPS")
+            html = home.text or ""
+            homepage_fetched = True
         except Exception as exc:  # noqa: BLE001
             findings_index.append(f"Homepage fetch failed: {exc}")
 
-    sections = {
+        if html:
+            low = html.lower()
+            if 'rel="canonical"' in low or "rel='canonical'" in low:
+                findings_crawl.append("Canonical tag present on homepage")
+            else:
+                findings_crawl.append("No canonical tag found on homepage sample")
+            if re.search(r'name=["\']robots["\'][^>]*noindex', low):
+                findings_index.append("WARNING: homepage meta robots contains noindex")
+
+            has_viewport = bool(re.search(r'<meta[^>]+name=["\']viewport["\']', low))
+            findings_mobile.append(
+                "Viewport meta tag present"
+                if has_viewport
+                else "No viewport meta tag found — mobile rendering at risk"
+            )
+
+            ld_count = low.count("application/ld+json")
+            findings_schema.append(
+                f"{ld_count} JSON-LD block(s) found on homepage"
+                if ld_count
+                else "No JSON-LD structured data found on homepage"
+            )
+
+    # Presence checks below are real signal (found or not), unlike a fabricated
+    # mid-range number — but they only cover the homepage sample, so they're a
+    # weaker signal than a full crawl. Categories with no measurable signal at
+    # all (performance) get score=None, never a guessed number — per this
+    # skill's own rule: a confident score on an unmeasured category is worse
+    # than an admitted gap.
+    sections: dict[str, dict[str, Any]] = {
         "crawlability": {"score": 60, "findings": findings_crawl or ["Insufficient data"]},
         "indexation": {"score": 60, "findings": findings_index or ["Insufficient data"]},
         "performance": {
-            "score": 50,
-            "findings": ["Live CWV not measured in this pass — use CrUX / Lighthouse for LCP/INP/CLS"],
+            "score": None,
+            "findings": [
+                "Not measured in this pass — LCP/INP/CLS need field or lab data. "
+                "Run the cwv-measurement skill for real numbers."
+            ],
         },
-        "mobile": {"score": 50, "findings": ["Mobile rendering not fully evaluated in lightweight pass"]},
         "security": {"score": 70, "findings": findings_sec or ["Insufficient data"]},
-        "structured_data": {"score": 50, "findings": ["Schema validation not run in lightweight pass"]},
     }
-    scores = [s["score"] for s in sections.values()]
-    overall = round(sum(scores) / len(scores))
+    if homepage_fetched:
+        sections["mobile"] = {
+            "score": 75 if "Viewport meta tag present" in findings_mobile else 35,
+            "findings": findings_mobile,
+        }
+        sections["structured_data"] = {
+            "score": 75 if ld_count else 35,
+            "findings": findings_schema,
+        }
+    else:
+        sections["mobile"] = {
+            "score": None,
+            "findings": ["Homepage fetch failed — viewport presence not checked"],
+        }
+        sections["structured_data"] = {
+            "score": None,
+            "findings": ["Homepage fetch failed — structured data presence not checked"],
+        }
+
+    scores = [s["score"] for s in sections.values() if isinstance(s.get("score"), (int, float))]
+    overall = round(sum(scores) / len(scores)) if scores else None
     return {
         "site": domain,
         "display_name": display_name,
@@ -1135,15 +1270,181 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
             {
                 "priority": "High",
                 "issue": "Complete performance + schema validation",
-                "fix": "Run Lighthouse / Rich Results Test and re-check",
+                "fix": "Run cwv-measurement for real Core Web Vitals; add JSON-LD if structured data is missing",
             }
         ],
         "severity": "info",
     }
 
 
-async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
-    """Comprehensive SEO audit across discovered site pages (sitemap + crawl)."""
+def find_duplicate_field(pages: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    """Screaming-Frog-style duplicate report: group pages sharing the same
+    normalized value for `key` (title / meta_description), flag any group with
+    2+ pages. Duplicate titles/descriptions split ranking signal and CTR across
+    pages that should each own a distinct query — seo-audit's per-page checks
+    never compared pages against each other, so this was invisible before.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    for p in pages:
+        if not isinstance(p, dict):
+            continue
+        raw = str(p.get(key) or "").strip()
+        if not raw:
+            continue
+        norm = re.sub(r"\s+", " ", raw.lower())
+        bucket = groups.setdefault(norm, {"value": raw, "urls": []})
+        url = p.get("url") or p.get("path") or ""
+        if url and url not in bucket["urls"]:
+            bucket["urls"].append(url)
+    return [
+        {"value": g["value"], "urls": g["urls"], "count": len(g["urls"])}
+        for g in groups.values()
+        if len(g["urls"]) >= 2
+    ]
+
+
+def _psi_metric(metrics: dict[str, Any], key: str) -> tuple[float | None, str | None]:
+    m = metrics.get(key) or {}
+    return m.get("percentile"), m.get("category")
+
+
+def parse_pagespeed_response(data: dict[str, Any]) -> dict[str, Any]:
+    """Pure parser for a PageSpeed Insights v5 response — field (CrUX) vs lab
+    (Lighthouse) kept separate per cwv-measurement/SKILL.md: never present one
+    as the other. No CrUX entry is normal for lower-traffic pages, not an error.
+    """
+    field: dict[str, Any] | None = None
+    loading_exp = data.get("loadingExperience") or {}
+    metrics = loading_exp.get("metrics") or {}
+    if metrics:
+        lcp_ms, lcp_cat = _psi_metric(metrics, "LARGEST_CONTENTFUL_PAINT_MS")
+        cls_x100, cls_cat = _psi_metric(metrics, "CUMULATIVE_LAYOUT_SHIFT_SCORE")
+        inp_ms, inp_cat = _psi_metric(metrics, "INTERACTION_TO_NEXT_PAINT")
+        if inp_ms is None:
+            inp_ms, inp_cat = _psi_metric(metrics, "FIRST_INPUT_DELAY_MS")
+        field = {
+            "lcp_ms": lcp_ms,
+            "lcp_category": lcp_cat,
+            "inp_ms": inp_ms,
+            "inp_category": inp_cat,
+            "cls": (cls_x100 / 100) if cls_x100 is not None else None,
+            "cls_category": cls_cat,
+            "overall_category": loading_exp.get("overall_category"),
+        }
+
+    lab: dict[str, Any] | None = None
+    lh = data.get("lighthouseResult") or {}
+    perf = (lh.get("categories") or {}).get("performance") or {}
+    audits = lh.get("audits") or {}
+    if perf.get("score") is not None:
+        lab = {
+            "performance_score": round(float(perf["score"]) * 100),
+            "lcp_ms": (audits.get("largest-contentful-paint") or {}).get("numericValue"),
+            "cls": (audits.get("cumulative-layout-shift") or {}).get("numericValue"),
+            "tbt_ms": (audits.get("total-blocking-time") or {}).get("numericValue"),
+        }
+
+    passes: bool | None = None
+    if field:
+        cats = [field.get("lcp_category"), field.get("inp_category"), field.get("cls_category")]
+        if all(cats):
+            passes = all(c == "FAST" for c in cats)
+
+    return {"field": field, "lab": lab, "passes_core_web_vitals": passes}
+
+
+async def run_cwv_measurement(url: str, *, display_name: str) -> dict[str, Any]:
+    """Core Web Vitals field/lab data per the cwv-measurement skill (mock-safe).
+
+    Division of labour vs. technical-seo: this measures and diagnoses; the
+    technical-seo-audit skill's checklist fixes. Field data (CrUX) is what
+    Google's page-experience signal actually uses — lab data (Lighthouse) only
+    explains why field numbers look the way they do. Never presented as the
+    same thing; see cwv-measurement/SKILL.md.
+    """
+    from app.integrations.llm import extract_domain
+
+    settings = get_settings()
+    domain = extract_domain(url)
+    target = url if url.startswith("http") else f"https://{domain}"
+
+    if settings.use_mock_providers:
+        return {
+            "site": domain,
+            "display_name": display_name,
+            "strategy": "mobile",
+            "field_data_available": True,
+            "field": {
+                "lcp_ms": 2350,
+                "lcp_category": "AVERAGE",
+                "inp_ms": 180,
+                "inp_category": "FAST",
+                "cls": 0.08,
+                "cls_category": "FAST",
+                "overall_category": "AVERAGE",
+            },
+            "lab": {"performance_score": 78, "lcp_ms": 2600, "cls": 0.09, "tbt_ms": 210},
+            "passes_core_web_vitals": False,
+            "source": "mock",
+            "note": None,
+        }
+
+    import httpx
+
+    params: dict[str, str] = {"url": target, "strategy": "mobile", "category": "performance"}
+    if settings.pagespeed_api_key:
+        params["key"] = settings.pagespeed_api_key
+    base_result = {
+        "site": domain,
+        "display_name": display_name,
+        "strategy": "mobile",
+        "field_data_available": False,
+        "field": None,
+        "lab": None,
+        "passes_core_web_vitals": None,
+        "source": "pagespeed_insights",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(
+                "https://www.googleapis.com/pagespeedonline/v5/runPagespeed", params=params
+            )
+        if resp.status_code != 200:
+            return {**base_result, "error": f"PageSpeed Insights returned {resp.status_code}"}
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {**base_result, "error": f"PageSpeed Insights unreachable: {exc}"}
+
+    parsed = parse_pagespeed_response(data)
+    field = parsed["field"]
+    return {
+        **base_result,
+        "field_data_available": field is not None,
+        "field": field,
+        "lab": parsed["lab"],
+        "passes_core_web_vitals": parsed["passes_core_web_vitals"],
+        "note": (
+            None
+            if field
+            else "No CrUX field data for this URL (below Chrome traffic threshold) — "
+            "lab data only explains what might be slow, it is not real-user experience."
+        ),
+    }
+
+
+async def run_seo_audit(
+    url: str,
+    *,
+    display_name: str,
+    commercial_scope: dict[str, Any] | None = None,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """Comprehensive SEO audit across discovered site pages (sitemap + crawl).
+
+    When commercial_scope (CDD) is provided, page selection and scoring follow
+    business hierarchy: Home → service hubs → services → sub-services, with
+    primary focus on URLs matching products / promotion list / keywords / geo.
+    """
     import asyncio
     from urllib.parse import urlparse
 
@@ -1152,7 +1453,36 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
 
     settings = get_settings()
     domain = extract_domain(url)
-    max_pages = settings.effective_seo_audit_max_pages
+    page_cap = int(max_pages) if max_pages is not None and int(max_pages) > 0 else settings.effective_seo_audit_max_pages
+    max_pages = page_cap
+    commercial = dict(commercial_scope or {})
+
+    def _done(report: dict[str, Any]) -> dict[str, Any]:
+        from app.services.page_clusters import finalize_seo_audit_clusters
+
+        report.setdefault("commercial_scope", commercial)
+        pages = report.get("pages") or []
+        dup_titles = find_duplicate_field(pages, "title")
+        dup_meta = find_duplicate_field(pages, "meta_description")
+        report["duplicate_titles"] = dup_titles
+        report["duplicate_meta_descriptions"] = dup_meta
+        if dup_titles:
+            report.setdefault("warnings", []).append(
+                {
+                    "issue": f"{len(dup_titles)} duplicate title group(s) across "
+                    f"{sum(d['count'] for d in dup_titles)} pages",
+                    "ref": "duplicate titles",
+                }
+            )
+        if dup_meta:
+            report.setdefault("warnings", []).append(
+                {
+                    "issue": f"{len(dup_meta)} duplicate meta description group(s) across "
+                    f"{sum(d['count'] for d in dup_meta)} pages",
+                    "ref": "duplicate meta descriptions",
+                }
+            )
+        return finalize_seo_audit_clusters(report, commercial=commercial)
 
 
     def _score_band(score: int) -> str:
@@ -1227,6 +1557,38 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
                 "passing": ["Title tag present", "Canonical present"],
             },
             {
+                "url": f"https://{domain}/services/seo",
+                "path": "/services/seo",
+                "title": "SEO services",
+                "status": 200,
+                "status_label": "Working",
+                "overall_score": 71,
+                "score_band": "Good",
+                "critical": [],
+                "warnings": [
+                    {"issue": "H1 does not match the service keyword", "ref": "h1"},
+                ],
+                "opportunities": [
+                    {"issue": "Add Service schema", "ref": "schema"},
+                ],
+                "passing": ["Title tag present"],
+            },
+            {
+                "url": f"https://{domain}/services/web-design",
+                "path": "/services/web-design",
+                "title": "Web design",
+                "status": 200,
+                "status_label": "Working",
+                "overall_score": 69,
+                "score_band": "Needs significant work",
+                "critical": [],
+                "warnings": [
+                    {"issue": "Thin comparison to adjacent services", "ref": "body content"},
+                ],
+                "opportunities": [],
+                "passing": ["Title tag present", "Canonical present"],
+            },
+            {
                 "url": f"https://{domain}/blog",
                 "path": "/blog",
                 "title": "Blog",
@@ -1242,6 +1604,23 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
                     {"issue": "Diversify anchor text on related-post links", "ref": "internal links"},
                 ],
                 "passing": ["Title tag present", "Viewport meta present"],
+            },
+            {
+                "url": f"https://{domain}/blog/local-seo-checklist",
+                "path": "/blog/local-seo-checklist",
+                "title": "Local SEO checklist",
+                "status": 200,
+                "status_label": "Working",
+                "overall_score": 64,
+                "score_band": "Needs significant work",
+                "critical": [],
+                "warnings": [
+                    {"issue": "Article has no author byline", "ref": "E-E-A-T"},
+                ],
+                "opportunities": [
+                    {"issue": "Add Article schema", "ref": "schema"},
+                ],
+                "passing": ["Title tag present"],
             },
             {
                 "url": f"https://{domain}/contact",
@@ -1292,7 +1671,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
             for it in p["opportunities"]
         ]
         score = round(sum(p["overall_score"] for p in mock_pages) / len(mock_pages))
-        return {
+        return _done({
             "site": domain,
             "display_name": display_name,
             "pages_analyzed": len(mock_pages),
@@ -1308,7 +1687,8 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
             ],
             "pages": mock_pages,
             "severity": "warning" if score < 80 else "info",
-        }
+            "commercial_scope": commercial,
+        })
 
     # Live: discover all pages, audit each
     from html.parser import HTMLParser
@@ -1377,6 +1757,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
         opportunities: list[dict] = []
         passing: list[str] = []
         title = ""
+        meta_desc = ""
 
         if status_code == 0:
             critical.append({"issue": "Page could not be fetched", "ref": page_url})
@@ -1391,6 +1772,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
             except Exception:  # noqa: BLE001
                 pass
             title = (p.title or "").strip()
+            meta_desc = (p.meta_desc or "").strip()
             if not title:
                 critical.append({"issue": "Missing title tag", "ref": "title tag"})
             elif len(title) < 20:
@@ -1442,6 +1824,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
             "url": page_url,
             "path": _path_label(page_url),
             "title": title or _path_label(page_url),
+            "meta_description": meta_desc,
             "status": status_code,
             "status_label": _status_label(status_code),
             "overall_score": score,
@@ -1524,6 +1907,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
             "url": page_url,
             "path": _path_label(page_url),
             "title": title or _path_label(page_url),
+            "meta_description": meta_desc,
             "status": status_code,
             "status_label": _status_label(status_code),
             "overall_score": score,
@@ -1547,7 +1931,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
             }
         )
 
-    # Bot-walled sites: Perplexity research, audit from returned meta
+    # Bot-walled sites: Google index first, then Perplexity if the index is thin
     home_probe = await fetch_url(url if url.startswith("http") else f"https://{domain}")
     home_err = (home_probe.get("error") or "")
     home_blocked = home_err in {
@@ -1557,6 +1941,63 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
     }
     if home_blocked:
         from app.integrations.site_research import research_ready, research_site_crawl
+
+        indexed = await discover_site_urls(
+            url if url.startswith("http") else f"https://{domain}",
+            max_pages=max(max_pages * 3, max_pages),
+        )
+        if len(indexed) >= 2:
+            from app.services.page_clusters import prioritize_urls_for_audit
+
+            indexed = prioritize_urls_for_audit(
+                indexed,
+                commercial=commercial,
+                max_pages=max_pages,
+                home_url=url if url.startswith("http") else f"https://{domain}",
+            )
+            pages_list = [
+                {
+                    "url": u,
+                    "path": _path_label(u),
+                    "title": _path_label(u),
+                    "status": 202,
+                    "status_label": "WAF blocked — URL from Google index",
+                    "overall_score": 0,
+                    "score_band": "Not measured",
+                    "critical": [],
+                    "warnings": [
+                        {
+                            "issue": "Live HTML blocked by captcha/WAF — on-page checks skipped",
+                            "ref": u,
+                        }
+                    ],
+                    "opportunities": [],
+                    "passing": [],
+                }
+                for u in indexed
+            ]
+            return _done({
+                "site": domain,
+                "display_name": display_name,
+                "pages_analyzed": len(pages_list),
+                "overall_score": 0,
+                "score_band": "Not measured (WAF)",
+                "critical": list(site_critical),
+                "warnings": list(site_warnings)
+                + [
+                    {
+                        "issue": (
+                            f"SiteGround/captcha blocked live HTML. "
+                            f"{len(pages_list)} pages listed from Google's index."
+                        ),
+                        "ref": domain,
+                    }
+                ],
+                "opportunities": [],
+                "passing": list(site_passing),
+                "pages": pages_list,
+                "severity": "warning",
+            })
 
         if research_ready():
             research = await research_site_crawl(url, max_pages=max_pages)
@@ -1585,7 +2026,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
                     if item not in passing and len(passing) < 12:
                         passing.append(item)
                 score = round(sum(int(p["overall_score"]) for p in pages_list) / len(pages_list))
-                return {
+                return _done({
                     "site": domain,
                     "display_name": display_name,
                     "pages_analyzed": len(pages_list),
@@ -1597,19 +2038,27 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
                     "passing": passing,
                     "pages": pages_list,
                     "severity": "critical" if score < 50 else "warning" if score < 80 else "info",
-                }
+                })
 
-    page_urls = await discover_site_urls(url, max_pages=max_pages)
-    if not page_urls:
-        page_urls = [url if url.startswith("http") else f"https://{domain}"]
+    from app.services.page_clusters import prioritize_urls_for_audit
 
-    # Prefer full research audit when Perplexity returned a richer page set
+    discovered = await discover_site_urls(url, max_pages=max(max_pages * 3, max_pages))
+    if not discovered:
+        discovered = [url if url.startswith("http") else f"https://{domain}"]
+    page_urls = prioritize_urls_for_audit(
+        discovered,
+        commercial=commercial,
+        max_pages=max_pages,
+        home_url=url if url.startswith("http") else f"https://{domain}",
+    )
+
+    # Perplexity only when the live crawl found almost nothing (JS / WAF).
     from app.integrations.site_research import research_ready, research_site_crawl
 
-    if research_ready():
+    if research_ready() and len(page_urls) < 8:
         research = await research_site_crawl(url, max_pages=max_pages)
         research_pages = research.get("pages") or []
-        if len(research_pages) >= len(page_urls) and research_pages:
+        if research_pages:
             pages_list = [_audit_from_research_page(p) for p in research_pages]
             critical = list(site_critical)
             warnings = list(site_warnings)
@@ -1633,7 +2082,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
                 if item not in passing and len(passing) < 12:
                     passing.append(item)
             score = round(sum(int(p["overall_score"]) for p in pages_list) / len(pages_list))
-            return {
+            return _done({
                 "site": domain,
                 "display_name": display_name,
                 "pages_analyzed": len(pages_list),
@@ -1645,7 +2094,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
                 "passing": passing,
                 "pages": pages_list,
                 "severity": "critical" if score < 50 else "warning" if score < 80 else "info",
-            }
+            })
 
     sem = asyncio.Semaphore(5)
 
@@ -1689,7 +2138,7 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
     else:
         score = _page_score(critical, warnings, opportunities)
 
-    return {
+    return _done({
         "site": domain,
         "display_name": display_name,
         "pages_analyzed": len(pages_list),
@@ -1701,13 +2150,14 @@ async def run_seo_audit(url: str, *, display_name: str) -> dict[str, Any]:
         "passing": passing,
         "pages": pages_list,
         "severity": "critical" if score < 50 else "warning" if score < 80 else "info",
-    }
+    })
 
 
 async def discover_competitors(
     display_name: str,
     domain: str,
     industry: str | None = None,
+    hints: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Auto-discover 6–10 competitors using the ads-category-competitors skill only (no DataForSEO)."""
     settings = get_settings()
@@ -1725,7 +2175,7 @@ async def discover_competitors(
 
     from app.integrations.llm import synthesize_json
     from app.integrations.web_fetch import fetch_url, page_text_excerpt, parse_html
-    from app.skills import skill_system_preamble
+    from app.agents.prompts import skill_system_preamble
 
     client_host = domain.lower().removeprefix("www.")
     client_aliases = {client_host}
@@ -1761,6 +2211,13 @@ async def discover_competitors(
     resolved = str(fetched.get("url") or domain)
 
     industry_focus = vertical if industry else "infer from site excerpt — any vertical"
+    hint_line = ""
+    if hints:
+        hint_line = (
+            "Discovery category hints (NOT domains — expand these into real company websites): "
+            + "; ".join(str(h) for h in hints if str(h).strip())[:400]
+            + "\n"
+        )
     system = (
         f"{skill_preamble}\n\n"
         "For this step only: identify 8–10 real competing businesses for tiered analysis. "
@@ -1789,6 +2246,7 @@ async def discover_competitors(
         (
             f"Company: {display_name}\nDomain: {client_host}\nResolved URL: {resolved}\n"
             f"Industry / vertical focus: {industry_focus}\n"
+            f"{hint_line}"
             f"Page title: {parser.title}\n"
             f"Meta: {parser.meta.get('description', '') if getattr(parser, 'meta', None) else ''}\n"
             f"Fetch error: {fetched.get('error')}\n"
@@ -1821,30 +2279,50 @@ async def discover_competitors(
         ),
     ]
 
+    last_error = ""
     for i, user_prompt in enumerate(passes):
         if len(comps) >= 8 and i > 0:
             break
         # Always run pass 0; later passes only if thin
         if i > 0 and len(comps) >= 6:
             break
-        try:
-            payload = await synthesize_json(system, user_prompt)
-            before = len(comps)
-            _ingest(payload)
-            log.info(
-                "discover_competitors_skill_pass",
-                pass_n=i,
-                added=len(comps) - before,
-                total=len(comps),
-                domain=client_host,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "discover_competitors_skill_failed",
-                pass_n=i,
-                error=str(exc),
-                domain=client_host,
-            )
+        payload = None
+        models_to_try = [settings.competitor_model]
+        if settings.skill_model and settings.skill_model != settings.competitor_model:
+            models_to_try.append(settings.skill_model)
+        for model_name in models_to_try:
+            try:
+                payload = await synthesize_json(
+                    system,
+                    user_prompt,
+                    model=model_name,
+                    raise_on_error=True,
+                    max_tokens=8192 if "gemini" in model_name.lower() else 4096,
+                )
+                last_error = ""
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)[:300]
+                log.warning(
+                    "discover_competitors_skill_failed",
+                    pass_n=i,
+                    model=model_name,
+                    error=last_error,
+                    domain=client_host,
+                )
+        if not payload:
+            continue
+        before = len(comps)
+        _ingest(payload)
+        log.info(
+            "discover_competitors_skill_pass",
+            pass_n=i,
+            added=len(comps) - before,
+            total=len(comps),
+            domain=client_host,
+        )
 
-    log.info("discover_competitors_skill", count=len(comps), domain=client_host)
+    log.info("discover_competitors_skill", count=len(comps), domain=client_host, error=last_error or None)
+    if not comps and last_error:
+        raise RuntimeError(last_error)
     return comps[:10]

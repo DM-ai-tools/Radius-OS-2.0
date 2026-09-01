@@ -72,13 +72,6 @@ def cluster_competitors(items: list[dict[str, str]]) -> dict[str, str]:
     return mapping
 
 
-def fake_embedding(text: str, dim: int = 768) -> list[float]:
-    rng = np.random.default_rng(abs(hash(text)) % (2**32))
-    vec = rng.normal(0, 1, dim)
-    vec = vec / (np.linalg.norm(vec) + 1e-9)
-    return vec.astype(float).tolist()
-
-
 def tracking_anomaly_flags(event_counts: list[int] | None = None) -> list[str]:
     """IsolationForest-style advisory flags."""
     if event_counts is None:

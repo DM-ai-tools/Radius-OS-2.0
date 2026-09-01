@@ -51,12 +51,25 @@ async def test_known_changes_forbidden_for_view_only_role(api_client, db_session
     assert resp.status_code == 403
 
 
-async def test_manual_competitor_forbidden_for_view_only_role(api_client, db_session):
+async def test_manual_competitor_forbidden_for_non_searchfit_role(api_client, db_session):
+    """CSM owns discovery/tracking T5 only — cannot add manual competitors (v1.9 shared skill)."""
     client_id = await _make_client(db_session)
-    _, token = await make_user(db_session, "content_seo_specialist", "viewer3@example.com")
+    _, token = await make_user(db_session, "client_success_manager", "csm-comp@example.com")
     resp = await api_client.post(
         f"/api/v1/clients/{client_id}/competitors/manual",
         json={"name": "Rival Co", "url": "https://rival.example"},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 403
+
+
+async def test_manual_competitor_allowed_for_content_seo(api_client, db_session):
+    """Content SEO is in SearchFit base roles — competitor is a common skill."""
+    client_id = await _make_client(db_session)
+    _, token = await make_user(db_session, "content_seo_specialist", "content-comp@example.com")
+    resp = await api_client.post(
+        f"/api/v1/clients/{client_id}/competitors/manual",
+        json={"name": "Rival Co", "url": "https://rival.example"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
