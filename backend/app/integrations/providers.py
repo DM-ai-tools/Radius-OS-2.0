@@ -490,8 +490,6 @@ async def crawl_site(url: str, *, max_pages: int | None = None) -> dict[str, Any
             "severity": "warning",
         }
 
-    import asyncio
-
     from app.integrations.site_research import research_ready, research_site_crawl
     from app.integrations.web_fetch import discover_site_urls, fetch_url, parse_html
 
@@ -918,8 +916,6 @@ async def check_broken_links(url: str) -> dict[str, Any]:
 
 
 def _extract_keyword(message: str, fallback: str) -> str:
-    import re
-
     m = re.search(
         r"(?:rankings? for|keyword[:\s]+|optimize(?:\s+for)?)\s+[\"']?([^\"'\n.]+)[\"']?",
         message,
@@ -1623,7 +1619,6 @@ async def run_seo_audit(
     business hierarchy: Home → service hubs → services → sub-services, with
     primary focus on URLs matching products / promotion list / keywords / geo.
     """
-    import asyncio
     from urllib.parse import urlparse
 
     from app.integrations.llm import extract_domain
