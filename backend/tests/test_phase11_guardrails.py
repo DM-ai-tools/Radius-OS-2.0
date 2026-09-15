@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from app.agents.prompts import load_skill
 from app.services.on_page_seo import (
     apply_trademark_block,
     build_internal_linking_plan,
@@ -14,7 +15,6 @@ from app.services.on_page_seo import (
     selected_on_page_rows,
 )
 from app.services.role_skills import ROLE_PHASE_PERMISSIONS
-from app.agents.prompts import load_skill
 
 COMPETITIVE = {
     "competitor_names": ["Rival A"],

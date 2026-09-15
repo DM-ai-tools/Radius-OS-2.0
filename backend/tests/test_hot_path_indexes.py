@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
-from app.db import ensure_hot_path_indexes, engine
+from app.db import engine, ensure_hot_path_indexes
 
 EXPECTED_INDEXES = {
     "ix_discovery_responses_client_id",

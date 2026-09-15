@@ -8,7 +8,9 @@ from urllib.parse import urlparse
 
 from app.services.create_topic import format_audience_label
 from app.services.create_topic import funnel_balance as _funnel_balance
-from app.services.create_topic import funnel_balance_warnings as _funnel_balance_warnings
+from app.services.create_topic import (
+    funnel_balance_warnings as _funnel_balance_warnings,
+)
 
 _SELECT_HINTS = (
     "write the full draft",
@@ -72,11 +74,11 @@ def parse_topic_selection(message: str | None) -> dict[str, str] | None:
     m = re.search(r"\((https?://[^)\s]+|/[^)\s]+)\)", text)
     if m:
         url = m.group(1).strip()
-    m2 = re.search(r"(?:url|path)\s*[:=]\s*(\S+)", text, re.I)
+    m2 = re.search(r"(?:url|path)\s*[:=]\s*(\S+)", text, re.IGNORECASE)
     if m2:
         url = m2.group(1).strip().rstrip(".,)")
     keyword = ""
-    m3 = re.search(r"(?:for|topic)\s*[:]\s*(.+?)(?:\s*\(|$)", text, re.I)
+    m3 = re.search(r"(?:for|topic)\s*[:]\s*(.+?)(?:\s*\(|$)", text, re.IGNORECASE)
     if m3:
         keyword = m3.group(1).strip(" :")
     if not url and not keyword:

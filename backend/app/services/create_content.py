@@ -6,17 +6,17 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+from app.agents.prompts import load_shared_reference, load_skill_file
 from app.config import get_settings
+from app.integrations.llm import generate_openrouter_image, synthesize_json
 from app.logging_config import get_logger
 from app.services.publish_preview import sanitize_meta_description
-from app.integrations.llm import generate_openrouter_image, synthesize_json
-from app.agents.prompts import load_shared_reference, load_skill_file
 
 log = get_logger("create_content")
 
 _WEAK_DIFF = re.compile(
     r"^(lead with|ranking pages typically|n/?a|none|tbd|todo)\b",
-    re.I,
+    re.IGNORECASE,
 )
 # Writer-instruction / outline notes must never ship as article body.
 _INSTRUCTIONAL = re.compile(
@@ -24,11 +24,11 @@ _INSTRUCTIONAL = re.compile(
     r"this section should|write \d+ paragraphs|reach(?:es)? the briefed|"
     r"approved brief is missing|missing the required author|"
     r"please provide the named human|named human author or reviewer)",
-    re.I,
+    re.IGNORECASE,
 )
 _IMPERATIVE_OPEN = re.compile(
     r"^(cover|write|expand|include|add|ensure|make sure|this section)\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -134,7 +134,7 @@ def _outline_sections(brief: dict[str, Any]) -> list[dict[str, Any]]:
             title = str(item.get("title") or item.get("heading") or "").strip()
             if title.upper().startswith("H1"):
                 continue
-            if re.match(r"^h\d\b", title, re.I):
+            if re.match(r"^h\d\b", title, re.IGNORECASE):
                 title = title.split(":", 1)[-1].strip()
             notes = item.get("notes") or []
             if isinstance(notes, str):
@@ -819,7 +819,7 @@ _INVENTED_STAT = re.compile(
     r"\b(\d{1,3}(?:\.\d+)?%\s+(?:of|increase|decrease|growth|boost|more|higher|lower)"
     r"|studies show|research shows|according to (?:a |our )?study"
     r"|\$\d[\d,]*(?:\.\d+)?\s+(?:ROI|revenue|savings))\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -1022,7 +1022,7 @@ def _section_prose(
             + f"{angle.rstrip('.')}."
         )
         p3 = (
-            f"Skip generic pitches. If a claim cannot be evidenced, it does not belong here."
+            "Skip generic pitches. If a claim cannot be evidenced, it does not belong here."
             + (f" Ranking pages often lead with “{floor}” — answer that only as it applies to {kw}." if floor else "")
             + related_line
         )
@@ -1337,7 +1337,7 @@ def _build_markdown(
 
     # FAQ from PAA only — skip if the full page already includes FAQ
     faq_in = faq_answers if faq_answers is not None else (brief.get("faq") or [])
-    already_faq = has_full and re.search(r"^##\s+faq\b", full_page, re.I | re.M)
+    already_faq = has_full and re.search(r"^##\s+faq\b", full_page, re.IGNORECASE | re.MULTILINE)
     if faq_in and not already_faq:
         lines.extend(["## FAQ", ""])
         for q in faq_in:
@@ -1361,7 +1361,7 @@ def _build_markdown(
             if v_n:
                 verify_placeholders.append(f"FAQ: {question}")
 
-    already_cta = has_full and re.search(r"^##\s+(next step|get started|contact)\b", full_page, re.I | re.M)
+    already_cta = has_full and re.search(r"^##\s+(next step|get started|contact)\b", full_page, re.IGNORECASE | re.MULTILINE)
     cta_text = _usable_prose(str(cta or ""))
     if cta_text and len(cta_text) < 80:
         cta_text = ""

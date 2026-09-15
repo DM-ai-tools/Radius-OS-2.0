@@ -168,13 +168,13 @@ SUB_PHASES: list[dict[str, Any]] = [
 _EMPTY = (None, "", [], {}, ())
 _PLACEHOLDER = re.compile(
     r"^(tbd|n/?a|na|none|unknown|todo|pending|to confirm|—|-|\.)$",
-    re.I,
+    re.IGNORECASE,
 )
 
 # Access checklist often uses these as real statuses (not empty)
 _ACCESS_STATUS_OK = re.compile(
     r"^(pending|granted|standard access|available|have access|no access|denied|requested)$",
-    re.I,
+    re.IGNORECASE,
 )
 
 

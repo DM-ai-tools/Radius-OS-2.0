@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 from app.services.technical_seo_companion import (
     assign_issue_confidence,
     build_internal_linking_snapshot,

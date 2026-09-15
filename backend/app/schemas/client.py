@@ -5,7 +5,6 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-
 PageType = Literal[
     "home",
     "hub",

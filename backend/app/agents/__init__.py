@@ -1,16 +1,16 @@
-from app.agents.discovery import run_discovery
-from app.agents.tracking import run_tracking
-from app.agents.website import run_website
 from app.agents.competitor import run_competitor
-from app.agents.search_demand import run_search_demand
-from app.agents.content_strategy import run_content_strategy
-from app.agents.site_architecture import run_site_architecture
-from app.agents.technical_seo import run_technical_seo
 from app.agents.content_audit import run_content_audit
 from app.agents.content_planning import run_content_planning
 from app.agents.content_production import run_content_production
+from app.agents.content_strategy import run_content_strategy
+from app.agents.discovery import run_discovery
 from app.agents.on_page_seo import run_on_page_seo
 from app.agents.publishing import run_publishing
+from app.agents.search_demand import run_search_demand
+from app.agents.site_architecture import run_site_architecture
+from app.agents.technical_seo import run_technical_seo
+from app.agents.tracking import run_tracking
+from app.agents.website import run_website
 
 AGENT_RUNNERS = {
     "discovery_agent": run_discovery,
@@ -30,17 +30,17 @@ AGENT_RUNNERS = {
 
 __all__ = [
     "AGENT_RUNNERS",
-    "run_discovery",
-    "run_tracking",
-    "run_website",
     "run_competitor",
-    "run_search_demand",
-    "run_content_strategy",
-    "run_site_architecture",
-    "run_technical_seo",
     "run_content_audit",
     "run_content_planning",
     "run_content_production",
+    "run_content_strategy",
+    "run_discovery",
     "run_on_page_seo",
     "run_publishing",
+    "run_search_demand",
+    "run_site_architecture",
+    "run_technical_seo",
+    "run_tracking",
+    "run_website",
 ]

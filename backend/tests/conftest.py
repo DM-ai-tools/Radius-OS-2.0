@@ -19,16 +19,16 @@ os.environ["USE_MOCK_LLM"] = "true"
 os.environ["USE_MOCK_PROVIDERS"] = "true"
 os.environ["ENVIRONMENT"] = "development"
 
-import pytest_asyncio  # noqa: E402
-from httpx import ASGITransport, AsyncClient  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
-from app.config import clear_settings_cache  # noqa: E402
-from app.db import AsyncSessionLocal, Base, engine  # noqa: E402
-from app.main import app  # noqa: E402
-from app.models import Role, User  # noqa: E402
-from app.security import create_access_token, hash_password  # noqa: E402
-from app.seed import seed_all  # noqa: E402
+from app.config import clear_settings_cache
+from app.db import AsyncSessionLocal, Base, engine
+from app.main import app
+from app.models import Role, User
+from app.security import create_access_token, hash_password
+from app.seed import seed_all
 
 clear_settings_cache()
 

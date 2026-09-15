@@ -398,7 +398,10 @@ async def import_discovery_document(
     await require_permission(user, db, "discovery_agent", need_trigger=True)
     from decimal import Decimal
 
-    from app.services.intake_ai import extract_cdd_fields_from_text, extract_text_from_upload
+    from app.services.intake_ai import (
+        extract_cdd_fields_from_text,
+        extract_text_from_upload,
+    )
 
     client = (
         await db.execute(select(Client).where(Client.id == client_id))
@@ -418,7 +421,7 @@ async def import_discovery_document(
         # PDF up to 12MB) — running it inline would block the single event loop
         # thread for every other concurrent request (chat SSE streams included).
         text = await asyncio.to_thread(extract_text_from_upload, filename, raw)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(400, f"Could not read file: {exc}") from exc
 
     if not (text or "").strip():
@@ -492,12 +495,12 @@ async def get_service_prioritization(
 ):
     """Build or return the service prioritization pack (pre–Phase 5 checkpoint)."""
     await require_permission(user, db, "search_demand", need_trigger=True)
+    from app.agents.search_demand import _page_target_seeds, _products_list
     from app.services.competitive_context import resolve_competitors
     from app.services.service_prioritization import (
         build_prioritization_pack,
         discover_competitor_service_trees,
     )
-    from app.agents.search_demand import _page_target_seeds, _products_list
 
     result = await db.execute(
         select(Client)
@@ -629,7 +632,11 @@ async def export_single_client_report(
     _: User = Depends(get_current_user),
 ):
     """Download one structured phase report as a PDF or Word document."""
-    from app.services.report_export import build_report_export, find_report, report_filename_slug
+    from app.services.report_export import (
+        build_report_export,
+        find_report,
+        report_filename_slug,
+    )
 
     fmt = format.lower()
     if fmt not in REPORT_EXPORT_FORMATS:

@@ -18,16 +18,16 @@ if str(ROOT) not in sys.path:
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from uuid import UUID  # noqa: E402
+from uuid import UUID
 
-from sqlalchemy import select  # noqa: E402
-from sqlalchemy.orm import selectinload  # noqa: E402
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-from app.agents.site_architecture import run_site_architecture  # noqa: E402
-from app.db import AsyncSessionLocal  # noqa: E402
-from app.models import ChatSession, Client  # noqa: E402
-from app.orchestration.pipeline import AGENT_TIMEOUT_SECONDS  # noqa: E402
-from app.services.url_mapping import collect_crawl_pages  # noqa: E402
+from app.agents.site_architecture import run_site_architecture
+from app.db import AsyncSessionLocal
+from app.models import ChatSession, Client
+from app.orchestration.pipeline import AGENT_TIMEOUT_SECONDS
+from app.services.url_mapping import collect_crawl_pages
 
 
 async def main() -> int:

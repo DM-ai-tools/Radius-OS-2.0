@@ -15,7 +15,11 @@ from typing import Any
 
 from app.config import get_settings
 from app.integrations import ahrefs, dataforseo
-from app.services.keyword_opportunity import detect_funnel, detect_intent, is_stale_year_keyword
+from app.services.keyword_opportunity import (
+    detect_funnel,
+    detect_intent,
+    is_stale_year_keyword,
+)
 from app.services.keyword_relevance import (
     RelevanceContext,
     compact_cleaning_audit,

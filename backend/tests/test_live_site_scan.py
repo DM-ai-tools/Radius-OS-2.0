@@ -143,7 +143,7 @@ async def test_scan_live_site_falls_back_to_perplexity_when_thin(monkeypatch):
     monkeypatch.setattr(live_site_scan, "discover_site_urls", _fake_discover)
     monkeypatch.setattr(live_site_scan, "fetch_url", _fake_fetch)
 
-    import app.integrations.site_research as site_research
+    from app.integrations import site_research
 
     monkeypatch.setattr(site_research, "research_ready", lambda: True)
     monkeypatch.setattr(site_research, "research_site_crawl", _fake_research_crawl)

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +13,11 @@ from app.logging_config import get_logger
 from app.models import AgentJob, Client, ClientDigitalProfile
 from app.services.agent_runtime import supersede_pending_findings
 from app.services.audit import log_event
-from app.services.phase_validation.criteria import AGENT_STATUS_ATTR, AGENT_SUMMARY_ATTR, get_criteria
+from app.services.phase_validation.criteria import (
+    AGENT_STATUS_ATTR,
+    AGENT_SUMMARY_ATTR,
+    get_criteria,
+)
 from app.services.phase_validation.revision import (
     escalate_after_max_attempts,
     revision_message_for,

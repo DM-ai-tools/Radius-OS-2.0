@@ -8,21 +8,26 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill
 from app.integrations.wordpress import load_connection as load_wordpress_connection
 from app.models import AgentJob, Client, FindingsLedger
 from app.services.agent_handoff import blocked_events, consume_events, handoff_events
 from app.services.agent_runtime import get_profile, supersede_pending_findings
 from app.services.audit import log_event
-from app.services.publishing import MODE_DRAFT, MODE_PREVIEW, MODE_PUBLISH, run_publishing_plan
+from app.services.publishing import (
+    MODE_DRAFT,
+    MODE_PREVIEW,
+    MODE_PUBLISH,
+    run_publishing_plan,
+)
 from app.services.role_skills import required_role_for
-from app.agents.prompts import load_skill
 
 # Anything that is not an unambiguous write request stays a dry run. A CMS write must be
 # asked for explicitly — never inferred from a vague "run phase 12".
-_DRAFT_RE = re.compile(r"\b(draft|save to wordpress|push draft|create draft)\b", re.I)
+_DRAFT_RE = re.compile(r"\b(draft|save to wordpress|push draft|create draft)\b", re.IGNORECASE)
 _PUBLISH_RE = re.compile(
     r"\b(publish (it |them |now|live)|go live|make (it|them) live|publish to wordpress)\b",
-    re.I,
+    re.IGNORECASE,
 )
 
 

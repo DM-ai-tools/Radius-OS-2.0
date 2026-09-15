@@ -6,6 +6,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+from app.agents.prompts import load_shared_reference, load_skill_file
 from app.integrations import dataforseo
 from app.integrations.llm import synthesize_json
 from app.services.create_topic import (
@@ -14,7 +15,6 @@ from app.services.create_topic import (
     funnel_balance_warnings,
     funnel_from_intent,
 )
-from app.agents.prompts import load_shared_reference, load_skill_file
 
 YMYL_HINTS = (
     "health",
@@ -70,12 +70,12 @@ _MARKETING_TOPIC = {
 _FORUM_DOMAINS = ("reddit.com", "quora.com", "stackexchange.com", "stackoverflow.com", "forum.")
 _WEAK_DIFF = re.compile(
     r"^(lead with|ranking pages typically|n/?a|none|tbd|todo)\b",
-    re.I,
+    re.IGNORECASE,
 )
 _ROLE_ONLY = re.compile(
     r"^(the\s+)?((seo|content|marketing|editorial|copy)\s+)?"
     r"(team|specialist|writer|strategist|manager|agency|department)\s*$",
-    re.I,
+    re.IGNORECASE,
 )
 _AUTHOR_KEYS = (
     "content_author",
@@ -312,7 +312,7 @@ def _word_in(needle: str, haystack: str) -> bool:
     """Whole-word match — avoids taxonomy→tax, accreditation→credit, syntax→tax."""
     if not needle or not haystack:
         return False
-    return bool(re.search(rf"\b{re.escape(needle)}\b", haystack, flags=re.I))
+    return bool(re.search(rf"\b{re.escape(needle)}\b", haystack, flags=re.IGNORECASE))
 
 
 def is_ymyl_topic(keyword: str, industry: str | None = None) -> bool:
@@ -769,7 +769,7 @@ def _rule_brief(
     if page_type in ("service", "subservice", "sub_service", "landing", "product", "location"):
         outcomes = [
             f"Know what {client_name} includes in {kw}",
-            f"See how the work runs from first conversation to delivery",
+            "See how the work runs from first conversation to delivery",
             f"Decide whether to enquire about {kw}",
         ]
     elif page_type == "comparison":

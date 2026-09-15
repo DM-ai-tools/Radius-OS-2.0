@@ -10,9 +10,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill, load_skill_file
 from app.config import get_settings
 from app.integrations import ahrefs, dataforseo
 from app.integrations.llm import extract_domain
+from app.logging_config import get_logger
 from app.models import (
     AgentJob,
     Client,
@@ -24,11 +26,15 @@ from app.services.agent_runtime import get_profile, supersede_pending_findings
 from app.services.audit import log_event
 from app.services.competitive_context import (
     competitor_context_blob,
-    competitor_domains as domains_from_comps,
-    competitor_names as names_from_comps,
     local_seed_variants,
     resolve_competitors,
     resolve_geographic_focus,
+)
+from app.services.competitive_context import (
+    competitor_domains as domains_from_comps,
+)
+from app.services.competitive_context import (
+    competitor_names as names_from_comps,
 )
 from app.services.create_topic import (
     format_audience_label,
@@ -40,7 +46,6 @@ from app.services.keyword_clustering import (
     clusters_for_cdp,
     run_keyword_clustering,
 )
-from app.services.role_skills import required_role_for
 from app.services.keyword_opportunity import (
     build_topics,
     detect_funnel,
@@ -71,9 +76,8 @@ from app.services.keyword_seeding import (
     run_multi_mode_seeding,
 )
 from app.services.live_site_scan import scan_live_site
+from app.services.role_skills import required_role_for
 from app.services.url_mapping import classify_clusters_against_sitemap
-from app.logging_config import get_logger
-from app.agents.prompts import load_skill, load_skill_file
 
 log = get_logger("search_demand")
 
@@ -658,7 +662,10 @@ async def run_search_demand(
         service_catalog=service_catalog,
     )
 
-    from app.services.keyword_pool import resolve_client_pool_target, resolve_keyword_pool_limits
+    from app.services.keyword_pool import (
+        resolve_client_pool_target,
+        resolve_keyword_pool_limits,
+    )
 
     pool_target = resolve_client_pool_target(
         commercial=commercial,

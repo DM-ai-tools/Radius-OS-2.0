@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from app.config import clear_settings_cache, get_settings
-from app.services.public_seo import build_robots_txt, build_sitemap_xml, public_site_origin
+from app.services.public_seo import (
+    build_robots_txt,
+    build_sitemap_xml,
+    public_site_origin,
+)
 
 
 def test_public_site_origin_strips_path(monkeypatch):

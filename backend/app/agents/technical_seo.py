@@ -12,13 +12,13 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill, load_skill_file, skill_system_preamble
 from app.models import AgentJob, Client, FindingsLedger
 from app.services.agent_handoff import blocked_events, consume_events, handoff_events
 from app.services.agent_runtime import get_profile, supersede_pending_findings
 from app.services.audit import log_event
 from app.services.role_skills import required_role_for
 from app.services.technical_seo import PHASE7_SKILL_DIRS, run_technical_seo_plan
-from app.agents.prompts import load_skill, load_skill_file, skill_system_preamble
 
 
 def _load_phase7_contracts() -> dict[str, int]:

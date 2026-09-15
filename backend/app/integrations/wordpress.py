@@ -28,8 +28,8 @@ import mimetypes
 import re
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID
 from urllib.parse import urljoin, urlparse
+from uuid import UUID
 
 import httpx
 from sqlalchemy import select

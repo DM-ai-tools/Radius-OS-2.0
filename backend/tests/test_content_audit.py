@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.content_audit import _group_by_theme, _theme_lookup, run_content_audit_plan
+from app.services.content_audit import (
+    _group_by_theme,
+    _theme_lookup,
+    run_content_audit_plan,
+)
 
 
 def test_theme_lookup_prefers_phase6a_pillar_over_phase5_cluster():

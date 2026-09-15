@@ -3,8 +3,8 @@
 from app.services.phase_pipeline import (
     PHASE_5_STAGES,
     enrich_phase5_cluster_intent,
-    enrich_phase89_pack,
     enrich_phase11_pack,
+    enrich_phase89_pack,
     validate_phase5_pack,
     validate_phase6_pack,
 )

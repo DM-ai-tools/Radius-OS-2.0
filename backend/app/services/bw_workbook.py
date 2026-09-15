@@ -405,7 +405,7 @@ def attach_workbook_to_search_demand(summary: dict[str, Any]) -> dict[str, Any]:
 def attach_workbook_to_site_architecture(summary: dict[str, Any], *, client_name: str = "") -> dict[str, Any]:
     summary = dict(summary)
     url_map = list(
-        ((summary.get("url_map_report") or {}).get("final_url_map") or [])
+        (summary.get("url_map_report") or {}).get("final_url_map") or []
     )
     summary["category_url_mapping"] = build_category_url_mapping_rows(
         url_map,
@@ -449,7 +449,7 @@ def build_combined_workbook_pack(
     sd = dict(search_demand or {})
     ia = dict(site_architecture or {})
     cs = dict(content_strategy or {})
-    url_map = list(((ia.get("url_map_report") or {}).get("final_url_map") or []))
+    url_map = list((ia.get("url_map_report") or {}).get("final_url_map") or [])
     return {
         "client_name": client_name,
         "generated_at": datetime.now(timezone.utc).isoformat(),

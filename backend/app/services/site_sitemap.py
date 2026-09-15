@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 DEFAULT_MAX_ENTRIES = 500
 
 # "acme.com", "www.acme.com/services" — a host, optionally with a path.
-_HOSTISH = re.compile(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?::\d+)?(?:/|$)", re.I)
+_HOSTISH = re.compile(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(?::\d+)?(?:/|$)", re.IGNORECASE)
 
 # Corporate / utility pages. Without this every depth-1 URL fell through the
 # depth heuristic and was labelled a "service hub", so /about, /contact and

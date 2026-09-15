@@ -24,8 +24,9 @@ async def pull_backlinks(domain: str) -> tuple[dict[str, Any], str]:
         if not settings.ahrefs_api_key:
             raise RuntimeError("Ahrefs API key not configured")
         # Ahrefs Site Explorer (v3) — backlinks-stats requires target + date
-        import httpx
         from datetime import date
+
+        import httpx
 
         today = date.today().isoformat()
         headers = {"Authorization": f"Bearer {settings.ahrefs_api_key}"}
@@ -240,7 +241,11 @@ async def validate_tracking(
     snippets = {"ga4_ids": [], "gtm_ids": [], "has_gtag": False, "has_gtm": False, "has_linker": False}
     fetch_error = None
     if not settings.use_mock_providers:
-        from app.integrations.web_fetch import detect_tracking_snippets, fetch_url, parse_html
+        from app.integrations.web_fetch import (
+            detect_tracking_snippets,
+            fetch_url,
+            parse_html,
+        )
 
         url = domain if domain.startswith("http") else f"https://{domain}"
         fetched = await fetch_url(url)
@@ -314,7 +319,7 @@ async def validate_tracking(
                         "check_result": "fail" if not fetch_error else "unverified",
                         "detail": {
                             "message": (
-                                f"No GA4/gtag snippet found on live page."
+                                "No GA4/gtag snippet found on live page."
                                 + (f" Fetch error: {fetch_error}" if fetch_error else "")
                             ),
                             "fix": "Install GA4 base tag (gtag.js) sitewide.",
@@ -803,8 +808,9 @@ async def check_broken_links(url: str) -> dict[str, Any]:
         }
 
     # Live: check homepage only + extract a few anchors
-    import httpx
     from html.parser import HTMLParser
+
+    import httpx
 
     from app.integrations.web_fetch import assert_safe_url
 
@@ -917,7 +923,7 @@ def _extract_keyword(message: str, fallback: str) -> str:
     m = re.search(
         r"(?:rankings? for|keyword[:\s]+|optimize(?:\s+for)?)\s+[\"']?([^\"'\n.]+)[\"']?",
         message,
-        re.I,
+        re.IGNORECASE,
     )
     if m:
         return m.group(1).strip()[:80]
@@ -1007,8 +1013,9 @@ async def optimize_on_page(
         }
 
     # Live lightweight fetch of title/meta only
-    import httpx
     from html.parser import HTMLParser
+
+    import httpx
 
     from app.integrations.web_fetch import assert_safe_url
 
@@ -1242,7 +1249,7 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
     robots_text = str(robots.get("text") or "")
     if r_status == 200 and robots_text:
         findings_crawl.append("robots.txt reachable")
-        if re.search(r"disallow:\s*/\s*$", robots_text, re.I | re.M):
+        if re.search(r"disallow:\s*/\s*$", robots_text, re.IGNORECASE | re.MULTILINE):
             findings_crawl.append("WARNING: robots.txt contains Disallow: / for a user-agent")
             priority_fixes.append(
                 {
@@ -1344,13 +1351,13 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
                 }
             )
 
-        lang_m = re.search(r"<html[^>]+lang=[\"']([^\"']+)[\"']", html, re.I)
+        lang_m = re.search(r"<html[^>]+lang=[\"']([^\"']+)[\"']", html, re.IGNORECASE)
         if lang_m:
             findings_mobile.append(f"html lang={lang_m.group(1)}")
         else:
             findings_mobile.append("Missing lang attribute on <html>")
 
-        h1_count = len(re.findall(r"<h1\b", html, re.I))
+        h1_count = len(re.findall(r"<h1\b", html, re.IGNORECASE))
         if h1_count == 1:
             findings_index.append("Single H1 on homepage sample")
         elif h1_count == 0:
@@ -2394,9 +2401,9 @@ async def discover_competitors(
             {"name": f"{vertical} Category Leader", "url": f"https://leader-{slug}.example", "source": "skill"},
         ]
 
+    from app.agents.prompts import skill_system_preamble
     from app.integrations.llm import synthesize_json
     from app.integrations.web_fetch import fetch_url, page_text_excerpt, parse_html
-    from app.agents.prompts import skill_system_preamble
 
     client_host = domain.lower().removeprefix("www.")
     client_aliases = {client_host}

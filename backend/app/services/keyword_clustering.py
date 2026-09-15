@@ -7,6 +7,8 @@ from typing import Any
 
 from app.services.keyword_opportunity import (
     detect_funnel as _detect_funnel,
+)
+from app.services.keyword_opportunity import (
     detect_intent,
 )
 from app.services.keyword_pipeline import run_keyword_pipeline

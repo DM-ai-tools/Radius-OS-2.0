@@ -7,12 +7,12 @@ from uuid import uuid4
 
 import pytest
 
+from app.services.phase_validation.context import extract_phase_output
 from app.services.phase_validation.criteria import (
     PHASE_CRITERIA,
     get_criteria,
     list_applicable_parameters,
 )
-from app.services.phase_validation.context import extract_phase_output
 from app.services.phase_validation.deterministic import run_deterministic_checks
 from app.services.phase_validation.revision import (
     escalate_after_max_attempts,
@@ -545,7 +545,6 @@ async def test_unavailable_semantic_caller_none():
 
     async def unavailable(system: str, user: str):
         _ = system, user
-        return None
 
     result = await validate_phase_output(
         client=client,
@@ -810,10 +809,11 @@ async def test_empty_output_critical():
 
 @pytest.mark.asyncio
 async def test_run_phase_with_validation_revision_and_limit(db_session):
+    import os
+
+    from app.config import clear_settings_cache, get_settings
     from app.models import Client, ClientDigitalProfile
     from app.services.phase_validation.apply import run_phase_with_validation
-    from app.config import get_settings, clear_settings_cache
-    import os
 
     os.environ["VALIDATION_MAX_ATTEMPTS"] = "2"
     clear_settings_cache()
@@ -894,12 +894,13 @@ async def test_run_phase_with_validation_revision_and_limit(db_session):
 
 @pytest.mark.asyncio
 async def test_revision_loop_for_major_then_pass(db_session):
-    from app.models import Client, ClientDigitalProfile
-    from app.services.phase_validation.apply import run_phase_with_validation
-    from app.config import clear_settings_cache
+    import os
+
     import app.services.phase_validation.apply as apply_mod
     import app.services.phase_validation.service as svc_mod
-    import os
+    from app.config import clear_settings_cache
+    from app.models import Client, ClientDigitalProfile
+    from app.services.phase_validation.apply import run_phase_with_validation
 
     os.environ["VALIDATION_MAX_ATTEMPTS"] = "2"
     clear_settings_cache()
@@ -1032,12 +1033,13 @@ def test_decide_from_checks_severity_priority():
 
 @pytest.mark.asyncio
 async def test_major_failure_hits_retry_limit_then_rejects(db_session):
-    from app.models import Client, ClientDigitalProfile
-    from app.services.phase_validation.apply import run_phase_with_validation
-    from app.config import clear_settings_cache
+    import os
+
     import app.services.phase_validation.apply as apply_mod
     import app.services.phase_validation.service as svc_mod
-    import os
+    from app.config import clear_settings_cache
+    from app.models import Client, ClientDigitalProfile
+    from app.services.phase_validation.apply import run_phase_with_validation
 
     os.environ["VALIDATION_MAX_ATTEMPTS"] = "2"
     clear_settings_cache()
@@ -1233,11 +1235,11 @@ async def test_latest_validation_still_blocks_when_live_output_is_empty(db_sessi
 
 @pytest.mark.asyncio
 async def test_search_demand_surfaces_validation_report(db_session):
-    from app.models import Client, ClientDigitalProfile
-    from app.services.phase_validation.apply import run_phase_with_validation
-    from app.config import clear_settings_cache
     import app.services.phase_validation.apply as apply_mod
     import app.services.phase_validation.service as svc_mod
+    from app.config import clear_settings_cache
+    from app.models import Client, ClientDigitalProfile
+    from app.services.phase_validation.apply import run_phase_with_validation
 
     client = Client(
         legal_name="Acme Solar Pty Ltd",

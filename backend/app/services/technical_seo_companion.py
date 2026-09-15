@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from app.services.technical_seo_schemas import TechnicalSEOPage, TechnicalSEOIssue
+from app.services.technical_seo_schemas import TechnicalSEOIssue, TechnicalSEOPage
 
 MOBILE_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -21,11 +21,11 @@ DESKTOP_UA = (
 
 _HREFLANG_RE = re.compile(
     r'<link[^>]+rel=["\']alternate["\'][^>]+hreflang=["\']([^"\']+)["\'][^>]+href=["\']([^"\']+)["\']',
-    re.I,
+    re.IGNORECASE,
 )
 _HREFLANG_RE_ALT = re.compile(
     r'<link[^>]+hreflang=["\']([^"\']+)["\'][^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']alternate["\']',
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -34,7 +34,7 @@ def _strip_tags(html: str) -> str:
 
 
 def _count_links(html: str) -> int:
-    return len(re.findall(r'<a\s[^>]*href=', html or "", re.I))
+    return len(re.findall(r'<a\s[^>]*href=', html or "", re.IGNORECASE))
 
 
 def _extract_hreflang(html: str, base_url: str) -> list[dict[str, str]]:
@@ -77,8 +77,8 @@ async def run_rendering_snapshot(url: str) -> dict[str, Any]:
     if d_links > 5 and m_links < d_links * 0.5:
         issues.append(f"Mobile has {m_links} links vs desktop {d_links} — nav/link parity risk")
 
-    d_title = re.search(r"<title[^>]*>([^<]+)</title>", d_html, re.I)
-    m_title = re.search(r"<title[^>]*>([^<]+)</title>", m_html, re.I)
+    d_title = re.search(r"<title[^>]*>([^<]+)</title>", d_html, re.IGNORECASE)
+    m_title = re.search(r"<title[^>]*>([^<]+)</title>", m_html, re.IGNORECASE)
     if d_title and m_title and d_title.group(1).strip() != m_title.group(1).strip():
         issues.append("Title differs between desktop and mobile fetches")
 

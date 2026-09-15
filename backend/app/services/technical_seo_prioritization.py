@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import math
 
-from app.services.technical_seo_schemas import CATEGORY_IMPACT, SEVERITY_WEIGHTS, TechnicalSEOIssue
+from app.services.technical_seo_schemas import (
+    CATEGORY_IMPACT,
+    SEVERITY_WEIGHTS,
+    TechnicalSEOIssue,
+)
 
 
 def compute_priority(

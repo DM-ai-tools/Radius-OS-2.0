@@ -41,7 +41,7 @@ _PROVIDER_FLAT_USD: dict[str, float] = {
 
 
 class _MeterContext:
-    __slots__ = ("client_id", "session_id", "agent_key")
+    __slots__ = ("agent_key", "client_id", "session_id")
 
     def __init__(
         self,

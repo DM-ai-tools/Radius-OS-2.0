@@ -1,7 +1,10 @@
 """Keyword pool sizing and cross-seed dedupe."""
 
 from app.services.keyword_llm_relevance import _dedupe_across_seeds
-from app.services.keyword_pool import resolve_client_pool_target, resolve_keyword_pool_limits
+from app.services.keyword_pool import (
+    resolve_client_pool_target,
+    resolve_keyword_pool_limits,
+)
 
 
 class _Settings:

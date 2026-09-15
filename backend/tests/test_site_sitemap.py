@@ -78,7 +78,11 @@ def test_build_client_sitemap_does_not_invent_urls():
 
 
 def test_extract_and_sitemap_urls_from_website_pack():
-    from app.services.site_sitemap import extract_site_sitemap, sitemap_pages, sitemap_urls
+    from app.services.site_sitemap import (
+        extract_site_sitemap,
+        sitemap_pages,
+        sitemap_urls,
+    )
 
     pack = {
         "site_sitemap": {

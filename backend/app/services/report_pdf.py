@@ -21,10 +21,10 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from app.services.report_export import resolve_report_title
 from app.services.report_pdf_document import render_document_report
 from app.services.report_pdf_site_architecture import render_site_architecture_blueprint
 from app.services.report_pdf_theme import cover_page
-from app.services.report_export import resolve_report_title
 
 SPECIAL_RENDERERS = {
     "site_architecture_blueprint": render_site_architecture_blueprint,

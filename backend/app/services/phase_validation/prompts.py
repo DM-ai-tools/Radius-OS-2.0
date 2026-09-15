@@ -6,7 +6,10 @@ import json
 from typing import Any
 
 from app.services.phase_validation.context import _trim
-from app.services.phase_validation.criteria import criteria_prompt_block, list_applicable_parameters
+from app.services.phase_validation.criteria import (
+    criteria_prompt_block,
+    list_applicable_parameters,
+)
 
 _PROMPT_CHAR_BUDGET = 48000
 

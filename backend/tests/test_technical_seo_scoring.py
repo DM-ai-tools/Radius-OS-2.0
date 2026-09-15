@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from app.services.technical_seo_prioritization import compute_priority
-from app.services.technical_seo_rules import compute_category_scores, overall_score, severity_summary
+from app.services.technical_seo_rules import (
+    compute_category_scores,
+    overall_score,
+    severity_summary,
+)
 from app.services.technical_seo_schemas import TechnicalSEOIssue
 
 

@@ -10,6 +10,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill
+from app.config import get_settings
 from app.integrations.llm import extract_domain
 from app.integrations.providers import (
     check_broken_links,
@@ -19,6 +21,7 @@ from app.integrations.providers import (
     run_seo_audit,
     run_technical_seo_audit,
 )
+from app.logging_config import get_logger
 from app.ml.scoring import detect_traffic_anomalies, spam_risk_score
 from app.models import (
     AgentJob,
@@ -29,12 +32,9 @@ from app.models import (
 )
 from app.services.agent_runtime import get_profile
 from app.services.audit import log_event
-from app.config import get_settings
 from app.services.readiness import recompute_readiness
 from app.services.role_skills import required_role_for
 from app.services.site_sitemap import build_client_sitemap
-from app.agents.prompts import load_skill
-from app.logging_config import get_logger
 
 log = get_logger("website_situation")
 

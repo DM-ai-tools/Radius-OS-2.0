@@ -202,7 +202,9 @@ def test_empty_cleaned_seed_still_appears_once():
 
 
 def test_enrich_subservice_competitor_matrix():
-    from app.services.keyword_opportunity import enrich_service_clusters_with_competitors
+    from app.services.keyword_opportunity import (
+        enrich_service_clusters_with_competitors,
+    )
 
     groups = build_service_seed_clusters(
         [

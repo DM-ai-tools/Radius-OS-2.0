@@ -7,7 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import get_current_user, require_permission
-from app.models import ChatSession, CompetitorProfile, DiscoveryResponse, FindingsLedger, User
+from app.models import (
+    ChatSession,
+    CompetitorProfile,
+    DiscoveryResponse,
+    FindingsLedger,
+    User,
+)
 from app.schemas.session import (
     ManualCompetitor,
     QuestionnaireSubmit,
@@ -33,7 +39,10 @@ async def get_phase_validation_history(
 ):
     """Traceable validation history for a phase — why accepted/rejected, which checks ran."""
     from app.models.governance import PhaseValidation
-    from app.services.phase_validation import list_applicable_parameters, phase_criteria_as_dict
+    from app.services.phase_validation import (
+        list_applicable_parameters,
+        phase_criteria_as_dict,
+    )
 
     rows = (
         await db.execute(

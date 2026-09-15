@@ -31,7 +31,7 @@ PLACEHOLDER_MARKERS = (
 
 # Internal pipeline variables that must never appear in published copy.
 _PIPELINE_LEAK = re.compile(
-    r"\{\{[^}]+\}\}|\{'[a-z_]+':|<PLACEHOLDER|\[INSERT [A-Z ]+\]", re.I
+    r"\{\{[^}]+\}\}|\{'[a-z_]+':|<PLACEHOLDER|\[INSERT [A-Z ]+\]", re.IGNORECASE
 )
 
 # Schemes we allow in hrefs/srcs. Anything else (javascript:, vbscript:, file:)
@@ -264,7 +264,7 @@ def markdown_to_publish_html(
             i += 1
             continue
 
-        fig_m = re.match(r"^\[FIGURE\s+([^\]]+)\]\s*(.*)$", line, flags=re.I)
+        fig_m = re.match(r"^\[FIGURE\s+([^\]]+)\]\s*(.*)$", line, flags=re.IGNORECASE)
         if fig_m:
             flush_all()
             role, caption = fig_m.group(1).strip(), fig_m.group(2).strip()
@@ -331,24 +331,24 @@ def strip_unresolved_images(content_html: str) -> tuple[str, int]:
     def _drop(match: re.Match[str]) -> str:
         nonlocal removed
         block = match.group(0)
-        src = re.search(r'<img\b[^>]*\bsrc="([^"]*)"', block, re.I)
+        src = re.search(r'<img\b[^>]*\bsrc="([^"]*)"', block, re.IGNORECASE)
         if src and not src.group(1).startswith(("http://", "https://")):
             removed += 1
             return ""
         return block
 
-    out = re.sub(r"<figure\b.*?</figure>", _drop, content_html or "", flags=re.S | re.I)
+    out = re.sub(r"<figure\b.*?</figure>", _drop, content_html or "", flags=re.DOTALL | re.IGNORECASE)
 
     def _drop_bare(match: re.Match[str]) -> str:
         nonlocal removed
         tag = match.group(0)
-        src = re.search(r'\bsrc="([^"]*)"', tag, re.I)
+        src = re.search(r'\bsrc="([^"]*)"', tag, re.IGNORECASE)
         if src and not src.group(1).startswith(("http://", "https://")):
             removed += 1
             return ""
         return tag
 
-    out = re.sub(r"<img\b[^>]*>", _drop_bare, out, flags=re.I)
+    out = re.sub(r"<img\b[^>]*>", _drop_bare, out, flags=re.IGNORECASE)
     return out, removed
 
 
@@ -363,7 +363,7 @@ def find_placeholders(content_html: str) -> list[str]:
 def check_heading_structure(content_html: str) -> list[str]:
     """Structural heading problems: more than one H1, or a skipped level."""
     issues: list[str] = []
-    levels = [int(m) for m in re.findall(r"<h([1-6])\b", content_html or "", re.I)]
+    levels = [int(m) for m in re.findall(r"<h([1-6])\b", content_html or "", re.IGNORECASE)]
     if levels.count(1) > 1:
         issues.append(f"{levels.count(1)} H1 headings — a page must have exactly one")
     previous = 0
@@ -405,7 +405,7 @@ def check_markup(content_html: str) -> list[str]:
 def check_links(content_html: str) -> list[str]:
     """Links that would publish broken or unsafe."""
     issues: list[str] = []
-    for href in re.findall(r'<a\b[^>]*href="([^"]*)"', content_html or "", re.I):
+    for href in re.findall(r'<a\b[^>]*href="([^"]*)"', content_html or "", re.IGNORECASE):
         cleaned = html.unescape(href)
         if not cleaned.strip():
             issues.append("link with an empty href")
@@ -416,9 +416,9 @@ def check_links(content_html: str) -> list[str]:
 
 def check_images(content_html: str) -> list[str]:
     issues: list[str] = []
-    for tag in re.findall(r"<img\b[^>]*>", content_html or "", re.I):
-        src = re.search(r'src="([^"]*)"', tag, re.I)
-        alt = re.search(r'alt="([^"]*)"', tag, re.I)
+    for tag in re.findall(r"<img\b[^>]*>", content_html or "", re.IGNORECASE):
+        src = re.search(r'src="([^"]*)"', tag, re.IGNORECASE)
+        alt = re.search(r'alt="([^"]*)"', tag, re.IGNORECASE)
         if not src or not src.group(1).strip():
             issues.append("image with no src")
         elif not src.group(1).startswith(("http://", "https://", "/")):

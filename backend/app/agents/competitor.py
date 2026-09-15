@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill
 from app.integrations.llm import extract_domain
 from app.integrations.providers import discover_competitors
 from app.ml.tier_competitors import build_tiered_analysis
@@ -29,7 +30,6 @@ from app.services.cache import (
 )
 from app.services.readiness import recompute_readiness
 from app.services.role_skills import required_role_for
-from app.agents.prompts import load_skill
 
 # ads-category-competitors skill: identify 6–10, report 5–8 after Tier-5 filter.
 MIN_COMPETITORS_TARGET = 6

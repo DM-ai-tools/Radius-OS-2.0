@@ -108,7 +108,10 @@ async def test_write_one_page_enhances_weak_brief():
 
 
 def test_accuracy_grounding_pulls_cluster_and_serp():
-    from app.services.content_enhancement import build_accuracy_grounding, enhance_brief_for_writing
+    from app.services.content_enhancement import (
+        build_accuracy_grounding,
+        enhance_brief_for_writing,
+    )
 
     brief = {
         "keyword": "seo services melbourne",

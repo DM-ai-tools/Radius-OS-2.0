@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-
 # Defaults from existing-content-audit skill
 DEFAULTS = {
     "decay_threshold": -0.30,

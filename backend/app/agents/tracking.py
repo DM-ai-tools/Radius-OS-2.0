@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill
 from app.integrations.providers import validate_tracking
 from app.integrations.web_fetch import detect_tracking_snippets, fetch_url, parse_html
 from app.ml.scoring import tracking_anomaly_flags
@@ -24,7 +25,6 @@ from app.services.tracking_workflow import (
     build_t4_baseline,
     compute_tracking_blockers,
 )
-from app.agents.prompts import load_skill
 
 PROVIDER_ELEMENTS = {
     "ga4": ("ga4_base_tag", "conversion_event", "cross_domain_tracking"),
@@ -122,7 +122,7 @@ async def run_tracking(
         cdd_access = dict((profile.tracking_baseline or {}).get("cdd_access") or {})
         if not cdd_access:
             cdd_access = dict(
-                ((profile.marketing_context or {}).get("access_credentials") or {})
+                (profile.marketing_context or {}).get("access_credentials") or {}
             )
     t1_platforms = build_t1_platforms(has, cdd_access=cdd_access)
     missing_oauth = [p for p in oauth_providers if not has.get(p)]

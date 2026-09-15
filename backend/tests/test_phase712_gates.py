@@ -5,18 +5,22 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.content_brief import generate_briefs
-from app.services.content_planning import build_roadmap, ia_gate_ok, run_content_planning_plan
+from app.services.content_planning import (
+    build_roadmap,
+    ia_gate_ok,
+    run_content_planning_plan,
+)
 from app.services.content_production import planning_gate_ok
 from app.services.create_topic import funnel_balance_warnings, funnel_from_intent
-from app.services.on_page_seo import production_gate_ok, selected_on_page_rows
-from app.services.publishing import on_page_gate_ok
-from app.services.technical_seo import _ia_notes
 from app.services.memory_packs import (
-    slim_technical_seo_memory,
     slim_content_audit_memory,
     slim_content_planning_memory,
     slim_publishing_memory,
+    slim_technical_seo_memory,
 )
+from app.services.on_page_seo import production_gate_ok, selected_on_page_rows
+from app.services.publishing import on_page_gate_ok
+from app.services.technical_seo import _ia_notes
 
 
 def test_content_planning_ia_gate_blocks_without_tree():

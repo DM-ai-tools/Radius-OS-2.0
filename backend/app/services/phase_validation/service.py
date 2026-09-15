@@ -11,7 +11,10 @@ from app.services.phase_validation.context import (
     context_keys_used,
     extract_phase_output,
 )
-from app.services.phase_validation.criteria import get_criteria, list_applicable_parameters
+from app.services.phase_validation.criteria import (
+    get_criteria,
+    list_applicable_parameters,
+)
 from app.services.phase_validation.deterministic import run_deterministic_checks
 from app.services.phase_validation.schema import (
     CheckResult,

@@ -120,10 +120,10 @@ async def score_entity_live(
     """Score from live page fetch + skill model; falls back to mid-range if LLM unavailable."""
     import asyncio
 
+    from app.agents.prompts import skill_system_preamble
     from app.config import get_settings
     from app.integrations.llm import synthesize_json
     from app.integrations.web_fetch import fetch_url, page_text_excerpt, parse_html
-    from app.agents.prompts import skill_system_preamble
 
     if get_settings().use_mock_providers or get_settings().use_mock_llm:
         return score_entity(name, url, is_client=is_client, industry=industry)
@@ -365,7 +365,7 @@ async def build_tiered_analysis(
                     f"Maturity {d['maturity']:.0f}/100",
                 ],
                 "weaknesses": [
-                    f"Watch gap vs client on "
+                    "Watch gap vs client on "
                     + min(
                         cs.items(),
                         key=lambda x: x[1]["score"],

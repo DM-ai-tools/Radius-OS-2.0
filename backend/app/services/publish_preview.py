@@ -448,7 +448,7 @@ def markdown_to_content_html(
             parts.append(_figure_html(src=src, alt=alt, caption=caption))
             i += 1
             continue
-        fig_m = re.match(r"^\[FIGURE\s+([^\]]+)\]\s*(.*)$", stripped, flags=re.I)
+        fig_m = re.match(r"^\[FIGURE\s+([^\]]+)\]\s*(.*)$", stripped, flags=re.IGNORECASE)
         if fig_m:
             flush_para()
             flush_list()

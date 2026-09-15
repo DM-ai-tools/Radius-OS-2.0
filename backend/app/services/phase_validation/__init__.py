@@ -27,9 +27,9 @@ __all__ = [
     "ValidationDecision",
     "ValidationResult",
     "get_criteria",
+    "latest_validation_blocks_approve",
     "list_applicable_parameters",
     "phase_criteria_as_dict",
-    "validate_phase_output",
     "run_phase_with_validation",
-    "latest_validation_blocks_approve",
+    "validate_phase_output",
 ]

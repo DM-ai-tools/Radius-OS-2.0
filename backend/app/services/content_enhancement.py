@@ -15,11 +15,11 @@ from app.services.content_brief import (
 
 _WEAK_DIFF = re.compile(
     r"^(lead with|ranking pages typically|n/?a|none|tbd|todo)\b",
-    re.I,
+    re.IGNORECASE,
 )
 _SLUG_PREFIX = re.compile(
     r"^(what-is|what-are|how-to|why-|when-to|guide-to|best-|top-\d*-)\s*",
-    re.I,
+    re.IGNORECASE,
 )
 _SMALL_WORDS = frozenset(
     {"a", "an", "the", "and", "or", "for", "to", "in", "on", "of", "vs", "with", "at", "by"}

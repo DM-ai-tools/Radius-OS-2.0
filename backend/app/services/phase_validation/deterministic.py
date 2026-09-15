@@ -894,9 +894,7 @@ def _check_planning_action_fit(
             # Older planner stamps — accept when create is still a true gap.
             "audit_disposition",
         }
-        if check not in {"no_match", "audit_not_available"}:
-            bad.append(str(row.get("url_n") or row.get("url") or "?"))
-        elif basis not in allowed_basis and not justified:
+        if check not in {"no_match", "audit_not_available"} or basis not in allowed_basis and not justified:
             bad.append(str(row.get("url_n") or row.get("url") or "?"))
         if row.get("existing_content_evidence_url"):
             overlap_risk.append(str(row.get("url_n") or row.get("url") or "?"))

@@ -7,14 +7,14 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill
 from app.integrations.llm import extract_domain
 from app.models import AgentJob, Client, FindingsLedger
 from app.services.agent_handoff import blocked_events, consume_events, handoff_events
 from app.services.agent_runtime import get_profile, supersede_pending_findings
 from app.services.audit import log_event
-from app.services.site_architecture import run_site_architecture_plan
 from app.services.role_skills import required_role_for
-from app.agents.prompts import load_skill
+from app.services.site_architecture import run_site_architecture_plan
 
 
 async def run_site_architecture(

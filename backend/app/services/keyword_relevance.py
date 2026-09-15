@@ -13,8 +13,9 @@ is retained as a cluster shell even when all of its expansions are rejected.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from app.services.keyword_opportunity import is_stale_year_keyword
 
@@ -94,7 +95,7 @@ _GENERIC_BRAND = {
     "the",
     "and",
 }
-_URL_RE = re.compile(r"(https?://|www\.|[a-z0-9-]+\.(com|net|org|io|co|au|uk)(/|\b))", re.I)
+_URL_RE = re.compile(r"(https?://|www\.|[a-z0-9-]+\.(com|net|org|io|co|au|uk)(/|\b))", re.IGNORECASE)
 
 KEEP_REASONS = (
     "seed_exact",
@@ -168,7 +169,7 @@ def _append_phrase(out: list[str], seen: set[str], raw: str) -> None:
         return
     # Path / URL last-segment fallback — only for real URLs/paths, not
     # service labels like "AEO Services (AI/answer engine optimization)".
-    looks_like_url = bool(re.search(r"https?://|www\.|\.[a-z]{2,3}(/|$)", text, re.I))
+    looks_like_url = bool(re.search(r"https?://|www\.|\.[a-z]{2,3}(/|$)", text, re.IGNORECASE))
     looks_like_path = text.startswith("/") or (
         "/" in text and " " not in text and not text.startswith("(")
     )

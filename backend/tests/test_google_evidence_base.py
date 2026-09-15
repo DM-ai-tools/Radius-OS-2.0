@@ -1,7 +1,7 @@
 """Shared Google helpful-content evidence base is loadable and wired into Phase 10."""
 
-from app.services.content_brief import _people_first_gates, _who_how_why
 from app.agents.prompts import load_shared_reference
+from app.services.content_brief import _people_first_gates, _who_how_why
 
 
 def test_shared_evidence_base_loads():

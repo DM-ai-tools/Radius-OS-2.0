@@ -75,7 +75,7 @@ CITY_LOCATION_CODES: dict[str, tuple[int, str, str]] = {
 
 _BLOG_PATH_RE = re.compile(
     r"/(blog|blogs|articles?|news|insights?|resources?|guides?|learn|magazine)(/|$)",
-    re.I,
+    re.IGNORECASE,
 )
 
 

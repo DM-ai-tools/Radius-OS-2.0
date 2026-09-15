@@ -14,7 +14,6 @@ import argparse
 import csv
 import json
 import re
-import sys
 import time
 from collections import Counter, defaultdict, deque
 from pathlib import Path
@@ -49,8 +48,9 @@ def _dir_depth(url: str) -> int:
 
 def crawl_light(seed: str, out_jl: Path, *, page_cap: int = 500, delay: float = 0.25) -> None:
     try:
-        import httpx
         from html.parser import HTMLParser
+
+        import httpx
     except ImportError as exc:
         raise SystemExit("httpx required for light crawl") from exc
 

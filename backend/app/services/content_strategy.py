@@ -5,11 +5,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.agents.prompts import skill_system_preamble
 from app.integrations.llm import synthesize_json, synthesize_text
 from app.logging_config import get_logger
-from app.services.create_topic import funnel_balance, funnel_from_intent as _funnel_from_intent
+from app.services.create_topic import funnel_balance
+from app.services.create_topic import funnel_from_intent as _funnel_from_intent
 from app.services.topic_naming import specific_page_title
-from app.agents.prompts import skill_system_preamble
 
 log = get_logger("content_strategy")
 

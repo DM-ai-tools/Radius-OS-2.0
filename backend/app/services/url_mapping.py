@@ -38,7 +38,11 @@ from app.services.content_pipeline import (
     primary_keyword_metrics,
 )
 from app.services.keyword_opportunity import detect_intent
-from app.services.page_clusters import classify_audit_page, match_cdd_page, cdd_terms_from_commercial
+from app.services.page_clusters import (
+    cdd_terms_from_commercial,
+    classify_audit_page,
+    match_cdd_page,
+)
 
 _STOP = {
     "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with", "is", "are", "your", "our",

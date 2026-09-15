@@ -23,7 +23,6 @@ import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 try:
     import requests

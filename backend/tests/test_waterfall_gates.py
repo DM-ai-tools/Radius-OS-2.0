@@ -7,8 +7,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.agents.content_audit import run_content_audit
 from app.agents.competitor import run_competitor
+from app.agents.content_audit import run_content_audit
 from app.agents.search_demand import run_search_demand
 from app.agents.tracking import run_tracking
 from app.agents.website import run_website

@@ -28,7 +28,7 @@ log = get_logger("site_page_inventory")
 
 _ARCHIVE_RE = re.compile(
     r"/(?:author|category|tag|tags|page)/\d*(?:/|$)|/page/\d+(?:/|$)",
-    re.I,
+    re.IGNORECASE,
 )
 
 

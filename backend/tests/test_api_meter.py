@@ -12,7 +12,7 @@ def test_estimate_llm_cost_usd():
         completion_tokens=500,
     )
     assert cost is not None
-    assert cost > Decimal("0")
+    assert cost > Decimal(0)
 
 
 def test_estimate_provider_flat_cost():

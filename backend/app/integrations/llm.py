@@ -6,14 +6,13 @@ import base64
 import hashlib
 import json
 import re
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-
-import time
 
 from app.config import get_settings
 from app.logging_config import get_logger
@@ -573,7 +572,7 @@ async def synthesize_json(
                 raise RuntimeError("LLM returned empty content")
             return None
         return _parse_json_content(text)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("synthesize_json_failed", error=str(exc), provider=get_settings().llm_provider)
         if raise_on_error:
             raise
@@ -732,9 +731,7 @@ def _normalize_discrepancies(raw: Any) -> list[dict[str, str]]:
     dicts raises ``TypeError: string indices must be integers, not 'str'``.
     """
     if not isinstance(raw, list):
-        if isinstance(raw, str) and raw.strip():
-            raw = [raw]
-        elif isinstance(raw, dict):
+        if isinstance(raw, str) and raw.strip() or isinstance(raw, dict):
             raw = [raw]
         else:
             return []
@@ -837,7 +834,7 @@ def _openrouter_headers() -> dict[str, str]:
 
 
 def _decode_data_url(value: str) -> tuple[bytes, str] | None:
-    m = re.match(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", value.strip(), re.S)
+    m = re.match(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", value.strip(), re.DOTALL)
     if not m:
         return None
     mime = m.group(1).lower()
@@ -908,7 +905,7 @@ async def generate_openrouter_image(
     if settings.use_mock_llm or not settings.openrouter_api_key:
         return {"ok": False, "error": "image_gen_unavailable"}
     model = settings.image_model or "google/gemini-2.5-flash-image"
-    stem = hashlib.sha1(f"{aspect_ratio}:{text}".encode("utf-8")).hexdigest()[:20]
+    stem = hashlib.sha1(f"{aspect_ratio}:{text}".encode()).hexdigest()[:20]
     headers = _openrouter_headers()
     url: str | None = None
     b64: str | None = None

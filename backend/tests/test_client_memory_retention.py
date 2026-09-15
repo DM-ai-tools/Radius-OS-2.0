@@ -4,7 +4,15 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.models import AgentJob, ChatMessage, ChatSession, Client, ClientDigitalProfile, Role, User
+from app.models import (
+    AgentJob,
+    ChatMessage,
+    ChatSession,
+    Client,
+    ClientDigitalProfile,
+    Role,
+    User,
+)
 from app.security import hash_password
 from app.services.client_memory_retention import (
     ARCHIVED_MESSAGE_CONTENT,

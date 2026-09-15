@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from app.config import get_settings
 from app.integrations import ahrefs
 from app.logging_config import get_logger
+from app.services.technical_seo_companion import duplicate_groups_from_pages
 from app.services.technical_seo_normalize import normalize_ahrefs_page
 from app.services.technical_seo_rules import (
     compute_category_scores,
@@ -27,7 +28,6 @@ from app.services.technical_seo_rules import (
     severity_summary,
 )
 from app.services.technical_seo_schemas import TechnicalSEOPage
-from app.services.technical_seo_companion import duplicate_groups_from_pages
 
 log = get_logger("technical_seo_ahrefs")
 

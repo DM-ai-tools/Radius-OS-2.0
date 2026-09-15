@@ -17,7 +17,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.services.keyword_opportunity import detect_intent, is_noisy_keyword, is_stale_year_keyword
+from app.services.keyword_opportunity import (
+    detect_intent,
+    is_noisy_keyword,
+    is_stale_year_keyword,
+)
 from app.services.keyword_relevance import (
     RelevanceContext,
     filter_relevant_keywords,

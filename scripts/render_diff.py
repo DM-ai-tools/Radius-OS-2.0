@@ -15,7 +15,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 try:
     import requests
@@ -73,7 +73,7 @@ def _canonical(soup: BeautifulSoup) -> str:
 
 
 def _robots(soup: BeautifulSoup) -> str:
-    meta = soup.find("meta", attrs={"name": re.compile(r"^robots$", re.I)})
+    meta = soup.find("meta", attrs={"name": re.compile(r"^robots$", re.IGNORECASE)})
     return (meta.get("content") or "").strip() if meta else ""
 
 

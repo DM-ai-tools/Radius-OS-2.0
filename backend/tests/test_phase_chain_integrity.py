@@ -17,7 +17,6 @@ from app.services.content_strategy import build_authority_map, build_priority_qu
 from app.services.review import approve_phase_batch
 from tests.conftest import make_user
 
-
 # --- Phase 6 crash: call site passed industry/location the signature rejected -------
 
 def test_build_authority_map_accepts_industry_and_location():

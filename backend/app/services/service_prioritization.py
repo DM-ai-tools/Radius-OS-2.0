@@ -20,7 +20,7 @@ _SERVICE_ROOTS = frozenset(
 )
 _SERVICE_PATH_RE = re.compile(
     r"^/(?:services|service|solutions|products|what-we-do)(?:/([^/]+))?(?:/([^/]+))?",
-    re.I,
+    re.IGNORECASE,
 )
 
 

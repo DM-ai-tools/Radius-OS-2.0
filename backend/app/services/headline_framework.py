@@ -17,7 +17,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.services.topic_naming import is_actionable_keyword, is_generic_label, phrase_title
+from app.services.topic_naming import (
+    is_actionable_keyword,
+    is_generic_label,
+    phrase_title,
+)
 
 # Asset class for template selection
 _ASSET_BY_PAGE = {

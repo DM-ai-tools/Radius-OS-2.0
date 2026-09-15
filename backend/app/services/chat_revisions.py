@@ -232,7 +232,7 @@ def parse_revision_ops(message: str) -> list[dict[str, str]]:
             r"\s+to(?:\s+the)?\s+(?:keyword|report|list|opportunities|strategy|calendar).*$",
             "",
             v,
-            flags=re.I,
+            flags=re.IGNORECASE,
         )
         return v.strip(" ,")
 
@@ -243,7 +243,7 @@ def parse_revision_ops(message: str) -> list[dict[str, str]]:
                 r"\b(?:remove|drop|delete|exclude|take out|don't include|do not include)\s+"
                 r"(?:the\s+)?(?:keyword|kw|topic|term|competitor|url|page)s?\s+"
                 r"[\"']?(.+?)[\"']?(?:\.|$|;)",
-                re.I,
+                re.IGNORECASE,
             ),
         ),
         (
@@ -252,21 +252,21 @@ def parse_revision_ops(message: str) -> list[dict[str, str]]:
                 r"\b(?:add|include|put in|please add)\s+"
                 r"(?:the\s+)?(?:keyword|kw|topic|term|competitor|url|page)s?\s+"
                 r"[\"']?(.+?)[\"']?(?:\.|$|;)",
-                re.I,
+                re.IGNORECASE,
             ),
         ),
         (
             "add",
             re.compile(
                 r"\b(?:add|include)\s+[\"'](.+?)[\"']\s+to\b",
-                re.I,
+                re.IGNORECASE,
             ),
         ),
         (
             "remove",
             re.compile(
                 r"\b(?:remove|drop|delete|exclude)\s+[\"'](.+?)[\"']",
-                re.I,
+                re.IGNORECASE,
             ),
         ),
     )
@@ -279,7 +279,7 @@ def parse_revision_ops(message: str) -> list[dict[str, str]]:
     swap = re.search(
         r"\b(?:replace|swap|change)\s+[\"']?(.+?)[\"']?\s+(?:with|to)\s+[\"']?(.+?)[\"']?(?:\.|$)",
         text,
-        re.I,
+        re.IGNORECASE,
     )
     if swap:
         old, new = _clean(swap.group(1)), _clean(swap.group(2))

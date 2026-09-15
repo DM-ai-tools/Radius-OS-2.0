@@ -167,7 +167,10 @@ def enrich_phase5_cluster_intent(
     serp_by_keyword: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Attach search intent + validation per cluster (Phase 5 capstone)."""
-    from app.services.content_pipeline import identify_primary_keyword, run_clusters_page_pipeline
+    from app.services.content_pipeline import (
+        identify_primary_keyword,
+        run_clusters_page_pipeline,
+    )
 
     batch = run_clusters_page_pipeline(
         cluster_report,

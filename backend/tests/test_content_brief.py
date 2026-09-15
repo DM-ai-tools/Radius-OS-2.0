@@ -12,13 +12,13 @@ from app.services.content_brief import (
     generate_briefs,
     preflight,
 )
-from app.services.create_content import draft_gate
 from app.services.content_planning import run_content_planning_plan
 from app.services.content_production import (
     parse_topic_selection,
     planning_gate_ok,
     run_content_production_plan,
 )
+from app.services.create_content import draft_gate
 
 
 def test_preflight_stops_when_existing_page_owns_intent():

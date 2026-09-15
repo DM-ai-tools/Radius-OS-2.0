@@ -88,7 +88,7 @@ def _parse_args_from_message(message: str) -> dict[str, Any]:
     if m:
         count = max(3, min(20, int(m.group(1))))
     audience = None
-    am = re.search(r"audience[:\s]+([^\n.;]+)", message or "", flags=re.I)
+    am = re.search(r"audience[:\s]+([^\n.;]+)", message or "", flags=re.IGNORECASE)
     if am:
         audience = am.group(1).strip()[:120]
     funnel = "all"

@@ -20,14 +20,14 @@ if str(ROOT) not in sys.path:
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from sqlalchemy import select  # noqa: E402
-from sqlalchemy.orm import selectinload  # noqa: E402
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-from app.agents.content_production import run_content_production  # noqa: E402
-from app.config import get_settings  # noqa: E402
-from app.db import AsyncSessionLocal  # noqa: E402
-from app.models import ChatSession, Client, User  # noqa: E402
-from app.services.review import approve_phase_batch  # noqa: E402
+from app.agents.content_production import run_content_production
+from app.config import get_settings
+from app.db import AsyncSessionLocal
+from app.models import ChatSession, Client, User
+from app.services.review import approve_phase_batch
 
 HOD_EMAIL = "hod@trafficradius.com"
 
@@ -146,7 +146,7 @@ async def main() -> int:
             summary = dict(profile.content_production_summary or {})
 
         drafts = summary.get("drafts") or []
-        print(f"\n=== Final ===")
+        print("\n=== Final ===")
         print(f"production_status={profile.content_production_status}")
         print(f"draft_count={summary.get('draft_count') or len(drafts)}")
         if summary.get("write_refusal"):

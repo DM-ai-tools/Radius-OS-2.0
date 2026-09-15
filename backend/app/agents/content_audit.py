@@ -7,13 +7,13 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill, skill_system_preamble
 from app.models import AgentJob, Client, FindingsLedger
 from app.services.agent_handoff import blocked_events, consume_events, handoff_events
 from app.services.agent_runtime import get_profile, supersede_pending_findings
 from app.services.audit import log_event
 from app.services.content_audit import run_content_audit_plan
 from app.services.role_skills import required_role_for
-from app.agents.prompts import load_skill, skill_system_preamble
 
 
 async def run_content_audit(

@@ -190,11 +190,7 @@ def match_cdd_page(
             if not phrase:
                 continue
             hit = False
-            if slug and (slug in path_blob or slug.replace("-", " ") in hay):
-                hit = True
-            elif len(phrase) >= 4 and phrase in hay:
-                hit = True
-            elif slug and any(slug == s or slug in s or s in slug for s in segs if len(s) > 2):
+            if slug and (slug in path_blob or slug.replace("-", " ") in hay) or len(phrase) >= 4 and phrase in hay or slug and any(slug == s or slug in s or s in slug for s in segs if len(s) > 2):
                 hit = True
             if hit:
                 matched.append({"term": term, "bucket": bucket})

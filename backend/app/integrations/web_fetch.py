@@ -146,7 +146,7 @@ def _looks_parked_or_placeholder(result: dict[str, Any]) -> bool:
     if any(m in final_host for m in _PARKING_HOST_MARKERS):
         return True
     text = (result.get("text") or "")[:4000].lower()
-    title_m = re.search(r"<title[^>]*>([^<]+)</title>", text, re.I)
+    title_m = re.search(r"<title[^>]*>([^<]+)</title>", text, re.IGNORECASE)
     title = (title_m.group(1) if title_m else "").lower()
     if "hero theme" in title or "parked" in title or "domain for sale" in title:
         return True
@@ -561,7 +561,7 @@ def is_indexable_html_url(url: str) -> bool:
 
 def extract_sitemap_locs(xml_text: str) -> list[str]:
     """Pull <loc> URLs from a sitemap or sitemap index document."""
-    locs = re.findall(r"<loc[^>]*>\s*([^<\s]+)\s*</loc>", xml_text or "", flags=re.I)
+    locs = re.findall(r"<loc[^>]*>\s*([^<\s]+)\s*</loc>", xml_text or "", flags=re.IGNORECASE)
     out: list[str] = []
     seen: set[str] = set()
     for loc in locs:
@@ -667,7 +667,7 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
             u
             for u in locs
             if u.lower().endswith(".xml")
-            and not re.search(r"(?:tag|author|authors)-sitemap", u, re.I)
+            and not re.search(r"(?:tag|author|authors)-sitemap", u, re.IGNORECASE)
         ]
         page_locs = [u for u in locs if not u.lower().endswith(".xml")]
         for u in page_locs:
@@ -730,7 +730,10 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
     # Perplexity only fills remaining gaps (do not replace a real index list).
     if len(ordered) < _SERP_FALLBACK_BELOW:
         try:
-            from app.integrations.site_research import research_ready, research_site_crawl
+            from app.integrations.site_research import (
+                research_ready,
+                research_site_crawl,
+            )
 
             if research_ready():
                 research = await research_site_crawl(start_url, max_pages=max_pages)

@@ -8,9 +8,12 @@ import pytest
 
 from app.services.technical_seo_ahrefs import fetch_ahrefs_technical_seo
 from app.services.technical_seo_normalize import normalize_ahrefs_page
-from app.services.technical_seo_rules import issues_from_ahrefs, issues_from_pages, merge_issues
+from app.services.technical_seo_rules import (
+    issues_from_ahrefs,
+    issues_from_pages,
+    merge_issues,
+)
 from app.services.technical_seo_schemas import TechnicalSEOPage
-
 
 MOCK_PROJECT = {
     "project_id": "12345",

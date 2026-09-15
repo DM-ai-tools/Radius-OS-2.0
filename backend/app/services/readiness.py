@@ -17,7 +17,6 @@ from app.models import (
     TrackingAudit,
     WebsiteAudit,
 )
-
 from app.services.discovery_fields import DISCOVERY_FIELDS
 
 # Phase weights sum to 1.0
@@ -46,9 +45,7 @@ async def compute_discovery_score(db: AsyncSession, client_id: UUID) -> tuple[De
     for r in rows:
         # Prefer client_questionnaire, then approved
         existing = by_key.get(r.field_key)
-        if existing is None:
-            by_key[r.field_key] = r
-        elif r.source == "client_questionnaire":
+        if existing is None or r.source == "client_questionnaire":
             by_key[r.field_key] = r
 
     missing: list[str] = []
@@ -113,7 +110,7 @@ async def compute_website_score(db: AsyncSession, client_id: UUID) -> tuple[Deci
     missing = sorted(required - types)
     approved = [r for r in rows if r.status in ("approved", "edited")]
     if not rows:
-        return Decimal("0"), list(required)
+        return Decimal(0), list(required)
     base = 100 * len(types & required) / len(required)
     if approved:
         base = min(100, base + 10)
@@ -131,7 +128,7 @@ async def compute_competitor_score(db: AsyncSession, client_id: UUID) -> tuple[D
     comps = list(result.scalars().all())
     missing: list[str] = []
     if not comps:
-        return Decimal("0"), ["competitor set"]
+        return Decimal(0), ["competitor set"]
     confirmed = [c for c in comps if c.confirmed]
     clustered = [c for c in comps if c.positioning_cluster]
     points = 40
@@ -154,7 +151,7 @@ async def recompute_readiness(db: AsyncSession, client_id: UUID) -> ClientDigita
         "competitor": await compute_competitor_score(db, client_id),
     }
 
-    overall = Decimal("0")
+    overall = Decimal(0)
     all_missing: list[str] = []
     for phase, (score, missing) in scores.items():
         db.add(

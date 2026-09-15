@@ -1,7 +1,10 @@
 """Keyword cleaning pipeline — stage order and outputs."""
 
 from app.services.keyword_clustering import clean_and_dedupe
-from app.services.keyword_pipeline import extract_entities_and_topics, run_keyword_pipeline
+from app.services.keyword_pipeline import (
+    extract_entities_and_topics,
+    run_keyword_pipeline,
+)
 from app.services.keyword_relevance import build_relevance_context
 
 

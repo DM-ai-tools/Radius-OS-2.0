@@ -1,6 +1,9 @@
 """CDD / service / website keyword relevance cleaning."""
 
-from app.services.keyword_clustering import build_service_seed_clusters, clean_and_dedupe
+from app.services.keyword_clustering import (
+    build_service_seed_clusters,
+    clean_and_dedupe,
+)
 from app.services.keyword_opportunity import business_fit_score, rank_opportunities
 from app.services.keyword_relevance import (
     build_relevance_context,

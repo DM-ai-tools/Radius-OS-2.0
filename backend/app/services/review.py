@@ -412,9 +412,7 @@ async def _rollup_to_profile(
         by_key: dict = {}
         for r in rows:
             existing = by_key.get(r.field_key)
-            if existing is None:
-                by_key[r.field_key] = r
-            elif r.source == "client_questionnaire":
+            if existing is None or r.source == "client_questionnaire":
                 by_key[r.field_key] = r
         # Preserve prior early intake (contacts etc.) under client_intake
         prior_ctx = dict(profile.marketing_context or {})

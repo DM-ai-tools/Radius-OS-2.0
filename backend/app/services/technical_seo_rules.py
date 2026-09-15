@@ -44,11 +44,11 @@ _IMPORTANCE_SEVERITY = {
 # Issue name patterns that elevate severity
 _CRITICAL_PATTERNS = re.compile(
     r"5\d{2}|server error|noindex.*important|blocked.*index|redirect loop",
-    re.I,
+    re.IGNORECASE,
 )
 _HIGH_PATTERNS = re.compile(
     r"4\d{2}|broken|canonical conflict|noindex|not indexable|orphan|5xx|4xx",
-    re.I,
+    re.IGNORECASE,
 )
 
 _ISSUE_ACTIONS: dict[str, str] = {

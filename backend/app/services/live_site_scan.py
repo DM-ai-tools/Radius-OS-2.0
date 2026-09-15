@@ -182,7 +182,10 @@ async def scan_live_site(
 
     if len(pages) < 8:
         try:
-            from app.integrations.site_research import research_ready, research_site_crawl
+            from app.integrations.site_research import (
+                research_ready,
+                research_site_crawl,
+            )
 
             if research_ready():
                 research = await research_site_crawl(primary_url, max_pages=cap)

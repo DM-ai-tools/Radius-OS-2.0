@@ -7,9 +7,9 @@ from collections import Counter, defaultdict, deque
 from typing import Any
 from urllib.parse import urlparse
 
+from app.agents.prompts import load_skill_file
 from app.integrations.llm import synthesize_json
 from app.integrations.web_fetch import absolute_links, fetch_url, parse_html
-from app.agents.prompts import load_skill_file
 from app.logging_config import get_logger
 
 log = get_logger("site_architecture")
@@ -841,8 +841,11 @@ async def run_site_architecture_plan(
         website=website,
     )
 
-    from app.services.url_mapping import apply_url_map_to_architecture, build_final_url_map
     from app.services.site_sitemap import ensure_website_sitemap, sitemap_pages
+    from app.services.url_mapping import (
+        apply_url_map_to_architecture,
+        build_final_url_map,
+    )
 
     # Phase 3 site sitemap is the process-wide inventory. Phase 5 live scan
     # enriches titles/H1 on those URLs when present; otherwise use the sitemap.

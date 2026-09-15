@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.prompts import load_skill
 from app.integrations.llm import live_pre_research
 from app.models import (
     Client,
@@ -25,7 +26,6 @@ from app.services.discovery_fields import (
 )
 from app.services.readiness import compute_discovery_score, recompute_readiness
 from app.services.role_skills import required_role_for
-from app.agents.prompts import load_skill
 
 
 def _conf_label(confidence: float | None) -> str:

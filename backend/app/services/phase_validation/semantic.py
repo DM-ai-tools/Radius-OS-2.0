@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from app.integrations.llm import synthesize_json
 from app.logging_config import get_logger
 from app.services.phase_validation.criteria import list_applicable_parameters
-from app.services.phase_validation.prompts import VALIDATOR_SYSTEM_PROMPT, build_semantic_user_prompt
+from app.services.phase_validation.prompts import (
+    VALIDATOR_SYSTEM_PROMPT,
+    build_semantic_user_prompt,
+)
 from app.services.phase_validation.schema import (
     CheckResult,
     CheckSeverity,

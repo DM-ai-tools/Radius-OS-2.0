@@ -1,6 +1,7 @@
 """Service prioritization — pre Phase 5 selection."""
 
 from app.services.service_prioritization import (
+    _paths_to_service_nodes,
     apply_service_selection,
     build_client_service_catalog,
     build_prioritization_pack,
@@ -10,7 +11,6 @@ from app.services.service_prioritization import (
     ia_nodes_from_competitor_tree,
     is_prioritization_confirmed,
     merge_competitor_subservices,
-    _paths_to_service_nodes,
 )
 
 

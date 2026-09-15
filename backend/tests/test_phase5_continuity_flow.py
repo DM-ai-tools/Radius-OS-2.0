@@ -1,7 +1,8 @@
 """Integration test: Verify Phase 5 topics/keywords flow through Phase 6/9 correctly."""
 
-import pytest
 from typing import Any
+
+import pytest
 
 
 @pytest.fixture

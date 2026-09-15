@@ -6,15 +6,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.api import auth, chat, clients, cost_tracker, engine_room, findings, integrations, oauth, readiness, sessions, technical_seo, workbook
+# Ensure models are registered with Base.metadata before create_all runs below.
+# Imported for the side effect only — never delete as "unused".
+import app.models  # noqa: F401
+from app.api import (
+    auth,
+    chat,
+    clients,
+    cost_tracker,
+    engine_room,
+    findings,
+    integrations,
+    oauth,
+    readiness,
+    sessions,
+    technical_seo,
+    workbook,
+)
 from app.config import get_settings
-from app.db import Base, AsyncSessionLocal, engine
+from app.db import AsyncSessionLocal, Base, engine
 from app.logging_config import get_logger, setup_logging
 from app.seed import seed_all
 from app.services.public_seo import build_robots_txt, build_sitemap_xml
-
-# Ensure models are registered
-import app.models  # noqa: F401
 
 setup_logging()
 log = get_logger("main")
