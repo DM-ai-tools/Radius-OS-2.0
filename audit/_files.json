@@ -1,0 +1,1604 @@
+[
+{
+"f": "backend/app/__init__.py",
+"loc": 1,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/agents/__init__.py",
+"loc": 46,
+"churn": 2,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/agents/competitor.py",
+"loc": 611,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/agents/content_audit.py",
+"loc": 202,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/agents/content_planning.py",
+"loc": 186,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/agents/content_production.py",
+"loc": 224,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/agents/content_strategy.py",
+"loc": 180,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/agents/discovery.py",
+"loc": 423,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/agents/on_page_seo.py",
+"loc": 157,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/agents/prompts.py",
+"loc": 109,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/agents/publishing.py",
+"loc": 208,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/agents/search_demand.py",
+"loc": 1514,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/agents/site_architecture.py",
+"loc": 192,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/agents/technical_seo.py",
+"loc": 235,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/agents/tracking.py",
+"loc": 408,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/agents/website.py",
+"loc": 1039,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/api/__init__.py",
+"loc": 1,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/api/auth.py",
+"loc": 120,
+"churn": 4,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/api/chat.py",
+"loc": 267,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/api/clients.py",
+"loc": 689,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/api/cost_tracker.py",
+"loc": 51,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/api/engine_room.py",
+"loc": 53,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/api/findings.py",
+"loc": 268,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/api/integrations.py",
+"loc": 160,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/api/oauth.py",
+"loc": 299,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/api/readiness.py",
+"loc": 84,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/api/sessions.py",
+"loc": 83,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/api/technical_seo.py",
+"loc": 99,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/api/workbook.py",
+"loc": 82,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/config.py",
+"loc": 214,
+"churn": 5,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/db.py",
+"loc": 281,
+"churn": 4,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/deps.py",
+"loc": 106,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/integrations/__init__.py",
+"loc": 1,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/integrations/ahrefs.py",
+"loc": 497,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/integrations/brandfetch.py",
+"loc": 182,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/integrations/dataforseo.py",
+"loc": 817,
+"churn": 2,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/integrations/firecrawl.py",
+"loc": 122,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/integrations/google_oauth.py",
+"loc": 107,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/integrations/llm.py",
+"loc": 984,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/integrations/providers.py",
+"loc": 2549,
+"churn": 5,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/integrations/retry.py",
+"loc": 28,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/integrations/search_console.py",
+"loc": 281,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/integrations/site_research.py",
+"loc": 326,
+"churn": 3,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/integrations/web_fetch.py",
+"loc": 751,
+"churn": 5,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/integrations/wordpress.py",
+"loc": 712,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/logging_config.py",
+"loc": 29,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/main.py",
+"loc": 271,
+"churn": 6,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/ml/__init__.py",
+"loc": 1,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/ml/scoring.py",
+"loc": 105,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/ml/tier_competitors.py",
+"loc": 578,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/models/__init__.py",
+"loc": 38,
+"churn": 2,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/models/client.py",
+"loc": 81,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/models/conversation.py",
+"loc": 77,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/models/findings.py",
+"loc": 118,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/models/governance.py",
+"loc": 81,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/models/identity.py",
+"loc": 52,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/models/integrations.py",
+"loc": 38,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/models/operations.py",
+"loc": 42,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/models/types.py",
+"loc": 77,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/orchestration/__init__.py",
+"loc": 3,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/orchestration/pipeline.py",
+"loc": 340,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/schemas/__init__.py",
+"loc": 1,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/schemas/auth.py",
+"loc": 46,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/schemas/client.py",
+"loc": 195,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/schemas/session.py",
+"loc": 55,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/security.py",
+"loc": 67,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/seed.py",
+"loc": 106,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/services/__init__.py",
+"loc": 1,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/services/agent_handoff.py",
+"loc": 323,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/agent_runtime.py",
+"loc": 51,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/api_meter.py",
+"loc": 177,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/audit.py",
+"loc": 28,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/bw_workbook.py",
+"loc": 508,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/cache.py",
+"loc": 88,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/cdd_checklist.py",
+"loc": 625,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/chat_qa.py",
+"loc": 371,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/chat_revisions.py",
+"loc": 616,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/client_memory_retention.py",
+"loc": 164,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/competitive_context.py",
+"loc": 596,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/content_audit.py",
+"loc": 579,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/content_brief.py",
+"loc": 1252,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/content_enhancement.py",
+"loc": 458,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/content_pipeline.py",
+"loc": 316,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/content_planning.py",
+"loc": 1087,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/content_production.py",
+"loc": 398,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/content_queue.py",
+"loc": 293,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/content_strategy.py",
+"loc": 1288,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/cost_tracker.py",
+"loc": 304,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/create_content.py",
+"loc": 1772,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/create_topic.py",
+"loc": 1194,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/discovery_fields.py",
+"loc": 558,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/engine_room.py",
+"loc": 293,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/headline_framework.py",
+"loc": 539,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/intake_ai.py",
+"loc": 307,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/services/json_safe.py",
+"loc": 30,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/keyword_clustering.py",
+"loc": 905,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/keyword_llm_clustering.py",
+"loc": 430,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/keyword_llm_relevance.py",
+"loc": 482,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/keyword_opportunity.py",
+"loc": 1446,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/keyword_pipeline.py",
+"loc": 289,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/keyword_pool.py",
+"loc": 55,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/keyword_relevance.py",
+"loc": 684,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/keyword_seeding.py",
+"loc": 942,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/live_site_scan.py",
+"loc": 219,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/memory_packs.py",
+"loc": 900,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/on_page_seo.py",
+"loc": 742,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/page_clusters.py",
+"loc": 594,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/phase_pipeline.py",
+"loc": 399,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/phase_validation/__init__.py",
+"loc": 35,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/phase_validation/apply.py",
+"loc": 337,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/phase_validation/context.py",
+"loc": 296,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/phase_validation/criteria.py",
+"loc": 446,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/phase_validation/deterministic.py",
+"loc": 1114,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/phase_validation/prompts.py",
+"loc": 134,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/phase_validation/revision.py",
+"loc": 76,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/phase_validation/schema.py",
+"loc": 150,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/phase_validation/semantic.py",
+"loc": 113,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/phase_validation/service.py",
+"loc": 236,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/public_seo.py",
+"loc": 69,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/publish_preview.py",
+"loc": 564,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/publishing.py",
+"loc": 441,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/readiness.py",
+"loc": 209,
+"churn": 2,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/report_docx.py",
+"loc": 245,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/report_export.py",
+"loc": 270,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/report_pdf.py",
+"loc": 402,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/report_pdf_document.py",
+"loc": 947,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/report_pdf_normalize.py",
+"loc": 615,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/report_pdf_site_architecture.py",
+"loc": 477,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/report_pdf_theme.py",
+"loc": 348,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/review.py",
+"loc": 635,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/role_skills.py",
+"loc": 1514,
+"churn": 4,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/service_prioritization.py",
+"loc": 710,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/site_architecture.py",
+"loc": 1069,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/site_page_inventory.py",
+"loc": 391,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/site_sitemap.py",
+"loc": 577,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/technical_seo.py",
+"loc": 815,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/technical_seo_ahrefs.py",
+"loc": 254,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/technical_seo_companion.py",
+"loc": 377,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/technical_seo_ia.py",
+"loc": 112,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/technical_seo_normalize.py",
+"loc": 78,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/technical_seo_prioritization.py",
+"loc": 32,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/technical_seo_rules.py",
+"loc": 341,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/technical_seo_schemas.py",
+"loc": 111,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/topic_classification.py",
+"loc": 657,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/topic_naming.py",
+"loc": 216,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/tracking_workflow.py",
+"loc": 290,
+"churn": 2,
+"last": "2026-09-01"
+},
+{
+"f": "backend/app/services/url_mapping.py",
+"loc": 1374,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/wp_content.py",
+"loc": 489,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/wp_elementor.py",
+"loc": 329,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/services/wp_publish_strategy.py",
+"loc": 603,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/tasks/__init__.py",
+"loc": 3,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/app/tasks/celery_app.py",
+"loc": 32,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/app/tasks/jobs.py",
+"loc": 65,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/architecture_audit.py",
+"loc": 393,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/scripts/audit_technical_seo.py",
+"loc": 45,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/cdd_checklist.py",
+"loc": 66,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/scripts/check_openrouter.py",
+"loc": 120,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/scripts/clear_phases_from.py",
+"loc": 303,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/plan_roadmap.py",
+"loc": 84,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/scripts/run_all_phases.py",
+"loc": 306,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/run_continue_planning.py",
+"loc": 196,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/run_phase10.py",
+"loc": 162,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/run_phase11.py",
+"loc": 176,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/run_phase5.py",
+"loc": 92,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/scripts/run_phase6.py",
+"loc": 108,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/run_phase7.py",
+"loc": 101,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/scripts/run_phase8.py",
+"loc": 129,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/conftest.py",
+"loc": 69,
+"churn": 2,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_agent_handoff.py",
+"loc": 87,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_ahrefs_site_audit.py",
+"loc": 165,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_api_meter.py",
+"loc": 20,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_auth_login_me.py",
+"loc": 122,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_bw_workbook.py",
+"loc": 121,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_cache_async.py",
+"loc": 65,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_cdd_checklist.py",
+"loc": 125,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_celery_stub_status.py",
+"loc": 34,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_chat_qa.py",
+"loc": 92,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_chat_revisions.py",
+"loc": 75,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_client_memory_retention.py",
+"loc": 256,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_clients_api.py",
+"loc": 147,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_competitor_carry.py",
+"loc": 70,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_competitor_discovery_concurrency.py",
+"loc": 69,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_config_secrets.py",
+"loc": 35,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/tests/test_content_audit.py",
+"loc": 143,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_content_brief.py",
+"loc": 506,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_content_enhancement.py",
+"loc": 214,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_content_pipeline.py",
+"loc": 123,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_content_planning.py",
+"loc": 577,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_cost_tracker.py",
+"loc": 28,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_cost_tracker_vendor.py",
+"loc": 55,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_create_content.py",
+"loc": 500,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_create_topic_fallback.py",
+"loc": 421,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_dataforseo_location.py",
+"loc": 22,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_discovery_document_upload.py",
+"loc": 56,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_discovery_phase_boundary.py",
+"loc": 12,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_discrepancy_normalize.py",
+"loc": 31,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_engine_room.py",
+"loc": 16,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_fallback.py",
+"loc": 27,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/tests/test_find_existing_match_for_cluster.py",
+"loc": 72,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_findings_permission_checks.py",
+"loc": 108,
+"churn": 3,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_google_evidence_base.py",
+"loc": 34,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_headline_framework.py",
+"loc": 146,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_hot_path_indexes.py",
+"loc": 45,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_indexable_urls.py",
+"loc": 41,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_json_safe.py",
+"loc": 18,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_keyword_accounting.py",
+"loc": 87,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_keyword_clustering_relevance.py",
+"loc": 197,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_keyword_funnel_tagging.py",
+"loc": 111,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_keyword_intent.py",
+"loc": 137,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_keyword_llm_clustering.py",
+"loc": 45,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_keyword_llm_relevance.py",
+"loc": 212,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_keyword_pipeline.py",
+"loc": 64,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_keyword_pool.py",
+"loc": 41,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_keyword_relevance.py",
+"loc": 211,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_keyword_seeding.py",
+"loc": 371,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_list_pagination.py",
+"loc": 88,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_live_site_scan.py",
+"loc": 164,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_oauth_api.py",
+"loc": 241,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_openrouter_text.py",
+"loc": 26,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_page_clusters.py",
+"loc": 90,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_phase11_guardrails.py",
+"loc": 360,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_phase12_publishing.py",
+"loc": 512,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_phase18_memory_continuity.py",
+"loc": 210,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_phase5_continuity_flow.py",
+"loc": 368,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_phase712_gates.py",
+"loc": 354,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_phase_chain_integrity.py",
+"loc": 304,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_phase_pipeline.py",
+"loc": 168,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_phase_rbac_matrix.py",
+"loc": 354,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_phase_validation.py",
+"loc": 1318,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_pipeline_timeout.py",
+"loc": 59,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_providers_ssrf.py",
+"loc": 83,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_public_seo.py",
+"loc": 57,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_rbac.py",
+"loc": 42,
+"churn": 2,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_readiness.py",
+"loc": 8,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/tests/test_report_docx.py",
+"loc": 251,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_report_export.py",
+"loc": 63,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_report_pdf.py",
+"loc": 398,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_report_pdf_normalize.py",
+"loc": 257,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_review_batch_query_count.py",
+"loc": 76,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/tests/test_scoring_tracking_anomaly.py",
+"loc": 59,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_search_console_technical.py",
+"loc": 56,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_security_headers.py",
+"loc": 20,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_seed_gating.py",
+"loc": 24,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/tests/test_service_keyword_clustering.py",
+"loc": 245,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_service_prioritization.py",
+"loc": 245,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_session_idor.py",
+"loc": 64,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/tests/test_signup_role_restriction.py",
+"loc": 80,
+"churn": 4,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_silent_exception_logging.py",
+"loc": 91,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_site_architecture_live_scan_wiring.py",
+"loc": 115,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_site_map_accuracy.py",
+"loc": 444,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_site_page_inventory.py",
+"loc": 103,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_site_sitemap.py",
+"loc": 194,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_technical_seo_api.py",
+"loc": 55,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_technical_seo_companion.py",
+"loc": 77,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_technical_seo_ia.py",
+"loc": 19,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_technical_seo_providers.py",
+"loc": 485,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_technical_seo_scoring.py",
+"loc": 51,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_tier_competitors_scoring.py",
+"loc": 33,
+"churn": 1,
+"last": "2026-08-07"
+},
+{
+"f": "backend/tests/test_topic_classification.py",
+"loc": 435,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_topic_naming.py",
+"loc": 50,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_url_mapping.py",
+"loc": 256,
+"churn": 1,
+"last": "2026-09-01"
+},
+{
+"f": "backend/tests/test_url_mapping_topic_decisions.py",
+"loc": 236,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_waterfall_gates.py",
+"loc": 237,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_web_fetch_ssrf.py",
+"loc": 56,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_wordpress_connection_api.py",
+"loc": 248,
+"churn": 2,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_wordpress_publishing.py",
+"loc": 850,
+"churn": 1,
+"last": "2026-09-15"
+},
+{
+"f": "backend/tests/test_ymyl_positioning.py",
+"loc": 63,
+"churn": 1,
+"last": "2026-09-15"
+}
+]
