@@ -99,20 +99,3 @@ class BacklinkSnapshot(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-
-class CompetitorRanking(Base):
-    __tablename__ = "competitor_rankings"
-
-    id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    competitor_profile_id: Mapped[uuid.UUID] = mapped_column(
-        GUID(), ForeignKey("competitor_profiles.id"), nullable=False, index=True
-    )
-    keyword: Mapped[str] = mapped_column(Text, nullable=False)
-    position: Mapped[int] = mapped_column(Integer, nullable=False)
-    search_volume: Mapped[int | None] = mapped_column(Integer)
-    client_position: Mapped[int | None] = mapped_column(Integer)
-    gap_flag: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    source: Mapped[str] = mapped_column(Text, nullable=False)
-    pulled_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )

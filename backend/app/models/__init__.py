@@ -3,7 +3,6 @@ from app.models.conversation import AgentJob, ChatMessage, ChatSession
 from app.models.findings import (
     BacklinkSnapshot,
     CompetitorProfile,
-    CompetitorRanking,
     DiscoveryResponse,
     TrackingAudit,
     WebsiteAudit,
@@ -29,7 +28,6 @@ __all__ = [
     "Client",
     "ClientDigitalProfile",
     "CompetitorProfile",
-    "CompetitorRanking",
     "ContentEmbedding",
     "DiscoveryResponse",
     "FindingsLedger",

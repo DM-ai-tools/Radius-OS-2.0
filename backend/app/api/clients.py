@@ -23,7 +23,6 @@ from app.models import (
     Client,
     ClientDigitalProfile,
     CompetitorProfile,
-    CompetitorRanking,
     DiscoveryResponse,
     FindingsLedger,
     PhaseValidation,
@@ -296,11 +295,6 @@ async def delete_client(
         ).scalars().all()
     )
     if competitor_ids:
-        await db.execute(
-            delete(CompetitorRanking).where(
-                CompetitorRanking.competitor_profile_id.in_(competitor_ids)
-            )
-        )
         await db.execute(
             delete(BacklinkSnapshot).where(
                 BacklinkSnapshot.competitor_profile_id.in_(competitor_ids)

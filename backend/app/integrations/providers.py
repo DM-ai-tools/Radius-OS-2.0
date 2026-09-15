@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import re
 from typing import Any
 
@@ -157,68 +156,6 @@ def _mock_backlinks(domain: str, provider: str) -> dict[str, Any]:
         ],
         "provider_note": provider,
     }
-
-
-async def pull_rankings(domain: str, competitor_domains: list[str]) -> list[dict[str, Any]]:
-    settings = get_settings()
-    if settings.use_mock_providers:
-        keywords = [
-            "best seo agency",
-            "local seo services",
-            "ecommerce seo",
-            "technical seo audit",
-            "content marketing strategy",
-        ]
-        rows = []
-        for kw in keywords:
-            for cd in competitor_domains:
-                pos = random.randint(1, 40)
-                client_pos = random.choice([None, None, random.randint(5, 80)])
-                rows.append(
-                    {
-                        "competitor_domain": cd,
-                        "keyword": kw,
-                        "position": pos,
-                        "search_volume": random.randint(200, 12000),
-                        "client_position": client_pos,
-                        "gap_flag": client_pos is None or client_pos > 20,
-                        "source": "ahrefs",
-                    }
-                )
-        return rows
-
-    from app.integrations import ahrefs
-
-    client_rows, _ = await ahrefs.organic_keywords(domain, limit=40)
-    client_pos = {
-        (r.get("keyword") or "").lower(): r.get("position") for r in client_rows if r.get("keyword")
-    }
-    rows: list[dict[str, Any]] = []
-    for cd in competitor_domains[:5]:
-        corg, _ = await ahrefs.organic_keywords(cd, limit=30)
-        for r in corg:
-            kw = str(r.get("keyword") or "")
-            if not kw:
-                continue
-            cpos = client_pos.get(kw.lower())
-            rows.append(
-                {
-                    "competitor_domain": cd,
-                    "keyword": kw,
-                    "position": r.get("position"),
-                    "search_volume": r.get("volume"),
-                    "client_position": cpos,
-                    "gap_flag": cpos is None or (isinstance(cpos, int) and cpos > 20),
-                    "source": "ahrefs",
-                }
-            )
-    if not rows:
-        log.warning(
-            "pull_rankings_empty",
-            domain=domain,
-            note="Ahrefs organic keywords returned empty — check AHREFS_API_KEY / plan",
-        )
-    return rows
 
 
 async def validate_tracking(
