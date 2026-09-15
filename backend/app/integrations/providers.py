@@ -13,6 +13,52 @@ from app.logging_config import get_logger
 log = get_logger("providers")
 
 
+def coerce_domain_rating(payload: Any) -> float | None:
+    """Ahrefs domain rating out of any response shape it ships, or None.
+
+    v3 has returned the rating in three different places depending on endpoint
+    and plan::
+
+        {"domain_rating": {"domain_rating": 72}}   nested
+        {"domain_rating": 72}                       scalar
+        {"metrics": {"domain_rating": 72}}          under metrics
+
+    Returns **None** when no rating is present, which is deliberately not the
+    same value as a rating of ``0.0``. The caller needs to tell "Ahrefs says
+    this domain has no authority" apart from "Ahrefs did not tell us", because
+    only the second one is worth warning about.
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    candidates: list[Any] = []
+    rating = payload.get("domain_rating")
+    if isinstance(rating, dict):
+        candidates.append(rating.get("domain_rating"))
+    else:
+        candidates.append(rating)
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        candidates.append(metrics.get("domain_rating"))
+
+    for candidate in candidates:
+        if candidate is None or isinstance(candidate, bool):
+            continue
+        try:
+            return float(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _payload_shape(payload: Any) -> str:
+    """Compact description of a response for logs — never the whole body."""
+    if not isinstance(payload, dict):
+        return type(payload).__name__
+    keys = ",".join(sorted(payload)[:6])
+    return f"dict({keys})"
+
+
 async def pull_backlinks(domain: str) -> tuple[dict[str, Any], str]:
     """Returns (payload, provider_used). Ahrefs primary, Moz fallback, else live site signals."""
     settings = get_settings()
@@ -40,6 +86,12 @@ async def pull_backlinks(domain: str) -> tuple[dict[str, Any], str]:
             data = resp.json()
             metrics = data.get("metrics") or data
 
+            # Domain rating is optional enrichment: a failure here must not lose
+            # the backlink stats we already have. But it must never fail
+            # silently either — every path that leaves authority at 0.0 logs
+            # why, and the three causes (network, HTTP status, unparseable
+            # payload) are distinguishable in the logs rather than collapsed
+            # into one blind except.
             authority = 0.0
             try:
                 dr_resp = await client.get(
@@ -47,17 +99,41 @@ async def pull_backlinks(domain: str) -> tuple[dict[str, Any], str]:
                     params={"target": domain, "date": today},
                     headers=headers,
                 )
-                if dr_resp.status_code < 400:
-                    dr_data = dr_resp.json()
-                    authority = float(
-                        (dr_data.get("domain_rating") or {}).get("domain_rating")
-                        if isinstance(dr_data.get("domain_rating"), dict)
-                        else dr_data.get("domain_rating")
-                        or dr_data.get("metrics", {}).get("domain_rating")
-                        or 0
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                log.warning(
+                    "ahrefs_domain_rating_unavailable",
+                    domain=domain,
+                    reason="request_failed",
+                    error=type(exc).__name__,
+                )
+            else:
+                if dr_resp.status_code >= 400:
+                    log.warning(
+                        "ahrefs_domain_rating_unavailable",
+                        domain=domain,
+                        reason="http_error",
+                        status=dr_resp.status_code,
                     )
-            except Exception:  # noqa: BLE001
-                authority = 0.0
+                else:
+                    try:
+                        dr_data = dr_resp.json()
+                    except ValueError:
+                        log.warning(
+                            "ahrefs_domain_rating_unavailable",
+                            domain=domain,
+                            reason="invalid_json",
+                        )
+                    else:
+                        rating = coerce_domain_rating(dr_data)
+                        if rating is None:
+                            log.warning(
+                                "ahrefs_domain_rating_unavailable",
+                                domain=domain,
+                                reason="no_rating_in_response",
+                                shape=_payload_shape(dr_data),
+                            )
+                        else:
+                            authority = rating
 
             return {
                 "referring_domains": int(
