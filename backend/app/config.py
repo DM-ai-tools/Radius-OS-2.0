@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     # Directory of built SPA assets (set in production Docker image)
     static_dir: str = ""
 
+    # --- Operational dead man's switch (maintenance lock if check-ins stop) ---
+    # Off by default. When enabled, POST /api/v1/ops/dead-man-switch/check-in
+    # must be called with DEAD_MAN_SWITCH_TOKEN within max_days or API locks.
+    dead_man_switch_enabled: bool = False
+    dead_man_switch_token: str = ""
+    dead_man_switch_max_days: int = 14
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

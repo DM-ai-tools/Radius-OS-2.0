@@ -107,6 +107,17 @@ App: http://localhost:8080
 
 The production image serves the React SPA from FastAPI and binds `0.0.0.0:$PORT` via `scripts/start.sh`. See `.env.example` for the full Railway checklist.
 
+### Dead man's switch (optional)
+
+Operational lock — not data wipe. When `DEAD_MAN_SWITCH_ENABLED=true`, an operator must check in within `DEAD_MAN_SWITCH_MAX_DAYS` or `/api/v1/*` returns **503** until revival. Health and the ops endpoints stay up.
+
+```bash
+python scripts/dead_man_check_in.py https://your-app.example.com "$DEAD_MAN_SWITCH_TOKEN"
+python scripts/dead_man_check_in.py https://your-app.example.com "$DEAD_MAN_SWITCH_TOKEN" --status-only
+```
+
+Off by default.
+
 ## End-to-end walkthrough
 
 1. Open Acme Retail → Discovery pre-research starts → Approve.

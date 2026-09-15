@@ -1,6 +1,15 @@
 const API = import.meta.env.VITE_API_URL || "";
 
 function friendlyApiError(detail: unknown, fallback: string): string {
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    const obj = detail as { code?: string; message?: string };
+    if (obj.code === "dead_man_switch_tripped") {
+      return (
+        obj.message ||
+        "This deployment is locked by the dead man's switch. Contact an operator to check in."
+      );
+    }
+  }
   const text =
     typeof detail === "string"
       ? detail

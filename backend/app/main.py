@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 # Ensure models are registered with Base.metadata before create_all runs below.
@@ -18,6 +18,7 @@ from app.api import (
     findings,
     integrations,
     oauth,
+    ops,
     readiness,
     sessions,
     technical_seo,
@@ -139,6 +140,60 @@ async def _security_headers(request, call_next):
     return response
 
 
+_DEAD_MAN_ALLOW_PREFIXES = (
+    "/health",
+    "/healthz",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/assets",
+    "/media",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/api/v1/ops/dead-man-switch/",
+)
+
+
+@app.middleware("http")
+async def _dead_man_switch_guard(request, call_next):
+    """If the operational dead man's switch has tripped, freeze API traffic.
+
+    Health, docs, SPA assets, and the check-in/status endpoints stay reachable
+    so operators can still revive the deployment. No data is deleted.
+    """
+    from fastapi.responses import JSONResponse
+
+    path = request.url.path or "/"
+    if path == "/" or any(path == p or path.startswith(p) for p in _DEAD_MAN_ALLOW_PREFIXES):
+        return await call_next(request)
+    # Only gate API — SPA deep links still get index.html from the catch-all.
+    if not path.startswith("/api/"):
+        return await call_next(request)
+
+    from app.services.dead_man_switch import get_status, is_tripped
+
+    if not await is_tripped():
+        return await call_next(request)
+
+    status = await get_status()
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "code": "dead_man_switch_tripped",
+                "message": (
+                    "This deployment is locked: the dead man's switch timer expired. "
+                    "An operator must POST /api/v1/ops/dead-man-switch/check-in "
+                    "with DEAD_MAN_SWITCH_TOKEN to restore service."
+                ),
+                "expires_at": status.get("expires_at"),
+                "checked_at": status.get("checked_at"),
+            }
+        },
+        headers={"Retry-After": "3600"},
+    )
+
+
 prefix = "/api/v1"
 app.include_router(auth.router, prefix=prefix)
 app.include_router(clients.router, prefix=prefix)
@@ -152,6 +207,7 @@ app.include_router(engine_room.router, prefix=prefix)
 app.include_router(cost_tracker.router, prefix=prefix)
 app.include_router(technical_seo.router, prefix=prefix)
 app.include_router(workbook.router, prefix=prefix)
+app.include_router(ops.router, prefix=prefix)
 
 
 @app.get("/health")
@@ -189,6 +245,15 @@ async def health():
         redis_ok = False
     static = _resolve_static_dir()
     status = "ok" if db_ok and redis_ok else "degraded"
+    dms: dict = {"enabled": False, "tripped": False}
+    try:
+        from app.services.dead_man_switch import get_status as dms_status
+
+        dms = await dms_status()
+        if dms.get("tripped"):
+            status = "locked"
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "status": status,
         "service": "radius-os-phase1-6",
@@ -197,6 +262,12 @@ async def health():
         "redis": redis_ok,
         "spa": static is not None,
         "static_dir": str(static) if static else None,
+        "dead_man_switch": {
+            "enabled": bool(dms.get("enabled")),
+            "tripped": bool(dms.get("tripped")),
+            "days_remaining": dms.get("days_remaining"),
+            "expires_at": dms.get("expires_at"),
+        },
     }
 
 

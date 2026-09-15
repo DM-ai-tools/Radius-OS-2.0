@@ -30,13 +30,12 @@ htmlcov/
 # Local phase harness / scrape dumps (never ship)
 logs_run_*.txt
 backend/data/draft_images/
+backend/data/dead_man_switch.json
 
 # Local editor / tool caches
 backend/.pytest_cache/
 backend/.ruff_cache/
 .ruff_cache/
-
-backend/data/draft_images/
 
 # Generated report artifacts from local runs
 *.pdf
