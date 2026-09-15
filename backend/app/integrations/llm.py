@@ -654,9 +654,10 @@ async def live_pre_research(
         "Dynamically adapt to ANY industry or vertical — do not assume the client is an "
         "agency, ecommerce brand, SaaS company, or any other default. Infer the real "
         "industry from the site (and intake hint if provided) and keep ALL analysis inside "
-        "that vertical: products, positioning, competitors, reviews, and local signals.\n"
+        "that vertical: products, positioning, reviews, and local signals.\n"
         "Use website content plus any visible signals about Google Business / local listings, "
-        "social presence, reviews, and visible competitors in the SAME industry.\n"
+        "social presence, and reviews in the SAME industry. Competitor discovery is owned "
+        "exclusively by Phase 4 — do not search for, infer, or return competitors here.\n"
         "Never invent revenue numbers, AOV, or private sales-cycle facts — leave those null "
         "with low confidence (the short client questionnaire covers them in D2).\n"
         "If evidence is thin, say so and keep confidence low. Do not fabricate reviews."
@@ -672,7 +673,7 @@ async def live_pre_research(
         "Return JSON with keys covering the APSA Client Discovery Document research block:\n"
         "inferred_industry, business_model, business_keywords, products, products_for_promotion,\n"
         "positioning, geographic_focus, target_demographic, b2b_b2c, industry_targeting,\n"
-        "competitors, strengths, weaknesses, opportunities, threats, brand_guidelines,\n"
+        "strengths, weaknesses, opportunities, threats, brand_guidelines,\n"
         "public_reviews_summary, social_presence, google_business_signals, discrepancies.\n"
         "Also include null/low-confidence stubs for client-only CDD keys:\n"
         "business_goal, average_ticket_size, lifetime_value, lead_modes, strategy_approach,\n"
@@ -682,7 +683,6 @@ async def live_pre_research(
         'Each content key (except discrepancies) = {"value": ..., "confidence": 0.0-1.0}.\n'
         "inferred_industry value = short vertical label.\n"
         "products value = string array of top offerings.\n"
-        'competitors value = [{"name":"...","url":"https://..."}] (3–6 if possible).\n'
         "Never invent ticket size, LTV, or private sales facts — leave those null/low confidence.\n"
         "If unsupported by evidence, value null/empty and confidence <= 0.2."
     )
@@ -788,14 +788,6 @@ def mock_pre_research(
         "positioning": {
             "value": f"Mid-market {vertical} brand with quality-focused messaging",
             "confidence": 0.60,
-        },
-        "competitors": {
-            "value": [
-                {"name": f"Rival of {display_name}", "url": f"https://competitor-a-{domain}"},
-                {"name": f"{vertical} Category Leader", "url": "https://category-leader.example"},
-                {"name": f"{vertical} Value Player", "url": "https://value-player.example"},
-            ],
-            "confidence": 0.58,
         },
         "public_reviews_summary": {
             "value": "Public reviews lean mixed: service praised; price sensitivity mentioned.",
@@ -950,6 +942,9 @@ async def generate_openrouter_image(
                         "messages": [{"role": "user", "content": text}],
                         "modalities": ["image", "text"],
                         "image_config": {"aspect_ratio": aspect_ratio},
+                        # OpenRouter otherwise reserves a huge default completion budget
+                        # (~29k tokens) and 402s even when a few dollars remain.
+                        "max_tokens": 2048,
                     },
                 )
                 if resp.status_code >= 400:

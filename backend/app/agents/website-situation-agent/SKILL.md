@@ -28,16 +28,18 @@ Combine crawl technical audit, backlink/authority review, and traffic-drop anoma
 ## Workflow
 
 1. **Technical crawl** — progress notices; write `website_audits` audit_type=crawl_technical.
-2. **Comprehensive SEO audit (seo-audit skill)** — when in scope:
+2. **Client website sitemap** — build a current-site URL inventory from the crawl / SEO-audit page set **plus** the `site-page-inventory` skill executed via **Perplexity on OpenRouter** (`run_site_page_inventory`). Persist as `site_sitemap` (+ optional `page_inventory` stats/findings) on `website_situation_summary`. This inventory is the **process-wide site map** reused by Search Demand, Site Architecture, Technical SEO, Content Audit, Briefs, and Publishing. Never invent URLs. Approve must preserve `site_sitemap`.
+3. **WAF / bot-challenge pages** — when plain HTTP returns 202/challenge empty HTML, use Firecrawl via `fetch_page_html` / `app.integrations.firecrawl` (see `firecrawl/SKILL.md`) so titles, body, and layout hints are real — not path-only stubs. Perplexity inventory still fills the URL/type/reconcile layer when bulk live fetch is blocked.
+4. **Comprehensive SEO audit (seo-audit skill)** — when in scope:
    - Load CDD / `commercial_scope` from the Client Digital Profile (products, products_for_promotion, business_keywords, geographic_focus).
    - Discover URLs; **do not invent pages**.
    - Audit in hierarchy order: **Home → service hubs → service pages → sub-service pages → locations → guides → blog → other**.
    - **Primary focus** on URLs that match CDD money terms; weight the site score toward those pages.
    - Flag CDD offerings with no matching crawled URL as coverage gaps (IA/content), not as fabricated findings.
-3. **Backlink & authority** — Ahrefs → Moz fallback; spam-risk pre-triage; `backlink_snapshots` + audit_type=backlink_summary.
-4. **Traffic anomaly** — skip if tracking_status ≠ complete; change-point + crawl correlation as hypothesis only; audit_type=traffic_anomaly. Explicit "no anomalies" is a valid finding.
-5. **Unified report** — three tabs: Technical / Authority / Anomalies. Unused tabs = "not run this session". SEO audit card includes `page_hierarchy` + CDD focus counts.
-6. **Review** — Approve/Edit → website_situation_summary + website_status=complete; Reject → in_progress.
+5. **Backlink & authority** — Ahrefs → Moz fallback; spam-risk pre-triage; `backlink_snapshots` + audit_type=backlink_summary.
+6. **Traffic anomaly** — skip if tracking_status ≠ complete; change-point + crawl correlation as hypothesis only; audit_type=traffic_anomaly. Explicit "no anomalies" is a valid finding.
+7. **Unified report** — three tabs: Technical / Authority / Anomalies. Technical includes the **client site sitemap**. Unused tabs = "not run this session". SEO audit card includes `page_hierarchy` + CDD focus counts.
+7. **Review** — Approve/Edit → website_situation_summary + website_status=complete; Reject → in_progress.
 
 ## Guardrails
 

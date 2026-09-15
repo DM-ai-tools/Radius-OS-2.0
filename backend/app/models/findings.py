@@ -13,7 +13,9 @@ class DiscoveryResponse(Base):
     __tablename__ = "discovery_responses"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("clients.id"), nullable=False, index=True
+    )
     source: Mapped[str] = mapped_column(Text, nullable=False)
     field_key: Mapped[str] = mapped_column(Text, nullable=False)
     field_value: Mapped[dict | None] = mapped_column(JSONType)
@@ -30,7 +32,9 @@ class TrackingAudit(Base):
     __tablename__ = "tracking_audits"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("clients.id"), nullable=False, index=True
+    )
     element: Mapped[str] = mapped_column(Text, nullable=False)
     check_result: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[dict | None] = mapped_column(JSONType)
@@ -45,7 +49,9 @@ class WebsiteAudit(Base):
     __tablename__ = "website_audits"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("clients.id"), nullable=False, index=True
+    )
     audit_type: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[dict | None] = mapped_column(JSONType)
     severity: Mapped[str] = mapped_column(Text, default="info")
@@ -61,7 +67,9 @@ class CompetitorProfile(Base):
     __tablename__ = "competitor_profiles"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("clients.id"), nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     source: Mapped[str] = mapped_column(Text, nullable=False)
@@ -76,9 +84,11 @@ class BacklinkSnapshot(Base):
     __tablename__ = "backlink_snapshots"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[uuid.UUID | None] = mapped_column(GUID(), ForeignKey("clients.id"))
+    client_id: Mapped[uuid.UUID | None] = mapped_column(
+        GUID(), ForeignKey("clients.id"), index=True
+    )
     competitor_profile_id: Mapped[uuid.UUID | None] = mapped_column(
-        GUID(), ForeignKey("competitor_profiles.id")
+        GUID(), ForeignKey("competitor_profiles.id"), index=True
     )
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     referring_domains: Mapped[int] = mapped_column(Integer, nullable=False)

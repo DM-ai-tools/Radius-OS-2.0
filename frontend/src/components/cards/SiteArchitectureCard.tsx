@@ -68,6 +68,95 @@ function StatusChip({ value }: { value: unknown }) {
   );
 }
 
+const PAGE_TYPE_STYLES: Record<
+  string,
+  { bg: string; fg: string; icon: string; label: string }
+> = {
+  home: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "⌂", label: "Home" },
+  hub: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "◎", label: "Hub" },
+  spoke: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "○", label: "Spoke" },
+  pillar: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "▮", label: "Pillar" },
+  cluster: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "○", label: "Cluster" },
+  supporting: {
+    bg: "var(--primary-bg)",
+    fg: "var(--primary)",
+    icon: "○",
+    label: "Supporting",
+  },
+  service_hub: {
+    bg: "var(--primary-bg)",
+    fg: "var(--primary)",
+    icon: "◎",
+    label: "Service hub",
+  },
+  service: { bg: "var(--coral-bg)", fg: "var(--coral)", icon: "◆", label: "Service" },
+  subservice: {
+    bg: "var(--amber-bg)",
+    fg: "var(--amber)",
+    icon: "↳",
+    label: "Subservice",
+  },
+  sub_service: {
+    bg: "var(--amber-bg)",
+    fg: "var(--amber)",
+    icon: "↳",
+    label: "Subservice",
+  },
+  blog: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "✎", label: "Blog" },
+  article: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "✎", label: "Article" },
+  guide: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "✎", label: "Guide" },
+  listicle: { bg: "var(--primary-bg)", fg: "var(--primary)", icon: "☷", label: "Listicle" },
+  tool: { bg: "var(--green-bg)", fg: "var(--green)", icon: "⚙", label: "Tool" },
+  comparison: {
+    bg: "var(--amber-bg)",
+    fg: "var(--amber)",
+    icon: "⇄",
+    label: "Comparison",
+  },
+  product: { bg: "var(--coral-bg)", fg: "var(--coral)", icon: "◆", label: "Product" },
+  commercial: {
+    bg: "var(--coral-bg)",
+    fg: "var(--coral)",
+    icon: "◆",
+    label: "Commercial",
+  },
+  landing: { bg: "var(--coral-bg)", fg: "var(--coral)", icon: "◆", label: "Landing" },
+  location: { bg: "var(--amber-bg)", fg: "var(--amber)", icon: "⌖", label: "Location" },
+  faq: { bg: "var(--green-bg)", fg: "var(--green)", icon: "?", label: "FAQ" },
+  utility: { bg: "var(--line)", fg: "var(--muted)", icon: "•", label: "Utility" },
+  planned: { bg: "var(--line)", fg: "var(--muted)", icon: "•", label: "Planned" },
+  page: { bg: "var(--line)", fg: "var(--muted)", icon: "•", label: "Page" },
+};
+
+function PageTypeChip({ value }: { value: unknown }) {
+  const type = String(value || "page").trim().toLowerCase();
+  const style = PAGE_TYPE_STYLES[type] || {
+    ...PAGE_TYPE_STYLES.page,
+    label: type.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+  };
+  return (
+    <span
+      className="cs-chip"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        background: style.bg,
+        color: style.fg,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span aria-hidden="true">{style.icon}</span>
+      {style.label}
+    </span>
+  );
+}
+
+function treeIndent(depth: unknown): number {
+  const parsed = Number(depth);
+  return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 6) * 16 : 0;
+}
+
 function resolveUrlColumns(row: Record<string, unknown>): { current: string | null; proposed: string | null } {
   const cur = row.current_url ? String(row.current_url).trim() : "";
   const prop = row.proposed_url ? String(row.proposed_url).trim() : "";
@@ -454,9 +543,21 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
               {tree.slice(0, 40).map((n, i) => (
                 <tr key={`${String(n.path)}-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
                   <td style={{ padding: "6px 8px" }}>
-                    <span className="cs-chip">{String(n.type || "page")}</span>
+                    <PageTypeChip value={n.page_type || n.type} />
                   </td>
-                  <td style={{ padding: "6px 8px", fontWeight: 600, fontSize: 11 }}>
+                  <td
+                    style={{
+                      padding: "6px 8px",
+                      paddingLeft: 8 + treeIndent(n.depth),
+                      fontWeight: 600,
+                      fontSize: 11,
+                    }}
+                  >
+                    {treeIndent(n.depth) > 0 ? (
+                      <span aria-hidden="true" style={{ color: "var(--muted)", marginRight: 5 }}>
+                        └
+                      </span>
+                    ) : null}
                     {String(n.path || n.url || "—")}
                   </td>
                   <td style={{ padding: "6px 8px" }}>{fmtNum(n.depth)}</td>
@@ -522,7 +623,9 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
                     <td style={{ padding: "5px 7px" }}>
                       <StatusChip value={r.status || r.action} />
                     </td>
-                    <td style={{ padding: "5px 7px" }}>{String(r.page_type || "—")}</td>
+                    <td style={{ padding: "5px 7px" }}>
+                      <PageTypeChip value={r.page_type || r.type} />
+                    </td>
                     <td style={{ padding: "5px 7px" }}>
                       <StatusChip value={r.priority || r.score_band} />
                     </td>

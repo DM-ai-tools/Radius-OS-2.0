@@ -185,6 +185,179 @@ def _mock_expansions(seed: str, *, min_volume: int) -> list[dict[str, Any]]:
     return out
 
 
+# Commercial modifiers used when Ahrefs / DataForSEO cannot return expansions.
+_PHRASE_SUFFIXES = (
+    "services",
+    "agency",
+    "company",
+    "pricing",
+    "cost",
+    "near me",
+    "consultants",
+    "experts",
+    "packages",
+    "solutions",
+)
+_PHRASE_PREFIXES = (
+    "best",
+    "hire",
+    "affordable",
+    "top",
+    "professional",
+    "local",
+)
+_RELATED_TEMPLATES = (
+    "{head} strategy for {tail}",
+    "{tail} audit for {head}",
+    "{head} management and {tail}",
+    "improve {head} with {tail}",
+    "{tail} checklist for {head}",
+    "{head} specialist in {tail}",
+    "{tail} consultant for {head}",
+    "best practices for {head} and {tail}",
+    "{head} implementation with {tail}",
+    "{tail} roadmap for {head}",
+)
+_BROAD_TEMPLATES = (
+    "{head} tips",
+    "{tail} tools",
+    "{tail} software",
+    "digital marketing {tail}",
+    "{head} campaign ideas",
+    "{tail} roi",
+    "{head} funnel",
+    "{tail} case study",
+    "grow with {tail}",
+    "{head} trends",
+)
+
+
+def build_coverage_expansions(
+    seed: str,
+    *,
+    min_count: int = 20,
+    min_volume: int = 10,
+) -> list[dict[str, Any]]:
+    """Build ≥min_count phrase/related/broad keywords when live providers fail.
+
+    Used when Ahrefs Keywords Explorer / DataForSEO Labs are unavailable
+    (plan limits, payment required). Rows are marked ``provider_fallback``.
+    """
+    s = (seed or "").strip()
+    if not s:
+        return []
+    toks = _token_list(s)
+    head = toks[0] if toks else s
+    tail = toks[-1] if toks else s
+    candidates: list[tuple[str, str]] = [(s, "exact")]
+
+    # Interleave classes so the first 20 rows are not all phrase matches.
+    phrase_opts = [f"{prefix} {s}" for prefix in _PHRASE_PREFIXES] + [
+        f"{s} {suffix}" for suffix in _PHRASE_SUFFIXES
+    ]
+    related_opts = [
+        tmpl.format(seed=s, head=head, tail=tail) for tmpl in _RELATED_TEMPLATES
+    ]
+    # Prefer broad variants that do NOT contain the full seed contiguously,
+    # otherwise classify_expansion collapses them back into phrase.
+    broad_opts = [
+        tmpl.format(seed=s, head=head, tail=tail) for tmpl in _BROAD_TEMPLATES
+    ]
+    if len(toks) > 1:
+        broad_opts = [
+            f"{head} tips",
+            f"{tail} tools",
+            f"{tail} software",
+            f"digital marketing {tail}",
+            f"{head} campaign ideas",
+            f"{tail} roi",
+            f"{head} funnel",
+            f"{tail} case study",
+            f"grow with {tail}",
+            f"{head} trends",
+            f"{tail} playbook",
+            f"{head} benchmarks",
+        ] + broad_opts
+
+    max_len = max(len(phrase_opts), len(related_opts), len(broad_opts))
+    for i in range(max_len):
+        if i < len(phrase_opts):
+            candidates.append((phrase_opts[i], "phrase"))
+        if i < len(related_opts):
+            candidates.append((related_opts[i], "related"))
+        if i < len(broad_opts):
+            candidates.append((broad_opts[i], "broad"))
+
+    filler_i = 1
+    while len({_norm(c[0]) for c in candidates}) < max(min_count, 20):
+        candidates.append((f"{s} service package {filler_i}", "phrase"))
+        # Split seed tokens so related stays related, not phrase.
+        if len(toks) > 1:
+            candidates.append((f"{head} and {tail} implementation {filler_i}", "related"))
+        else:
+            candidates.append((f"{s} implementation guide {filler_i}", "related"))
+        candidates.append((f"{tail} growth playbook {filler_i}", "broad"))
+        filler_i += 1
+        if filler_i > 30:
+            break
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    vol_by_class = {
+        "exact": max(min_volume + 40, 50),
+        "phrase": max(min_volume + 25, 35),
+        "related": max(min_volume + 15, 25),
+        "broad": max(min_volume + 5, 15),
+    }
+    # First pass: keep classify_expansion result. Second pass can force the
+    # intended class only when classification still lands on exact.
+    for kw, intended_cls in candidates:
+        text = clean_provider_seed(kw) or kw.strip()
+        key = _norm(text)
+        if not key or key in seen or is_stale_year_keyword(text):
+            continue
+        if key == _norm(s) and intended_cls != "exact":
+            continue
+        seen.add(key)
+        if key == _norm(s):
+            final_cls = "exact"
+        else:
+            hint = {
+                "phrase": "matching-terms-phrase",
+                "related": "matching-terms",
+                "broad": "related-terms",
+            }.get(intended_cls)
+            final_cls = classify_expansion(text, s, source_hint=hint)
+            # One-word seeds collapse phrase/related/broad without a hint; keep
+            # the intended class for coverage diversity.
+            if final_cls == "exact" and intended_cls != "exact":
+                final_cls = intended_cls
+            if len(_token_list(s)) == 1 and intended_cls in ("phrase", "related", "broad"):
+                final_cls = intended_cls
+        intent = detect_intent(text)
+        out.append(
+            {
+                "keyword": text,
+                "volume": vol_by_class.get(final_cls, min_volume + 5),
+                "difficulty": None,
+                "cpc": None,
+                "traffic_potential": None,
+                "intent": intent,
+                "funnel": detect_funnel(text, intent),
+                "parent_topic": s,
+                "source": "fallback",
+                "ahrefs_endpoint": "provider_fallback",
+                "seed": s,
+                "match_class": final_cls,
+                "provider_fallback": True,
+                "volume_estimated": True,
+            }
+        )
+        if len(out) >= max(min_count, 20):
+            break
+    return out
+
+
 # Each match class has a dedicated DataForSEO source:
 #   phrase  -> keyword_suggestions (full-text: queries containing the seed)
 #   related -> related_keywords    (Google "searches related to")
@@ -280,12 +453,15 @@ async def expand_seed_ahrefs(
     limit_per_mode: int = 40,
     location_code: int | None = None,
     enable_dataforseo_fallback: bool = True,
+    min_keywords: int = 20,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Fetch exact (phrase) + related (terms) + broad (related-terms) for one seed.
 
     When Ahrefs returns no usable expansions (quota exhausted / rate-limited) and a
     ``location_code`` is provided, fall back to DataForSEO related-keywords so each
-    seed still yields a related/broad keyword set."""
+    seed still yields a related/broad keyword set. If both providers fail or return
+    too few rows, top up with deterministic coverage expansions (≥ min_keywords).
+    """
     errors: list[str] = []
     settings = get_settings()
     seed = (seed or "").strip()
@@ -402,6 +578,27 @@ async def expand_seed_ahrefs(
             "match_class": "exact",
         }
 
+    # When live providers are plan-blocked / unpaid (no usable expansions beyond
+    # the seed placeholder), top up to min_keywords so each service seed still
+    # surfaces a usable keyword set in Phase 5.
+    live_classes = {
+        str(r.get("match_class"))
+        for r in by_kw.values()
+        if str(r.get("source") or "") in ("ahrefs", "dataforseo")
+        and str(r.get("ahrefs_endpoint") or "") != "seed"
+    }
+    if not (live_classes & {"phrase", "related", "broad"}):
+        errors.append("provider_coverage_fallback")
+        for row in build_coverage_expansions(
+            seed, min_count=max(20, int(min_keywords or 20)), min_volume=min_volume
+        ):
+            key = _norm(str(row.get("keyword") or ""))
+            if not key:
+                continue
+            prev = by_kw.get(key)
+            if not prev or prev.get("volume") is None:
+                by_kw[key] = row
+
     return list(by_kw.values()), errors
 
 
@@ -434,6 +631,9 @@ def build_seed_clusters(
             "keyword_count": 0,
             "volume_sum": 0,
         }
+        for field in ("page_type", "page_path", "parent_segment"):
+            if meta.get(field):
+                by_seed[key][field] = meta[field]
 
     orphan_seed = "_unassigned"
     for row in rows:
@@ -606,6 +806,7 @@ async def run_multi_mode_seeding(
                 min_volume=min_volume,
                 limit_per_mode=limit_per_mode,
                 location_code=location_code,
+                min_keywords=20,
             )
 
     results = await asyncio.gather(*[_expand(s) for s in used_seeds])
@@ -643,7 +844,7 @@ async def run_multi_mode_seeding(
             filtered.append(row)
             continue
         # Deliberate sub-threshold fills keep an otherwise-empty class populated
-        if row.get("below_volume_floor"):
+        if row.get("below_volume_floor") or row.get("provider_fallback"):
             filtered.append(row)
             continue
         if vol is not None and int(vol) > min_volume:
@@ -698,7 +899,10 @@ async def run_multi_mode_seeding(
         )
 
     source_set = {str(row.get("source") or "").strip() for row in dataset}
-    providers = [p for p in ("ahrefs", "dataforseo") if p in source_set]
+    providers = [p for p in ("ahrefs", "dataforseo", "fallback") if p in source_set]
+    used_fallback = "fallback" in source_set or any(
+        "provider_coverage_fallback" in str(e) for e in errors
+    )
 
     return {
         "min_volume": min_volume,
@@ -712,6 +916,7 @@ async def run_multi_mode_seeding(
         "seeds_with_all_classes": full_coverage,
         "provider_errors": sorted(set(errors)),
         "providers": providers,
+        "provider_fallback_used": used_fallback,
         "keyword_cleaning": compact_cleaning_audit(cleaning_audit) or cleaning_audit,
         "note": (
             f"Multi-mode seeding across {len(seed_clusters)} target root(s) "
@@ -721,6 +926,12 @@ async def run_multi_mode_seeding(
             f"(suggestions=phrase, related=related, ideas=broad). "
             f"All 4 classes filled for {full_coverage}/{len(seed_clusters)} seeds; "
             f"volume > {min_volume}."
+            + (
+                " Live keyword APIs were unavailable — coverage fallback supplied "
+                "≥20 keywords per seed so Phase 5 remains usable."
+                if used_fallback
+                else ""
+            )
             + (
                 f" Cleaned to CDD/services/pages: kept {cleaning_audit.get('kept_count', 0)}"
                 f" of {cleaning_audit.get('input_count', 0)}."

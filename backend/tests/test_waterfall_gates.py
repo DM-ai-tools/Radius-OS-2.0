@@ -1,7 +1,8 @@
 """Waterfall predecessor gates for phases 1–8."""
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -133,6 +134,54 @@ async def test_search_demand_blocked_without_competitor_approve():
                 )
     assert _has_block_route(events, "competitor_market_agent")
     assert profile.search_demand_status != "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_search_demand_cancels_live_scan_task_when_blocked_at_discovery():
+    """The live-site scan is kicked off before the discovery/CDD gate check
+    runs. If that gate blocks, the scan must be cancelled, not left running
+    unawaited in the background burning crawl/Playwright/Perplexity work for
+    a turn that already returned "blocked"."""
+    profile = _profile(competitor_status="complete", discovery_status="not_started")
+    db = AsyncMock()
+
+    async def _slow_scan(url, **kwargs):
+        await asyncio.sleep(30)
+        return {"pages": []}
+
+    created_tasks: list[asyncio.Task] = []
+    real_ensure_future = asyncio.ensure_future
+
+    def _capturing_ensure_future(coro_or_future, **kwargs):
+        task = real_ensure_future(coro_or_future, **kwargs)
+        created_tasks.append(task)
+        return task
+
+    with patch("app.agents.search_demand.get_profile", AsyncMock(return_value=profile)):
+        with patch("app.agents.search_demand.load_skill", return_value=""):
+            with patch("app.agents.search_demand.load_skill_file", return_value=""):
+                with patch("app.agents.search_demand.scan_live_site", _slow_scan):
+                    with patch(
+                        "app.agents.search_demand._load_cdd_fields",
+                        AsyncMock(return_value={}),
+                    ):
+                        with patch("asyncio.ensure_future", _capturing_ensure_future):
+                            events = await run_search_demand(
+                                db,
+                                client=_client(),
+                                session_id=uuid4(),
+                                user_id=uuid4(),
+                                message="Run keyword research",
+                            )
+
+    assert _has_block_route(events, "discovery_agent")
+    assert len(created_tasks) == 1
+    task = created_tasks[0]
+    for _ in range(20):
+        if task.done():
+            break
+        await asyncio.sleep(0.01)
+    assert task.cancelled()
 
 
 @pytest.mark.asyncio

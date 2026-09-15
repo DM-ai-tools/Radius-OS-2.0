@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
@@ -28,9 +29,14 @@ from app.models import (
 )
 from app.services.agent_runtime import get_profile
 from app.services.audit import log_event
+from app.config import get_settings
 from app.services.readiness import recompute_readiness
 from app.services.role_skills import required_role_for
+from app.services.site_sitemap import build_client_sitemap
 from app.agents.prompts import load_skill
+from app.logging_config import get_logger
+
+log = get_logger("website_situation")
 
 
 def _parse_scope(message: str) -> set[str]:
@@ -154,6 +160,70 @@ async def run_website(
 
     profile.website_status = "in_progress"
     scope = _parse_scope(message)
+    settings = get_settings()
+    page_cap = max(
+        8,
+        min(
+            int(getattr(settings, "website_situation_max_pages", 40) or 40),
+            2000,
+        ),
+    )
+    operation_timeout = max(
+        30,
+        int(getattr(settings, "website_operation_timeout_seconds", 120) or 120),
+    )
+
+    async def bounded(operation, label: str) -> dict:
+        """Keep one slow provider from aborting the entire interactive phase."""
+        try:
+            return await asyncio.wait_for(operation, timeout=operation_timeout)
+        except asyncio.TimeoutError:
+            events.append(
+                {
+                    "type": "system_notice",
+                    "content": (
+                        f"{label} reached the {operation_timeout}s interactive limit. "
+                        "The remaining website checks will continue with a partial report."
+                    ),
+                }
+            )
+            return {
+                "status": "timeout",
+                "error": f"{label.lower().replace(' ', '_')}_timeout",
+                "severity": "warning",
+                "note": f"{label} timed out; partial website findings are still usable.",
+                "pages_found": 0,
+                "indexable": 0,
+                "redirects": 0,
+                "redirect_chains": 0,
+                "canonical_issues": 0,
+                "broken_links": 0,
+                "notable_changes": [],
+                "status_samples": [],
+                "discovered_urls": [],
+            }
+        except Exception as exc:  # noqa: BLE001
+            events.append(
+                {
+                    "type": "system_notice",
+                    "content": f"{label} failed, so the phase continued with partial findings: {exc}",
+                }
+            )
+            return {
+                "status": "error",
+                "error": str(exc),
+                "severity": "warning",
+                "note": f"{label} failed; partial website findings are still usable.",
+                "pages_found": 0,
+                "indexable": 0,
+                "redirects": 0,
+                "redirect_chains": 0,
+                "canonical_issues": 0,
+                "broken_links": 0,
+                "notable_changes": [],
+                "status_samples": [],
+                "discovered_urls": [],
+            }
 
     tabs: dict = {
         "technical": {"status": "not_run_this_session"},
@@ -184,10 +254,14 @@ async def run_website(
                 ),
             }
         )
-        seo_audit_report = await run_seo_audit(
-            client.primary_url,
-            display_name=client.display_name,
-            commercial_scope=dict(profile.commercial_scope or {}),
+        seo_audit_report = await bounded(
+            run_seo_audit(
+                client.primary_url,
+                display_name=client.display_name,
+                commercial_scope=dict(profile.commercial_scope or {}),
+                max_pages=page_cap,
+            ),
+            "Comprehensive SEO audit",
         )
         sa = WebsiteAudit(
             client_id=client.id,
@@ -217,8 +291,11 @@ async def run_website(
                 ),
             }
         )
-        tech_report = await run_technical_seo_audit(
-            client.primary_url, display_name=client.display_name
+        tech_report = await bounded(
+            run_technical_seo_audit(
+                client.primary_url, display_name=client.display_name
+            ),
+            "Technical SEO audit",
         )
         tech_audit = WebsiteAudit(
             client_id=client.id,
@@ -248,10 +325,13 @@ async def run_website(
                 ),
             }
         )
-        on_page_report = await optimize_on_page(
-            client.primary_url,
-            display_name=client.display_name,
-            message=message,
+        on_page_report = await bounded(
+            optimize_on_page(
+                client.primary_url,
+                display_name=client.display_name,
+                message=message,
+            ),
+            "On-page audit",
         )
         op_audit = WebsiteAudit(
             client_id=client.id,
@@ -285,7 +365,7 @@ async def run_website(
                 ),
             }
         )
-        broken_report = await check_broken_links(client.primary_url)
+        broken_report = await bounded(check_broken_links(client.primary_url), "Broken-link audit")
         bl_audit = WebsiteAudit(
             client_id=client.id,
             audit_type="broken_links",
@@ -374,7 +454,10 @@ async def run_website(
                 ),
             }
         else:
-            crawl = await crawl_site(client.primary_url)
+            crawl = await bounded(
+                crawl_site(client.primary_url, max_pages=page_cap),
+                "Website crawl",
+            )
         job.status = "succeeded"
         job.completed_at = datetime.now(timezone.utc)
         job.result_ref = {"pages_found": crawl["pages_found"]}
@@ -422,7 +505,10 @@ async def run_website(
                     "content": "Running Broken Link Checker (404s, dead externals, redirect chains)…",
                 }
             )
-            broken_report = await check_broken_links(client.primary_url)
+            broken_report = await bounded(
+                check_broken_links(client.primary_url),
+                "Broken-link audit",
+            )
             link_audit = WebsiteAudit(
                 client_id=client.id,
                 audit_type="broken_links",
@@ -469,7 +555,10 @@ async def run_website(
         )
         domain = extract_domain(client.primary_url)
         try:
-            bl, provider = await pull_backlinks(domain)
+            bl, provider = await asyncio.wait_for(
+                pull_backlinks(domain),
+                timeout=operation_timeout,
+            )
             spam = spam_risk_score(bl.get("sample_links", []))
             snap = BacklinkSnapshot(
                 client_id=client.id,
@@ -645,6 +734,88 @@ async def run_website(
         draft_summary["cdd_coverage_gaps"] = seo_audit_report.get("cdd_coverage_gaps") or []
         draft_summary["audit_focus_note"] = seo_audit_report.get("audit_focus_note")
         draft_summary["business_weighted_score"] = seo_audit_report.get("business_weighted_score")
+
+    # Current-site sitemap inventory — process-wide URL source for Phases 5–12.
+    # Prefer Perplexity site-page-inventory (OpenRouter) for classified coverage,
+    # especially when live crawl is WAF-limited.
+    if crawl or seo_audit_report:
+        page_inventory: dict | None = None
+        try:
+            from app.services.site_page_inventory import run_site_page_inventory
+
+            seed_urls = list(
+                (crawl or {}).get("discovered_urls")
+                or [
+                    s.get("url")
+                    for s in ((crawl or {}).get("status_samples") or [])
+                    if isinstance(s, dict) and s.get("url")
+                ]
+                or []
+            )
+            if seo_audit_report and seo_audit_report.get("pages"):
+                for p in seo_audit_report["pages"]:
+                    if isinstance(p, dict) and p.get("url"):
+                        seed_urls.append(str(p["url"]))
+            page_inventory = await bounded(
+                run_site_page_inventory(
+                    client.primary_url,
+                    max_pages=min(80, int((crawl or {}).get("pages_found") or 80) or 80),
+                    seed_urls=seed_urls[:60],
+                ),
+                "Site page inventory (Perplexity)",
+            )
+            if page_inventory and not page_inventory.get("available"):
+                log.warning(
+                    "site_page_inventory_unavailable",
+                    error=page_inventory.get("error"),
+                )
+                page_inventory = None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("site_page_inventory_failed", error=str(exc))
+            page_inventory = None
+
+        sitemap = build_client_sitemap(
+            primary_url=client.primary_url,
+            seo_audit=seo_audit_report,
+            crawl=crawl,
+            page_inventory=page_inventory,
+        )
+        draft_summary["site_sitemap"] = sitemap
+        draft_summary["sitemap_url_count"] = sitemap.get("url_count")
+        if page_inventory:
+            draft_summary["page_inventory"] = {
+                "stats": page_inventory.get("stats"),
+                "findings": page_inventory.get("findings"),
+                "method_note": page_inventory.get("method_note"),
+                "source": page_inventory.get("source"),
+                "page_count": len(page_inventory.get("pages") or []),
+            }
+        if sitemap.get("urls") and not draft_summary.get("sample_urls"):
+            draft_summary["sample_urls"] = list(sitemap.get("urls") or [])[:20]
+        # Persist on crawl audit so Approve rebuilds still carry the inventory.
+        if crawl_audit is not None:
+            crawl_summary = dict(crawl_audit.summary or {})
+            crawl_summary["site_sitemap"] = sitemap
+            crawl_summary["sitemap_url_count"] = sitemap.get("url_count")
+            if page_inventory:
+                crawl_summary["page_inventory"] = draft_summary.get("page_inventory")
+            crawl_audit.summary = crawl_summary
+            if isinstance(crawl, dict):
+                crawl = dict(crawl)
+                crawl["site_sitemap"] = sitemap
+        tech_tab = tabs.get("technical")
+        if isinstance(tech_tab, dict):
+            tech_tab = dict(tech_tab)
+            tech_tab["site_sitemap"] = sitemap
+            tech_tab["sitemap_url_count"] = sitemap.get("url_count")
+            if page_inventory:
+                tech_tab["page_inventory"] = draft_summary.get("page_inventory")
+            tabs["technical"] = tech_tab
+        elif crawl and isinstance(crawl, dict):
+            crawl = dict(crawl)
+            crawl["site_sitemap"] = sitemap
+            tabs["technical"] = crawl
+
     if draft_summary:
         draft_summary["_draft"] = True
         profile.website_situation_summary = draft_summary
@@ -818,11 +989,15 @@ async def run_website(
             card["indexable"] = draft_summary.get("indexable")
         if draft_summary.get("sample_urls"):
             card["sample_urls"] = list(draft_summary.get("sample_urls") or [])[:20]
+        if draft_summary.get("site_sitemap"):
+            card["site_sitemap"] = draft_summary["site_sitemap"]
+            card["sitemap_url_count"] = draft_summary.get("sitemap_url_count")
         if draft_summary.get("note"):
             card["note"] = draft_summary.get("note")
         if draft_summary.get("error") or (crawl and crawl.get("error")):
             card["error"] = draft_summary.get("error") or (crawl or {}).get("error")
         pages = crawl.get("pages_found", 0) if crawl else 0
+        sitemap_n = int(draft_summary.get("sitemap_url_count") or 0)
         events.append(
             {
                 "type": "agent_message",
@@ -830,6 +1005,11 @@ async def run_website(
                 "content": (
                     f"Website situation report ready (ran: {', '.join(sorted(scope))}). "
                     + (f"Crawl found {pages} pages. " if pages else "")
+                    + (
+                        f"Client site sitemap mapped {sitemap_n} URL(s). "
+                        if sitemap_n
+                        else ""
+                    )
                     + "Review Technical / Authority / Anomalies tabs, then approve or annotate "
                     "(Technical SEO Specialist)."
                 ),

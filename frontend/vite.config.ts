@@ -15,6 +15,8 @@ export default defineConfig({
       },
       "/health": "http://127.0.0.1:8000",
       "/media": "http://127.0.0.1:8000",
+      "/robots.txt": "http://127.0.0.1:8000",
+      "/sitemap.xml": "http://127.0.0.1:8000",
       "/ws": {
         target: "ws://127.0.0.1:8000",
         ws: true,

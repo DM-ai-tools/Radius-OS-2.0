@@ -4,6 +4,8 @@ import { FieldGrid, PresentableValue, humanLabel } from "./PresentableValue";
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
+  /** Questionnaire submit — only while Discovery is still in_progress (not at sign-off). */
+  canSubmit?: boolean;
   onAction: (action: string, edits?: Record<string, unknown>) => void;
   onSubmitQuestionnaire?: (fields: Record<string, unknown>) => void;
   onUploadCdd?: (file: File) => Promise<Record<string, unknown>>;
@@ -95,6 +97,7 @@ function CommercialScopeView({ scope }: { scope: Record<string, unknown> }) {
 export default function DiscoveryCard({
   payload,
   canAct,
+  canSubmit = false,
   onAction,
   onSubmitQuestionnaire,
   onUploadCdd,
@@ -180,10 +183,28 @@ export default function DiscoveryCard({
   }
 
   if (cardType === "discovery_questionnaire") {
+    const reportPayload = {
+      ...payload,
+      title: "Phase 1 — Discovery report",
+      subtitle: "Public research, client context, and commercial scope",
+      step: "Phase 1",
+    };
+    return (
+      <QuestionnaireForm
+        payload={reportPayload}
+        canSubmit={canSubmit}
+        onSubmit={(fields) => onSubmitQuestionnaire?.(fields)}
+        onUploadCdd={onUploadCdd}
+      />
+    );
+  }
+
+  if (cardType === "discovery_report") {
     return (
       <QuestionnaireForm
         payload={payload}
-        canAct={canAct}
+        canSubmit={canSubmit}
+        reportMode
         onSubmit={(fields) => onSubmitQuestionnaire?.(fields)}
         onUploadCdd={onUploadCdd}
       />
@@ -191,9 +212,18 @@ export default function DiscoveryCard({
   }
 
   // D4 sign-off
-  const fromResearch = (payload.from_research || {}) as Record<string, unknown>;
-  const confirmed = (payload.confirmed_by_client || {}) as Record<string, unknown>;
-  const discrepancies = (payload.discrepancies || []) as {
+  const confirmationPayload =
+    cardType === "discovery_profile"
+      ? {
+          ...payload,
+          title: "Discovery confirmation gate",
+          subtitle: "Client Success Manager approval",
+          step: "Confirmation gate",
+        }
+      : payload;
+  const fromResearch = (confirmationPayload.from_research || {}) as Record<string, unknown>;
+  const confirmed = (confirmationPayload.confirmed_by_client || {}) as Record<string, unknown>;
+  const discrepancies = (confirmationPayload.discrepancies || []) as {
     field_key: string;
     explanation: string;
   }[];
@@ -202,12 +232,13 @@ export default function DiscoveryCard({
   return (
     <div className="structured-card checkpoint">
       <p className="page-kicker" style={{ marginBottom: 6 }}>
-        {String(payload.step || "D4")} · {String(payload.subtitle || "Client Success Manager")}
+        {String(confirmationPayload.step || "Confirmation gate")} ·{" "}
+        {String(confirmationPayload.subtitle || "Client Success Manager approval")}
       </p>
-      <h3 className="card-title">{String(payload.title || "D4 — Human sign-off")}</h3>
+      <h3 className="card-title">{String(confirmationPayload.title || "Discovery confirmation gate")}</h3>
       <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
-        Completeness: {Math.round(Number(payload.completeness_score || 0))}% · Sign-off requires{" "}
-        <strong>{String(payload.required_role || "client_success_manager")}</strong>
+        Completeness: {Math.round(Number(confirmationPayload.completeness_score || 0))}% · Sign-off requires{" "}
+        <strong>{String(confirmationPayload.required_role || "client_success_manager")}</strong>
       </p>
       <div className="two-col">
         <div className="col-box">
@@ -242,11 +273,11 @@ export default function DiscoveryCard({
               </div>
             ))
           )}
-          {(payload.missing_fields as string[] | undefined)?.length ? (
+          {(confirmationPayload.missing_fields as string[] | undefined)?.length ? (
             <div className="present-field" style={{ marginTop: 8 }}>
               <div className="present-key">Missing / low confidence</div>
               <PresentableValue
-                value={(payload.missing_fields as string[]).map((f) => humanLabel(f))}
+                value={(confirmationPayload.missing_fields as string[]).map((f) => humanLabel(f))}
               />
             </div>
           ) : null}
@@ -271,12 +302,14 @@ export default function DiscoveryCard({
 
 function QuestionnaireForm({
   payload,
-  canAct,
+  canSubmit,
+  reportMode = false,
   onSubmit,
   onUploadCdd,
 }: {
   payload: Record<string, unknown>;
-  canAct: boolean;
+  canSubmit: boolean;
+  reportMode?: boolean;
   onSubmit: (fields: Record<string, unknown>) => void;
   onUploadCdd?: (file: File) => Promise<Record<string, unknown>>;
 }) {
@@ -390,11 +423,17 @@ function QuestionnaireForm({
       </p>
       <h3 className="card-title">{String(payload.title || "D2 — CDD questionnaire")}</h3>
       <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
-        Fields match the APSA Discovery Document — including system access credentials
-        (Analytics, Ads, GTM, CMS, hosting). Confirm research, complete client-only
-        metrics, or upload an existing CDD (Excel, Word, or PDF).
+        {reportMode
+          ? "Public research and client context are combined below. Complete any client-only fields, then submit for the confirmation gate — Approve happens on the next card."
+          : "Fields match the APSA Discovery Document — including system access credentials (Analytics, Ads, GTM, CMS, hosting). Confirm research, complete client-only metrics, or upload an existing CDD (Excel, Word, or PDF)."}
       </p>
-      {canAct && onUploadCdd ? (
+      {!canSubmit ? (
+        <p className="hint-line" style={{ marginTop: 0 }}>
+          Questionnaire already submitted. Use the <strong>Discovery confirmation gate</strong>{" "}
+          Approve button to finish Phase 1.
+        </p>
+      ) : null}
+      {canSubmit && onUploadCdd ? (
         <div className="cdd-upload-bar">
           <label className="btn btn-secondary" style={{ cursor: "pointer" }}>
             {uploading ? "Importing…" : "Upload CDD file"}
@@ -446,6 +485,7 @@ function QuestionnaireForm({
                             <input
                               type="checkbox"
                               checked={selectedObjectives.includes(opt)}
+                              disabled={!canSubmit}
                               onChange={(e) => {
                                 setSelectedObjectives((prev) =>
                                   e.target.checked
@@ -461,6 +501,7 @@ function QuestionnaireForm({
                     ) : input === "select" ? (
                       <select
                         value={values[k] ?? ""}
+                        disabled={!canSubmit}
                         onChange={(e) =>
                           setValues((prev) => ({ ...prev, [k]: e.target.value }))
                         }
@@ -476,6 +517,7 @@ function QuestionnaireForm({
                       <input
                         type={input === "email" ? "email" : "text"}
                         value={values[k] ?? ""}
+                        disabled={!canSubmit}
                         onChange={(e) =>
                           setValues((prev) => ({ ...prev, [k]: e.target.value }))
                         }
@@ -484,6 +526,7 @@ function QuestionnaireForm({
                       <textarea
                         rows={meta.rows || 2}
                         value={values[k] ?? ""}
+                        disabled={!canSubmit}
                         onChange={(e) =>
                           setValues((prev) => ({ ...prev, [k]: e.target.value }))
                         }
@@ -495,10 +538,10 @@ function QuestionnaireForm({
             </div>
           );
         })}
-        {canAct && (
+        {canSubmit && (
           <div className="card-actions">
             <button className="btn btn-primary" type="submit">
-              Submit questionnaire
+              {reportMode ? "Submit for sign-off" : "Submit questionnaire"}
             </button>
           </div>
         )}

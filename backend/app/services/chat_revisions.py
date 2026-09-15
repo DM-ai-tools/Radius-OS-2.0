@@ -7,7 +7,8 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Client, ClientDigitalProfile, CompetitorProfile
+from app.deps import require_permission
+from app.models import Client, ClientDigitalProfile, CompetitorProfile, User
 from app.services.role_skills import required_role_for
 
 # agent_key → (status_attr, summary_attr, card_type, title)
@@ -15,14 +16,14 @@ PHASE_PACKS: dict[str, tuple[str, str, str, str]] = {
     "discovery_agent": (
         "discovery_status",
         "commercial_scope",
-        "discovery_profile",
-        "Discovery profile",
+        "discovery_report",
+        "Discovery report",
     ),
     "tracking_access_agent": (
         "tracking_status",
         "tracking_baseline",
-        "tracking_t6_signoff",
-        "Tracking baseline",
+        "tracking_report",
+        "Tracking report",
     ),
     "website_situation_agent": (
         "website_status",
@@ -475,6 +476,7 @@ async def maybe_revise_from_chat(
     *,
     client: Client,
     profile: ClientDigitalProfile,
+    user: User,
     active_agent_key: str | None,
     message: str,
 ) -> list[dict] | None:
@@ -523,6 +525,7 @@ async def maybe_revise_from_chat(
             }
         ]
 
+    await require_permission(user, db, agent_key, need_trigger=True)
     current = dict(getattr(profile, summary_attr) or {})
     updated = apply_ops_to_summary(current, ops, agent_key=agent_key)
     applied = list(updated.pop("_revision_applied", []) or [])

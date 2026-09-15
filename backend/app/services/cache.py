@@ -1,7 +1,14 @@
-"""Redis cache helpers (competitor research reuse window)."""
+"""Redis cache helpers (competitor research reuse window).
+
+Every public function here is async and offloads the underlying sync `redis`
+client calls via asyncio.to_thread — the redis-py client is blocking, and
+calling it directly from an async def would stall the whole event loop for
+every other concurrent request during each round trip.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -12,7 +19,8 @@ log = get_logger("cache")
 _client = None
 
 
-def get_redis():
+def _connect_redis():
+    """Blocking connect+ping. Only ever call this via asyncio.to_thread."""
     global _client
     if _client is not None:
         return _client
@@ -34,34 +42,38 @@ def get_redis():
         return None
 
 
-def cache_get(key: str) -> Any | None:
-    r = get_redis()
+async def get_redis():
+    return await asyncio.to_thread(_connect_redis)
+
+
+async def cache_get(key: str) -> Any | None:
+    r = await get_redis()
     if not r:
         return None
     try:
-        raw = r.get(key)
+        raw = await asyncio.to_thread(r.get, key)
         return json.loads(raw) if raw else None
     except Exception as exc:  # noqa: BLE001
         log.warning("cache_get_failed", key=key, error=str(exc))
         return None
 
 
-def cache_set(key: str, value: Any, ttl_seconds: int) -> None:
-    r = get_redis()
+async def cache_set(key: str, value: Any, ttl_seconds: int) -> None:
+    r = await get_redis()
     if not r:
         return
     try:
-        r.setex(key, ttl_seconds, json.dumps(value))
+        await asyncio.to_thread(r.setex, key, ttl_seconds, json.dumps(value))
     except Exception as exc:  # noqa: BLE001
         log.warning("cache_set_failed", key=key, error=str(exc))
 
 
-def cache_delete(key: str) -> None:
-    r = get_redis()
+async def cache_delete(key: str) -> None:
+    r = await get_redis()
     if not r:
         return
     try:
-        r.delete(key)
+        await asyncio.to_thread(r.delete, key)
     except Exception as exc:  # noqa: BLE001
         log.warning("cache_delete_failed", key=key, error=str(exc))
 

@@ -95,13 +95,13 @@ async def run_discovery(
         {
             "type": "system_notice",
             "content": (
-                f"D1 — Automated pre-research for {client.display_name}"
+                f"Phase 1 — Discovery research for {client.display_name}"
                 + (
                     f" ({client.industry})"
                     if client.industry
                     else " (inferring industry from public footprint)"
                 )
-                + " — website, local/social signals, reviews, same-vertical competitors…"
+                + " — website, local/social signals, and review themes…"
             ),
         }
     )
@@ -206,33 +206,7 @@ async def run_discovery(
         event_detail={"tool": "web_research", "agent": "discovery_agent", "step": "D1"},
     )
 
-    d1_card = {
-        "card_type": "discovery_preresearch",
-        "title": "D1 — Automated pre-research",
-        "label": "Draft from public footprint — awaiting client confirmation",
-        "subtitle": "Claude + web research",
-        "fields": draft_fields,
-        "discrepancies": research.get("discrepancies", []),
-        "agent_key": "discovery_agent",
-        "actions": [],
-        "required_role": required_role_for("discovery_agent"),
-        "step": "D1",
-    }
-    events.append(
-        {
-            "type": "agent_message",
-            "agent_key": "discovery_agent",
-            "content": (
-                f"D1 complete for {client.display_name}: researched the public footprint "
-                "(website, local/social clues, review themes, visible competitors) and drafted "
-                "business model, products, and positioning — before asking the client anything. "
-                "Confidence tags show how strong each source was. This is a draft, not final."
-            ),
-        }
-    )
-    events.append({"type": "structured_card", "payload": d1_card})
-
-    # D2 — short targeted questionnaire (client-only + confirm research)
+    # One Phase 1 report: public research is pre-filled into the confirmation form.
     intake = ((profile.marketing_context or {}).get("client_intake") or {}) if profile.marketing_context else {}
     questionnaire_fields = {}
     for key, meta in draft_fields.items():
@@ -275,6 +249,10 @@ async def run_discovery(
         if row.field_key in seen_keys:
             continue
         seen_keys.add(row.field_key)
+        # Competitor discovery belongs exclusively to Phase 4. Ignore legacy
+        # or uploaded competitor rows when rebuilding the Phase 1 report.
+        if row.field_key == "competitors":
+            continue
         if row.source not in ("cdd_upload", "client_questionnaire"):
             continue
         val = (row.field_value or {}).get("value")
@@ -293,17 +271,19 @@ async def run_discovery(
         }
         questionnaire_fields[row.field_key] = meta
 
-    d2_card = {
-        "card_type": "discovery_questionnaire",
-        "title": "D2 — CDD questionnaire (pre-filled)",
-        "subtitle": "APSA Client Discovery Document fields",
+    discovery_report = {
+        "card_type": "discovery_report",
+        "title": "Phase 1 — Discovery report",
+        "subtitle": "Public research, client context, and commercial scope",
         "fields": questionnaire_fields,
+        "research_fields": draft_fields,
+        "discrepancies": research.get("discrepancies", []),
         "objective_options": OBJECTIVE_OPTIONS,
         "field_catalog": field_ui_meta(),
         "agent_key": "discovery_agent",
         "actions": ["submit_questionnaire", "upload_cdd"],
         "required_role": required_role_for("discovery_agent"),
-        "step": "D2",
+        "step": "Phase 1",
         "prior_approved": (
             {
                 "commercial_scope": profile.commercial_scope,
@@ -318,13 +298,13 @@ async def run_discovery(
             "type": "agent_message",
             "agent_key": "discovery_agent",
             "content": (
-                "D2: Client Discovery Document fields (APSA CDD). Confirm research drafts, "
-                "complete client-only metrics (ticket size, LTV, lead modes, goals), or upload "
-                "an existing CDD spreadsheet / Word / PDF to pre-fill."
+                f"Phase 1 Discovery report ready for {client.display_name}. "
+                "Public research is pre-filled; confirm the facts and complete any client-only "
+                "commercial fields before the single confirmation gate."
             ),
         }
     )
-    events.append({"type": "structured_card", "payload": d2_card})
+    events.append({"type": "structured_card", "payload": discovery_report})
     events.append(
         {
             "type": "phase_status",
@@ -337,7 +317,7 @@ async def run_discovery(
     events.append(
         {
             "type": "system_notice",
-            "content": "Next: D3 completeness → D4 CSM sign-off → D5 publish to Client Digital Profile.",
+            "content": "Next: submit the Discovery report, then approve the single confirmation gate.",
         }
     )
     return events
@@ -348,7 +328,7 @@ async def build_discovery_signoff_events(
     *,
     client_id: UUID,
 ) -> list[dict]:
-    """D3 completeness + D4 sign-off cards after questionnaire submit."""
+    """Build the single Discovery confirmation gate after report submission."""
     events: list[dict] = []
     profile = await get_profile(db, client_id)
     client = (
@@ -398,36 +378,10 @@ async def build_discovery_signoff_events(
     profile.discovery_status = "pending_signoff"
     await db.flush()
 
-    d3_card = {
-        "card_type": "discovery_completeness",
-        "title": "D3 — Completeness scoring",
-        "subtitle": "Weighted readiness score",
-        "completeness_score": float(score),
-        "missing_fields": missing,
-        "agent_key": "discovery_agent",
-        "actions": [],
-        "step": "D3",
-    }
-    events.append(
-        {
-            "type": "agent_message",
-            "agent_key": "discovery_agent",
-            "content": (
-                f"D3: discovery is {float(score):.0f}% complete on the weighted readiness model."
-                + (
-                    f" Missing or low-confidence: {', '.join(missing)}."
-                    if missing
-                    else " All scored fields present."
-                )
-            ),
-        }
-    )
-    events.append({"type": "structured_card", "payload": d3_card})
-
-    d4_card = {
-        "card_type": "discovery_profile",
-        "title": "D4 — Human sign-off",
-        "subtitle": "Client Success Manager",
+    confirmation_card = {
+        "card_type": "discovery_confirmation",
+        "title": "Discovery confirmation gate",
+        "subtitle": "Client Success Manager approval",
         "from_research": from_research,
         "confirmed_by_client": confirmed,
         "discrepancies": discrepancies,
@@ -437,21 +391,20 @@ async def build_discovery_signoff_events(
         "actions": ["approve", "edit", "reject"],
         "required_role": required_role_for("discovery_agent"),
         "client_name": client.display_name,
-        "step": "D4",
+        "step": "Confirmation gate",
     }
     events.append(
         {
             "type": "agent_message",
             "agent_key": "discovery_agent",
             "content": (
-                "D4: Client Success Manager review. Discrepancies between client claims and "
-                "independent research are flagged on purpose — treat them as insight, not noise. "
-                "Approve publishes Commercial Scope + Marketing Context to the Client Digital Profile (D5)."
+                f"Discovery is {float(score):.0f}% complete. Review the report, resolve any "
+                "discrepancies, and approve once to publish Commercial Scope + Marketing Context."
             ),
         }
     )
-    events.append({"type": "structured_card", "payload": d4_card})
-    events.append({"type": "checkpoint", "payload": d4_card})
+    events.append({"type": "structured_card", "payload": confirmation_card})
+    events.append({"type": "checkpoint", "payload": confirmation_card})
     events.append(
         {
             "type": "phase_status",
@@ -464,7 +417,7 @@ async def build_discovery_signoff_events(
     events.append(
         {
             "type": "system_notice",
-            "content": "Next: CSM Approve (D5 publish), then run tracking check.",
+            "content": "Next: CSM approve the Discovery confirmation gate, then run tracking check.",
         }
     )
     return events

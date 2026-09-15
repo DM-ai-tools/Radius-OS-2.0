@@ -140,12 +140,13 @@ async def post_message_stream(
         except Exception as exc:  # noqa: BLE001
             # Prefer the original DB failure over the follow-on PendingRollbackError.
             root = exc
-            cause = getattr(exc, "__cause__", None) or getattr(exc, "orig", None)
-            if cause is not None:
-                root = cause
+            seen: set[int] = set()
+            while root is not None and id(root) not in seen:
+                seen.add(id(root))
+                if "rolled back" not in str(root).lower():
+                    break
+                root = getattr(root, "__cause__", None) or getattr(root, "orig", None)
             msg = str(root) or str(exc)
-            if "rolled back" in msg.lower() and cause is not None:
-                msg = str(cause)
             yield _sse({"type": "error", "content": msg[:400]})
             yield _sse({"type": "done"})
             return
@@ -239,9 +240,20 @@ async def ws_chat(websocket: WebSocket, session_id: UUID):
                 await websocket.send_json(
                     {"type": "thinking", "agent_key": session.active_agent_key}
                 )
-                events = await process_chat_turn(
-                    db, session=session, user=user, content=content
-                )
+                try:
+                    events = await process_chat_turn(
+                        db, session=session, user=user, content=content
+                    )
+                except HTTPException as exc:
+                    await db.rollback()
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "content": str(exc.detail),
+                            "status": exc.status_code,
+                        }
+                    )
+                    continue
                 await db.commit()
                 for ev in events:
                     await websocket.send_json(ev)

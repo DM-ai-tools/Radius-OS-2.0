@@ -1,0 +1,17 @@
+# Static fallback for the optional standalone nginx frontend service
+# (frontend/Dockerfile) — the preferred combined API+SPA deployment serves a
+# dynamic version of this from backend/app/services/public_seo.py instead.
+# Kept in sync with that file's rules manually; no Sitemap: line here since a
+# static file can't safely know its own runtime public domain.
+User-agent: *
+Allow: /
+Allow: /landing/
+Disallow: /app
+Disallow: /clients
+Disallow: /api/
+Disallow: /docs
+Disallow: /redoc
+Disallow: /openapi.json
+Disallow: /health
+Disallow: /healthz
+Disallow: /media/

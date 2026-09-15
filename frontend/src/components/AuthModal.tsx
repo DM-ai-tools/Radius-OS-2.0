@@ -67,7 +67,7 @@ export default function AuthModal({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
-  const [roleName, setRoleName] = useState("head_of_department");
+  const [roleName, setRoleName] = useState("client_success_manager");
   const [roleOpen, setRoleOpen] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -254,10 +254,6 @@ export default function AuthModal({
                 : "Create account"}
           </button>
         </form>
-        <p className="auth-demo-hint">
-          Demo: hod@trafficradius.com · csm@ / tech@ / strategist@ / content@ /
-          onpage@ / qa@trafficradius.com — password123
-        </p>
       </div>
     </div>
   );

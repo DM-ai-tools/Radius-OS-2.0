@@ -119,7 +119,7 @@ def test_strategy_queue_includes_image_suggestions():
     )
     assert q
     suggestions = q[0].get("image_suggestions") or []
-    assert len(suggestions) == 2
+    assert len(suggestions) >= 2
     assert suggestions[0]["role"] == "hero"
     assert "local seo" in suggestions[0]["prompt"].lower()
     assert "melbourne" in suggestions[0]["prompt"].lower()
@@ -141,15 +141,55 @@ def test_collect_image_specs_from_strategy():
                             "role": "supporting",
                             "prompt": "Diagram of share of search calculation steps for a brand team",
                         },
+                        {
+                            "role": "supporting",
+                            "prompt": "Before and after outcomes visual for share of search reporting in a war room",
+                        },
                     ],
                 }
             ]
         },
         client_name="Acme",
     )
-    assert len(specs) == 2
+    assert len(specs) == 3
     assert specs[0]["role"] == "hero"
     assert "share of search" in specs[0]["prompt"].lower()
+
+
+def test_collect_image_specs_scales_with_outline():
+    brief = {
+        **_ready_brief(),
+        "outline": [
+            {"title": "What it is"},
+            {"title": "How it works"},
+            {"title": "Common mistakes"},
+            {"title": "Implementation steps"},
+            {"title": "Measuring results"},
+            {"title": "FAQ"},
+        ],
+    }
+    specs = collect_image_specs(brief, client_name="Acme", industry="SEO", location="Melbourne")
+    assert len(specs) >= 3
+    assert specs[0]["role"] == "hero"
+    assert len(specs) <= 12
+
+
+def test_collect_image_specs_honours_explicit_count():
+    brief = {
+        **_ready_brief(),
+        "image_requirements": {
+            "count": 4,
+            "hero": "Editorial hero photo about share of search measurement for brands",
+            "supporting": [
+                "Diagram one for share of search inputs",
+                "Diagram two for share of search outputs",
+                "Diagram three for share of search reporting cadence",
+            ],
+        },
+    }
+    specs = collect_image_specs(brief, client_name="Acme")
+    assert len(specs) == 4
+    assert specs[0]["role"] == "hero"
 
 
 @pytest.mark.asyncio
@@ -309,6 +349,66 @@ async def test_service_page_draft_reads_as_publishable_service_copy():
     assert "Click Trends" in md
     assert "Melbourne" in md
     assert md.lower().count("\n\n") >= 8
+
+
+@pytest.mark.parametrize(
+    ("page_type", "url"),
+    [
+        ("service", "/seo/"),
+        ("landing", "/pricing/seo/"),
+        ("guide", "/guides/measure-seo/"),
+        ("comparison", "/compare/seo-vs-ppc/"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_existing_page_types_reach_actual_drafting_flow(page_type: str, url: str):
+    brief = _ready_brief(
+        keyword=f"{page_type} seo",
+        title=f"{page_type.title()} SEO",
+        url=url,
+        content_type=page_type,
+        outline=[],
+        preflight={
+            "url": url,
+            "parent": "/",
+            "page_type": page_type,
+            "author": "Jane Strategist",
+            "author_standing": "10 years brand measurement",
+            "blockers": [],
+        },
+    )
+    out = await write_one_page(brief=brief, client_name="Acme", use_llm=False)
+    assert out.get("ok") is True
+    assert out.get("status") == "draft_pending_review"
+    assert out.get("page_type") == page_type
+    assert out.get("markdown")
+
+
+@pytest.mark.asyncio
+async def test_tool_page_draft_is_component_spec_not_article_fallback():
+    url = "/tools/marketing-roi-calculator/"
+    brief = _ready_brief(
+        keyword="marketing roi calculator",
+        title="Marketing ROI Calculator",
+        url=url,
+        content_type="tool",
+        outline=[],
+        preflight={
+            "url": url,
+            "parent": "/tools/",
+            "page_type": "tool",
+            "author": "Jane Strategist",
+            "author_standing": "10 years brand measurement",
+            "blockers": [],
+        },
+    )
+    out = await write_one_page(brief=brief, client_name="Acme", use_llm=False)
+    markdown = out.get("markdown") or ""
+    assert out.get("ok") is True
+    assert out.get("page_type") == "tool"
+    assert "INTERACTIVE COMPONENT REQUIRED" in markdown
+    assert "Inputs and validation" in markdown
+    assert "PRODUCT CONFIRMATION REQUIRED" in markdown
 
 
 # --- Angle awareness ------------------------------------------------------------

@@ -20,7 +20,6 @@ from typing import Any
 from app.services.keyword_opportunity import detect_intent, is_noisy_keyword, is_stale_year_keyword
 from app.services.keyword_relevance import (
     RelevanceContext,
-    evaluate_keyword,
     filter_relevant_keywords,
     is_competitor_brand_term,
     is_url_like,

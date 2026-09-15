@@ -10,9 +10,9 @@ Radius OS CDP field aliases are accepted (listed under each pack). Prefer the ca
 
 Aliases from content-strategy: `Quick win` → `quick_win`, `Big bet` → `big_bet`, `Fill-in` → `fill_in`, `Avoid` → `avoid`.
 
-**page_type:** `home` | `hub` | `spoke` | `pillar` | `cluster` | `article` | `blog` | `service` | `product` | `location` | `commercial` | `supporting` | `utility`
+**page_type:** `home` | `hub` | `spoke` | `pillar` | `cluster` | `article` | `blog` | `service` | `subservice` | `product` | `location` | `commercial` | `supporting` | `utility` | `landing` | `faq` | `comparison` | `guide` | `listicle` | `tool`
 
-Aliases: `type` on `target_url_tree` rows.
+Aliases: `type` on `target_url_tree` rows; legacy `sub_service` normalizes to `subservice`.
 
 **disposition (7-value):** `KEEP` | `REFRESH` | `OPTIMISE` | `RETITLE` | `CONSOLIDATE` | `NOINDEX` | `DELETE_CANDIDATE`
 
@@ -39,6 +39,9 @@ Aliases (lowercase from content-audit inventory): `keep`, `refresh`, `optimise`/
       "keywords": ["share of search", "share of search meaning"],
       "intent": "informational",
       "cluster": "measurement",
+      "service": "Analytics",
+      "subservice": null,
+      "target_type": "service",
       "priority_tier": "quick_win",
       "priority": "Quick win",
       "opportunity_score": 78
@@ -76,6 +79,9 @@ Also accepted: `combined_priority_queue`, `priority_pages`.
 ```
 
 URL aliases: `url`, `path`. Parent aliases: `parent`, `parent_url`.  
+Service pages use `/{service}/`; sub-services use `/{service}/{subservice}/`.
+Supporting blog rows may retain `/blog/{post}` while setting `parent` to the
+relevant service/sub-service URL.
 Cluster owners aliases: `cluster_owners`, `cluster_ownership` with `owner_url` / `canonical_owner_url` / `url`.
 
 ## Audit pack (`content-audit`)
@@ -99,4 +105,4 @@ Aliases: `inventory[]` with `path`/`url`, `disposition`, `reason`, `effort`.
 
 See SKILL.md. `pages[]` is the locked roadmap. `roadmap` is kept as an alias of `pages` for existing UI. `excluded[]` is never dropped.
 
-Worked example: strategy URL `/services/seo` + architecture node `/services/seo` + no audit row → `action: create`, `disposition: null`.
+Worked example: strategy URL `/seo` + architecture node `/seo` + no audit row → `action: create`, `disposition: null`.

@@ -342,9 +342,14 @@ export default function DraftDocument({
   const noteItems = notes?.blocks.flatMap((b) => (b.type === "ul" ? b.items : b.type === "p" ? [b.text] : [])) || [];
   const coverageTable = coverage?.blocks.find((b) => b.type === "table");
   const generated = (images || []).filter((i) => i.src);
+  const allImages = images || [];
   const heroImg =
     generated.find((i) => i.role === "hero") || generated[0];
   const shownSrc = new Set<string>(heroImg?.src ? [heroImg.src] : []);
+  const failedPlaceholders =
+    !heroImg && allImages.length
+      ? allImages
+      : [];
 
   return (
     <div className="draft-document">
@@ -366,6 +371,20 @@ export default function DraftDocument({
           role={heroImg.role}
           status={heroImg.status}
         />
+      ) : failedPlaceholders.length ? (
+        <div className="cs-pillar-block">
+          <div className="present-key">Images</div>
+          {failedPlaceholders.map((img, i) => (
+            <DraftFigure
+              key={`failed-${i}`}
+              src={img.src}
+              alt={img.alt}
+              caption={img.caption || img.prompt}
+              role={img.role}
+              status={img.status || "failed"}
+            />
+          ))}
+        </div>
       ) : null}
 
       {diffText ? (

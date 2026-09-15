@@ -69,17 +69,44 @@ async def run_technical_seo(
     ia = dict(profile.site_architecture_summary or {})
     ia_status = str(profile.site_architecture_status or "not_started")
     has_tree = bool(ia.get("target_url_tree") or ia.get("redirect_map"))
+    ia_fallback = False
     if ia_status not in ("complete", "pending_signoff") and not has_tree:
-        events.extend(
-            blocked_events(
-                "technical_seo",
-                "Needs Site Architecture redirect map / URL tree before Phase 7.",
-                route_to="site_architecture",
-            )
+        website = dict(profile.website_situation_summary or {})
+        demand = dict(profile.search_demand_summary or {})
+        website_ready = str(profile.website_status or "") in ("complete", "pending_signoff")
+        has_clusters = bool(
+            (demand.get("cluster_report") or {}).get("clusters") or demand.get("clusters")
         )
-        return events
+        if website_ready or has_clusters:
+            from app.services.technical_seo_ia import build_phase7_ia_fallback
 
-    ia_ready = ia_status in ("complete", "pending_signoff") or has_tree
+            ia = build_phase7_ia_fallback(
+                primary_url=client.primary_url,
+                website=website,
+                demand=demand,
+            )
+            ia_fallback = True
+            events.append(
+                {
+                    "type": "system_notice",
+                    "content": (
+                        "Site Architecture not approved — using fallback URL tree from "
+                        f"Website Situation + Search Demand ({ia.get('fallback_url_nodes', 0)} nodes) "
+                        "for Phase 7. Approve Site Architecture later for full redirect map."
+                    ),
+                }
+            )
+        else:
+            events.extend(
+                blocked_events(
+                    "technical_seo",
+                    "Needs Site Architecture redirect map / URL tree, or completed Website Situation with Search Demand clusters.",
+                    route_to="site_architecture",
+                )
+            )
+            return events
+
+    ia_ready = ia_status in ("complete", "pending_signoff") or has_tree or ia_fallback
 
     profile.technical_seo_status = "in_progress"
     events.append(
@@ -117,6 +144,7 @@ async def run_technical_seo(
     summary["generated_at"] = datetime.now(timezone.utc).isoformat()
     summary["skills_loaded"] = contracts
     summary["phase6_status"] = profile.site_architecture_status
+    summary["phase6_fallback_ia"] = ia_fallback
 
     profile.technical_seo_summary = summary
     profile.technical_seo_status = "pending_signoff"

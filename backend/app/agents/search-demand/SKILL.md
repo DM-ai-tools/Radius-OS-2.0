@@ -82,30 +82,35 @@ Output structure (required):
 Keep every seed-to-keyword association. A keyword may validly appear under more
 than one seed; do not globally deduplicate it out of later seed clusters.
 
-Then continue opportunity scoring + create_topic + keyword_clustering on the merged set.
+Then continue opportunity scoring + keyword_clustering (intent/funnel) on the merged set.
+Match clusters to the **Phase 3 site sitemap**, then draft topics only for **new** clusters.
+URL mapping runs afterward in Phase 6.
 
 ## Phase 5 pipeline (execution order)
 
 ```
+PHASE 3 — CLIENT WEBSITE SITEMAP (prerequisite)
+│
 PHASE 5 — SEARCH DEMAND & KEYWORD RESEARCH
 │
 ├── Keyword Research          (multi-mode seeding + volume/KD/gap)
 │       ↓
 ├── Keyword Cleaning          (CDD / services / pages relevance filter)
 │       ↓
-├── Topic Creation            (create_topic — pain-point angles)
+├── Keyword Clustering        (intent + funnel on every cluster)
 │       ↓
-├── Keyword Clustering        (keyword_pipeline → clusters)
+├── Sitemap classification    (existing_topic | existing_review | new_topic)
+│       ↓
+├── Topic Creation            (create_topic — new_topic clusters only)
 │       ↓
 └── Search Intent / Cluster Understanding
-        (cluster_intent + validation → phase_pipeline metadata)
              │
              ▼
 PHASE 6 — SEO STRATEGY & INFORMATION ARCHITECTURE
 │
-├── Cluster → URL Mapping     (url_mapping.build_final_url_map)
-├── Existing URL matching     (HIGH band → OPTIMIZE EXISTING)
-├── New URL identification    (LOW band → CREATE slug)
+├── Cluster → URL Mapping     (honors Phase 5 dispositions)
+├── Existing URL matching     (HIGH → OPTIMIZE EXISTING)
+├── New URL identification    (new_topic → CREATE slug)
 ├── Site structure            (target_url_tree + navigation)
 └── Cannibalization decisions (cluster_ownership + competing_urls)
              │
@@ -130,8 +135,8 @@ Each phase pack includes `phase_pipeline.stages[]` with per-step readiness for t
 ## Skills (wired)
 
 1. **keyword_seeding** — Ahrefs multi-mode expansion (exact / phrase / related / broad, vol > 10)
-2. **create_topic** — SearchFit topic researcher (see `create-topic/SKILL.md`)
-3. **keyword_clustering** — SearchFit clustering (see `keyword-clustering/SKILL.md`)
+2. **keyword_clustering** — SearchFit clustering with intent/funnel (see `keyword-clustering/SKILL.md`)
+3. **create_topic** — drafts only for `new_topic` clusters after sitemap classification (see `create-topic/SKILL.md`)
 
 ## Scoring (must output the best)
 

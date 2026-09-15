@@ -13,6 +13,7 @@ async def log_event(
     event_type: str,
     event_detail: dict | None = None,
     actor_id: UUID | None = None,
+    flush: bool = True,
 ) -> AuditTrail:
     row = AuditTrail(
         client_id=client_id,
@@ -22,5 +23,6 @@ async def log_event(
         event_detail=event_detail or {},
     )
     db.add(row)
-    await db.flush()
+    if flush:
+        await db.flush()
     return row

@@ -13,6 +13,7 @@ import TechnicalSeoCard from "../components/cards/TechnicalSeoCard";
 import SeoAuditCard from "../components/cards/SeoAuditCard";
 import CompetitorCard from "../components/cards/CompetitorCard";
 import SearchDemandCard from "../components/cards/SearchDemandCard";
+import ServicePrioritizationCard from "../components/cards/ServicePrioritizationCard";
 import ContentStrategyCard from "../components/cards/ContentStrategyCard";
 import SiteArchitectureCard from "../components/cards/SiteArchitectureCard";
 import ContentAuditCard from "../components/cards/ContentAuditCard";
@@ -199,6 +200,29 @@ function isRevisionReport(m: UiMessage): boolean {
   return Boolean(m.changeReply || m.card.revised_via_chat);
 }
 
+/** Prefer sign-off / confirmation packs over draft pre-gate forms in the same phase bucket. */
+function phaseSignoffScore(m: UiMessage): number {
+  const type = String(m.card?.card_type || "");
+  if (
+    type === "discovery_confirmation" ||
+    type === "discovery_profile" ||
+    type === "tracking_confirmation" ||
+    type === "tracking_t6_signoff" ||
+    type === "tracking_health"
+  ) {
+    return 2;
+  }
+  if (
+    type === "discovery_report" ||
+    type === "discovery_questionnaire" ||
+    type === "tracking_report" ||
+    type === "tracking_t5_known_changes"
+  ) {
+    return 1;
+  }
+  return 0;
+}
+
 function reportBucketKey(m: UiMessage): string {
   const type = String(m.card?.card_type || "");
   const key =
@@ -211,8 +235,29 @@ function reportBucketKey(m: UiMessage): string {
 function reportsInPipelineOrder(messages: UiMessage[]): UiMessage[] {
   const bucketRuns = new Map<string, UiMessage[]>();
   const revisions: UiMessage[] = [];
+  const cardTypes = new Set(
+    messages
+      .map((message) => String(message.card?.card_type || ""))
+      .filter(Boolean),
+  );
+  const hasConsolidatedDiscovery = cardTypes.has("discovery_report");
+  const hasConsolidatedTracking = cardTypes.has("tracking_report");
+  const reportMessages = messages.filter((message) => {
+    const type = String(message.card?.card_type || "");
+    if (type === "discovery_preresearch" || type === "discovery_completeness") return false;
+    if (hasConsolidatedDiscovery && type === "discovery_questionnaire") return false;
+    if (type.startsWith("tracking_t") && type !== "tracking_t5_known_changes" && type !== "tracking_t6_signoff") {
+      return false;
+    }
+    if (hasConsolidatedTracking && (
+      type === "tracking_t5_known_changes" || type === "tracking_t6_signoff"
+    )) {
+      return false;
+    }
+    return true;
+  });
 
-  messages.forEach((m) => {
+  reportMessages.forEach((m) => {
     if (!m.card) return;
     // Reports pane: phase deliverables only — never show validation QC cards.
     if (String(m.card.card_type) === "phase_validation_report") return;
@@ -248,10 +293,18 @@ function reportsInPipelineOrder(messages: UiMessage[]): UiMessage[] {
       // Prefer production cards that actually carry a draft body.
       const draft = productionDraftScore(a) - productionDraftScore(b);
       if (draft !== 0) return draft;
+      // Prefer confirmation gates over draft questionnaires / known-changes forms.
+      const disc = phaseSignoffScore(a) - phaseSignoffScore(b);
+      if (disc !== 0) return disc;
       return messages.indexOf(a) - messages.indexOf(b);
     });
-    const latest = runs[runs.length - 1];
-    const earlier = runs.slice(0, -1).reverse();
+    // When a confirmation gate exists, treat it as the current pack —
+    // otherwise users keep hitting pre-gate Submit and never Approve.
+    const signoffLatest = [...runs]
+      .reverse()
+      .find((m) => phaseSignoffScore(m) >= 2);
+    const latest = signoffLatest || runs[runs.length - 1];
+    const earlier = runs.filter((m) => m !== latest).reverse();
     (latest as any)._isLatestRun = true;
     delete (latest as any)._rerunIndex;
     delete (latest as any)._rerunTotal;
@@ -388,6 +441,7 @@ function hydrateValidationReports(history: UiMessage[], profile?: Profile): UiMe
 function phaseStatusLabel(status: string): string {
   if (status === "complete") return "Approved";
   if (status === "pending_signoff") return "Needs approval";
+  if (status === "awaiting_service_selection") return "Select services";
   if (status === "in_progress") return "Running";
   return "Waiting";
 }
@@ -609,6 +663,7 @@ export default function ChatPage() {
   const bootClientId = useRef<string | null>(null);
   const statusTimer = useRef<number | null>(null);
   const streamLock = useRef(false);
+  const streamAbort = useRef<AbortController | null>(null);
   const changeFlow = useRef(false);
   const [pendingHandoff, setPendingHandoff] = useState<{
     prompt: string;
@@ -845,8 +900,10 @@ export default function ChatPage() {
     setError("");
     setThinking(true);
     startStatusCycle(content);
+    const controller = new AbortController();
+    streamAbort.current = controller;
     try {
-      await api.postMessageStream(token, session, content, handleStreamEvent);
+      await api.postMessageStream(token, session, content, handleStreamEvent, controller.signal);
       await refreshReadiness();
       // After a topic draft run, pull CDP so empty twin cards cannot hide the markdown.
       try {
@@ -868,14 +925,28 @@ export default function ChatPage() {
       }
       return true;
     } catch (e) {
+      // Deliberate cancel (unmount/client switch mid-stream) — not a failure to report.
+      if (e instanceof DOMException && e.name === "AbortError") {
+        return false;
+      }
       setError(e instanceof Error ? e.message : "Send failed");
       return false;
     } finally {
       setThinking(false);
       stopStatusCycle();
       streamLock.current = false;
+      if (streamAbort.current === controller) streamAbort.current = null;
     }
   }
+
+  // Cancel any in-flight chat stream when the client changes or this page
+  // unmounts — otherwise the fetch keeps running in the background and
+  // calls setState against a component nobody is looking at anymore.
+  useEffect(() => {
+    return () => {
+      streamAbort.current?.abort();
+    };
+  }, [clientId]);
 
   useEffect(() => {
     if (!token || !clientId) return;
@@ -1124,10 +1195,7 @@ export default function ChatPage() {
     }
   }
 
-  function canAct(agentKey?: string | null) {
-    if (!agentKey) return false;
-    if (!canApprove(agentKey)) return false;
-    // Hide Approve on already-completed phases (stops re-approve  ->  auto-continue loops)
+  function phaseStatusForAgent(agentKey: string): string {
     const statusByAgent: Record<string, string> = {
       discovery_agent: statuses.discovery,
       tracking_access_agent: statuses.tracking,
@@ -1143,8 +1211,22 @@ export default function ChatPage() {
       on_page_seo: statuses.on_page_seo,
       publishing: statuses.publishing,
     };
-    const st = statusByAgent[agentKey];
-    return st === "pending_signoff" || st === "in_progress";
+    return statusByAgent[agentKey] || "";
+  }
+
+  /** Approve / reject on confirmation gates — only while the phase awaits sign-off. */
+  function canAct(agentKey?: string | null) {
+    if (!agentKey) return false;
+    if (!canApprove(agentKey)) return false;
+    const st = phaseStatusForAgent(agentKey);
+    return st === "pending_signoff" || st === "awaiting_service_selection";
+  }
+
+  /** Pre-gate forms (questionnaire / known-changes) — only while the phase is still drafting. */
+  function canSubmitPreGate(agentKey?: string | null) {
+    if (!agentKey) return false;
+    if (!(canTrigger(agentKey) || canApprove(agentKey))) return false;
+    return phaseStatusForAgent(agentKey) === "in_progress";
   }
 
   const latestReports = useMemo(() => reportsInPipelineOrder(messages), [messages]);
@@ -1267,7 +1349,9 @@ export default function ChatPage() {
 
   function pipeClass(status: string, key: string): string {
     if (status === "complete") return "is-complete";
-    if (status === "pending_signoff") return "is-signoff";
+    if (status === "pending_signoff" || status === "awaiting_service_selection") {
+      return "is-signoff";
+    }
     if (status === "in_progress" || key === activePipelineKey) return "is-running";
     return "is-waiting";
   }
@@ -1278,6 +1362,10 @@ export default function ChatPage() {
     edits?: Record<string, unknown>
   ) {
     if (!token || !clientId) return;
+    if (!agentKey) {
+      setError("Cannot review this phase — missing agent key on the card.");
+      return;
+    }
     try {
       const res = await api.reviewPhase(token, clientId, agentKey, action, edits);
       setStatuses(mapPhaseStatuses(res.phase_statuses as Record<string, unknown>));
@@ -1403,7 +1491,7 @@ export default function ChatPage() {
     setThinking(true);
     startStatusCycle("questionnaire discovery");
     try {
-      const res = await api.submitQuestionnaire(token, clientId, fields);
+      const res = await api.submitQuestionnaire(token, clientId, fields, sessionId);
       setMessages((m) => [
         ...m,
         {
@@ -1444,7 +1532,7 @@ export default function ChatPage() {
     setThinking(true);
     startStatusCycle("known changes tracking");
     try {
-      const res = await api.submitKnownChanges(token, clientId, fields);
+      const res = await api.submitKnownChanges(token, clientId, fields, sessionId);
       setMessages((m) => [
         ...m,
         {
@@ -1547,14 +1635,18 @@ export default function ChatPage() {
       type === "discovery_profile" ||
       type === "discovery_preresearch" ||
       type === "discovery_questionnaire" ||
+      type === "discovery_report" ||
       type === "discovery_completeness" ||
-      type === "discovery_rerun_confirm"
+      type === "discovery_rerun_confirm" ||
+      type === "discovery_confirmation"
     ) {
+      const discoveryKey = agentKey || "discovery_agent";
       return (
         <DiscoveryCard
           payload={card}
-          canAct={canAct(agentKey)}
-          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
+          canAct={canAct(discoveryKey)}
+          canSubmit={canSubmitPreGate(discoveryKey)}
+          onAction={(a, edits) => onCardAction(discoveryKey, a, edits)}
           onSubmitQuestionnaire={onSubmitQuestionnaire}
           onUploadCdd={onUploadCdd}
         />
@@ -1568,14 +1660,18 @@ export default function ChatPage() {
       type === "tracking_t3_conversions" ||
       type === "tracking_t4_baseline" ||
       type === "tracking_t5_known_changes" ||
-      type === "tracking_t6_signoff"
+      type === "tracking_t6_signoff" ||
+      type === "tracking_report" ||
+      type === "tracking_confirmation"
     ) {
+      const trackingKey = agentKey || "tracking_access_agent";
       return (
         <TrackingCard
           payload={card}
-          canAct={canAct(agentKey)}
+          canAct={canAct(trackingKey)}
+          canSubmit={canSubmitPreGate(trackingKey)}
           canGrant={true}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a) => onCardAction(trackingKey, a)}
           onGrant={onGrant}
           onSubmitKnownChanges={onSubmitKnownChanges}
         />
@@ -1614,6 +1710,8 @@ export default function ChatPage() {
           payload={card}
           canAct={canAct(agentKey)}
           onAction={(a) => onCardAction(agentKey, a)}
+          clientId={clientId}
+          token={token}
         />
       );
     }
@@ -1647,6 +1745,23 @@ export default function ChatPage() {
             } catch (e) {
               setError(e instanceof Error ? e.message : "Failed to add competitor");
             }
+          }}
+        />
+      );
+    }
+    if (type === "service_prioritization") {
+      // Permission-only: this card is itself the selection gate. Do not hide
+      // Confirm behind phase-status matching (that was misreported as a role block).
+      const key = agentKey || "search_demand";
+      return (
+        <ServicePrioritizationCard
+          payload={card}
+          canAct={canApprove(key)}
+          onConfirm={async (selection) => {
+            if (!token || !clientId) return;
+            await api.saveServicePrioritization(token, clientId, selection);
+            setStatuses((s) => ({ ...s, search_demand: "not_started" }));
+            await send("Run keyword research / search demand");
           }}
         />
       );
@@ -1699,6 +1814,7 @@ export default function ChatPage() {
     if (type === "content_production_report") {
       return (
         <ContentProductionCard
+          clientId={clientId ?? ""}
           payload={card}
           canAct={canAct(agentKey)}
           onAction={(a, edits) => onCardAction(agentKey, a, edits)}
@@ -1876,50 +1992,75 @@ export default function ChatPage() {
           </div>
         ) : sidebarNav === "reports" ? (
           <div className="cc-workspace cc-report-pane" ref={reportPaneRef}>
-            <p className="cc-kicker">Radius OS Report</p>
-            <h2 style={{ margin: 0, fontSize: 20 }}>{client?.name}</h2>
-            <p style={{ margin: 0, fontSize: 13, color: "var(--text-secondary)" }}>
-              {Math.round(readiness.overall)} / 100. {healthLabel}. {nextStepHint()}
-            </p>
+            <div className="cc-report-heading">
+              <div>
+                <p className="cc-kicker">Radius OS Report</p>
+                <h2>{client?.name}</h2>
+                <p className="cc-report-next">
+                  <strong>{Math.round(readiness.overall)} / 100</strong> · {healthLabel} · {nextStepHint()}
+                </p>
+              </div>
+              <span className="cc-report-count">
+                {latestReports.length} {latestReports.length === 1 ? "report" : "reports"}
+              </span>
+            </div>
             {reportFocusKey && !latestReports.some((m) => reportPhaseKey(m) === reportFocusKey) ? (
-              <p style={{ margin: 0, fontSize: 13, color: "var(--warning-bright)" }}>
+              <p className="cc-report-empty-state">
                 No report yet for {CONTROL_PHASES.find((p) => p.key === reportFocusKey)?.label || reportFocusKey}. Run that stage first.
               </p>
             ) : null}
-            {latestReports.map((m) => {
-              if (!m.card) return null;
-              if (String(m.card.card_type) === "phase_validation_report") return null;
-              const phaseKey = reportPhaseKey(m);
-              const isRevision = isRevisionReport(m);
-              const rerunIndex = (m as any)._rerunIndex as number | undefined;
-              const phaseLabel = phaseKey
-                ? CONTROL_PHASES.find((p) => p.key === phaseKey)?.label?.replace(/^\d+[a-z]?. /, "")
-                : null;
-              const isLatest = Boolean((m as any)._isLatestRun) && !rerunIndex;
-              return (
-                <div
-                  key={m.id}
-                  id={phaseKey && !isRevision && isLatest ? `report-phase-${phaseKey}` : undefined}
-                  className={`msg card-wrap${phaseKey === reportFocusKey && !isRevision && isLatest ? " is-report-focus" : ""}${isRevision ? " is-revision-report" : ""}${rerunIndex ? " is-rerun-report" : ""}`}
-                >
-                  {rerunIndex ? (
-                    <div className="cc-revision-banner">
-                      <span className="cc-revision-badge">Earlier run #{rerunIndex}</span>
-                      <span>{phaseLabel ? `${phaseLabel} — previous output` : "Previous report"}</span>
+            <div className="cc-report-list">
+              {latestReports.map((m, index) => {
+                if (!m.card) return null;
+                if (String(m.card.card_type) === "phase_validation_report") return null;
+                const phaseKey = reportPhaseKey(m);
+                const isRevision = isRevisionReport(m);
+                const rerunIndex = (m as any)._rerunIndex as number | undefined;
+                const phase = phaseKey ? CONTROL_PHASES.find((p) => p.key === phaseKey) : undefined;
+                const phaseLabel = phase?.label?.replace(/^\d+[a-z]?. /, "") || null;
+                const isLatest = Boolean((m as any)._isLatestRun) && !rerunIndex;
+                const previousPhase = index > 0 ? reportPhaseKey(latestReports[index - 1]) : null;
+                const isNewPhase = Boolean(phaseKey && phaseKey !== previousPhase);
+                const phaseStatus = phaseKey
+                  ? statuses[phaseKey as keyof typeof statuses]
+                  : null;
+                return (
+                  <section className="cc-report-group" key={m.id}>
+                    {isNewPhase && phase ? (
+                      <div className="cc-report-group-heading">
+                        <div>
+                          <span className="cc-report-step">{phase.label}</span>
+                          <h3>{phaseLabel}</h3>
+                        </div>
+                        <span className={`cc-report-status ${phaseStatusTone(phaseStatus || "")}`}>
+                          {phaseStatusLabel(phaseStatus || "not_started")}
+                        </span>
+                      </div>
+                    ) : null}
+                    <div
+                      id={phaseKey && !isRevision && isLatest ? `report-phase-${phaseKey}` : undefined}
+                      className={`msg card-wrap${phaseKey === reportFocusKey && !isRevision && isLatest ? " is-report-focus" : ""}${isRevision ? " is-revision-report" : ""}${rerunIndex ? " is-rerun-report" : ""}`}
+                    >
+                      {rerunIndex ? (
+                        <div className="cc-revision-banner">
+                          <span className="cc-revision-badge">Earlier run #{rerunIndex}</span>
+                          <span>{phaseLabel ? `${phaseLabel} — previous output` : "Previous report"}</span>
+                        </div>
+                      ) : isRevision ? (
+                        <div className="cc-revision-banner">
+                          <span className="cc-revision-badge">Revised</span>
+                          <span>{phaseLabel ? `${phaseLabel} — updated from your change request` : "Updated report"}</span>
+                        </div>
+                      ) : null}
+                      <ReportCardShell card={m.card} clientId={clientId} token={token} onError={setError}>
+                        {renderCard(m.card)}
+                      </ReportCardShell>
                     </div>
-                  ) : isRevision ? (
-                    <div className="cc-revision-banner">
-                      <span className="cc-revision-badge">Revised</span>
-                      <span>{phaseLabel ? `${phaseLabel} — updated from your change request` : "Updated report"}</span>
-                    </div>
-                  ) : null}
-                  <ReportCardShell card={m.card} clientId={clientId} token={token} onError={setError}>
-                    {renderCard(m.card)}
-                  </ReportCardShell>
-                </div>
-              );
-            })}
-            {!latestReports.length ? <p style={{ color: "var(--text-muted)" }}>No intelligence packs yet. Start an operation.</p> : null}
+                  </section>
+                );
+              })}
+            </div>
+            {!latestReports.length ? <p className="cc-report-empty-state">No intelligence packs yet. Start an operation.</p> : null}
             <div ref={reportsEndRef} />
           </div>
         ) : (
@@ -2008,8 +2149,12 @@ export default function ChatPage() {
                       <li key={phase.key}>
                         <span className="cc-gap-phase">{phase.label}</span>
                         <span>{PHASE_OWNER[String(phase.key)] || "Needs approval"}</span>
-                        <button type="button" className="btn btn-primary cc-gap-go" onClick={() => openPhaseReport(String(phase.key))}>
-                          Review
+                        <button
+                          type="button"
+                          className="btn btn-primary cc-gap-go"
+                          onClick={() => void onCardAction(phase.agent, "approve")}
+                        >
+                          Approve
                         </button>
                       </li>
                     ))}
@@ -2026,8 +2171,16 @@ export default function ChatPage() {
                   <strong>Action required</strong>
                   <p>{approvalQueue.length} phase{approvalQueue.length === 1 ? "" : "s"} need human approval before the operation continues.</p>
                 </div>
-                <button type="button" className="btn btn-primary" onClick={() => setSidebarNav("reports")}>
-                  Review
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!approvalQueue[0] || thinking}
+                  onClick={() => {
+                    const phase = approvalQueue[0];
+                    if (phase) void onCardAction(phase.agent, "approve");
+                  }}
+                >
+                  Approve {approvalQueue[0]?.label.replace(/^\d+[a-z]?. /, "") || "phase"}
                 </button>
               </div>
             ) : null}
@@ -2074,6 +2227,7 @@ export default function ChatPage() {
                   {CONTROL_PHASES.map((phase) => {
                     const status = statuses[phase.key];
                     const canRun = canTrigger(phase.agent) && !thinking && !!sessionId;
+                    const needsApprove = status === "pending_signoff" && canApprove(phase.agent);
                     return (
                       <div key={phase.key} className={`cc-pipe ${pipeClass(status, phase.key)}`}>
                         <span className="cc-pipe-dot" />
@@ -2081,14 +2235,25 @@ export default function ChatPage() {
                           <div className="cc-pipe-name">{phase.label.replace(/^\d+[a-z]?. /, "")}</div>
                           <div className="cc-pipe-meta">{phaseStatusLabel(status)} · {PHASE_OWNER[String(phase.key)]}</div>
                         </div>
-                        <button
-                          type="button"
-                          className={`btn cc-pipe-run ${pipeClass(status, phase.key) === "is-running" ? "btn-primary" : "btn-ghost"}`}
-                          disabled={!canRun}
-                          onClick={() => void send(phase.prompt)}
-                        >
-                          {status === "complete" ? "Re-run" : "Run"}
-                        </button>
+                        {needsApprove ? (
+                          <button
+                            type="button"
+                            className="btn btn-primary cc-pipe-run"
+                            disabled={thinking}
+                            onClick={() => void onCardAction(phase.agent, "approve")}
+                          >
+                            Approve
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className={`btn cc-pipe-run ${pipeClass(status, phase.key) === "is-running" ? "btn-primary" : "btn-ghost"}`}
+                            disabled={!canRun}
+                            onClick={() => void send(phase.prompt)}
+                          >
+                            {status === "complete" ? "Re-run" : "Run"}
+                          </button>
+                        )}
                       </div>
                     );
                   })}
@@ -2123,6 +2288,7 @@ export default function ChatPage() {
                       const st = statuses[phase.key];
                       return (
                         <button
+                          key={phase.key}
                           type="button"
                           className="cc-monitor-row"
                           onClick={() => openPhaseReport(String(phase.key))}

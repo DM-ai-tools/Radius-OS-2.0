@@ -22,6 +22,9 @@ class Client(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     status: Mapped[str] = mapped_column(Text, nullable=False, default="onboarding")
+    is_onboarding: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true", index=True
+    )
 
     profile: Mapped["ClientDigitalProfile"] = relationship(
         back_populates="client", uselist=False
@@ -50,6 +53,12 @@ class ClientDigitalProfile(Base):
     content_production_summary: Mapped[dict | None] = mapped_column(JSONType, default=dict)
     on_page_seo_summary: Mapped[dict | None] = mapped_column(JSONType, default=dict)
     publishing_summary: Mapped[dict | None] = mapped_column(JSONType, default=dict)
+    is_onboarding: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true", index=True
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     discovery_status: Mapped[str] = mapped_column(Text, default="not_started")
     tracking_status: Mapped[str] = mapped_column(Text, default="not_started")
     website_status: Mapped[str] = mapped_column(Text, default="not_started")

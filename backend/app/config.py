@@ -46,12 +46,21 @@ class Settings(BaseSettings):
     write_model: str = "openai/gpt-5.6-sol"
     # Lightweight OpenRouter model for post-cleaning keyword cluster + intent/funnel
     keyword_cluster_model: str = "google/gemini-2.5-flash"
-    keyword_relevance_max_per_seed: int = 25
-    keyword_relevance_max_input_per_seed: int = 40
+    keyword_relevance_max_per_seed: int = 60
+    keyword_relevance_max_input_per_seed: int = 80
+    keyword_max_seeds: int = 50
+    keyword_pool_target: int = 4500
     keyword_relevance_max_tokens: int = 2048
     keyword_cluster_use_llm: bool = False
     use_mock_llm: bool = True
     use_mock_providers: bool = True
+
+    # Pre-clustering live site scan (Phase 5, before clustering finalizes and
+    # before Phase 6b URL mapping runs): HTTP crawl first, Playwright only as
+    # a fallback for pages that come back thin/JS-shell, Perplexity (via
+    # OpenRouter) only if the crawl is still thin overall after that.
+    enable_playwright_rendering: bool = True
+    live_site_scan_max_pages: int = 40
 
     ahrefs_api_key: str = ""
     dataforseo_login: str = ""
@@ -87,6 +96,8 @@ class Settings(BaseSettings):
     wordpress_allow_live_publish: bool = False
 
     competitor_cache_days: int = 14
+    client_memory_retention_days: int = 30
+    client_memory_retention_enabled: bool = True
     readiness_threshold: float = 90.0
     # 0 = no soft cap — take every page discovered (hard safety ceiling still applies)
     seo_audit_max_pages: int = 0
@@ -95,6 +106,10 @@ class Settings(BaseSettings):
     # Default chat-turn budget; heavy phases override below
     agent_timeout_seconds: int = 480
     technical_seo_agent_timeout_seconds: int = 900
+    # Phase 3 is intentionally bounded for interactive chat. A larger crawl can
+    # be requested later through the dedicated crawl/audit tools.
+    website_situation_max_pages: int = 40
+    website_operation_timeout_seconds: int = 75
 
     feature_discovery_agent: bool = True
     feature_tracking_agent: bool = True
@@ -168,6 +183,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SECRET_KEY is set to a known placeholder value. "
                 "Generate a real one: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_on_localhost_frontend_url_in_production(self) -> "Settings":
+        # A misconfigured FRONTEND_URL doesn't break anything at runtime — it
+        # only silently corrupts robots.txt/sitemap.xml's URLs — so this warns
+        # instead of failing startup. Import kept local to avoid a module-level
+        # logging_config <-> config import cycle at collection time.
+        if self.environment == "production" and (
+            "localhost" in self.frontend_url or "127.0.0.1" in self.frontend_url
+        ):
+            from app.logging_config import get_logger
+
+            get_logger("config").warning(
+                "frontend_url_looks_like_localhost_in_production",
+                frontend_url=self.frontend_url,
+                hint="robots.txt/sitemap.xml will emit this URL — set FRONTEND_URL to the real public domain",
             )
         return self
 

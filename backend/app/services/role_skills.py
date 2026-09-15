@@ -69,8 +69,14 @@ SEO_ROLES: list[dict[str, str]] = [
     },
 ]
 
-# All catalog roles can self-register (HoD included — needed for org bootstrap on Railway).
-SELF_SERVICE_ROLES: set[str] = {r["name"] for r in SEO_ROLES}
+# Head of Department is deliberately excluded from unconditional self-service:
+# it grants full trigger+approve access across every phase for every client, and
+# there is no per-client ownership model to scope that down. It is only ever
+# self-assignable for first-run org bootstrap on Railway (see auth.py's
+# `_hod_exists` gate) — once one Head of Department account exists, further HoD
+# accounts must be created/promoted by an existing admin, not self-registered.
+SELF_SERVICE_ROLES: set[str] = {r["name"] for r in SEO_ROLES if r["name"] != "head_of_department"}
+BOOTSTRAP_ADMIN_ROLE = "head_of_department"
 
 
 # Phase / skill ownership from coverage doc (all phases). implemented=False → future.
@@ -115,7 +121,7 @@ PHASE_SKILL_COVERAGE: list[dict[str, Any]] = [
     {
         "phase": 5,
         "title": "Search Demand & Keyword Research",
-        "skills": ["search_demand", "create_topic", "keyword_clustering"],
+        "skills": ["search_demand", "keyword_clustering", "create_topic"],
         "roles": ["content_seo_specialist"],
         "implemented": True,
     },
@@ -318,9 +324,9 @@ SKILL_ROLE_OWNERS: dict[str, dict[str, Any]] = {
         "label": "Search demand & keyword research",
         "agent_key": "search_demand",
         "owner": "content_seo_specialist",
-        "trigger": ["content_seo_specialist"],
-        "approve": ["content_seo_specialist"],
-        "source": "Coverage P5 — Content SEO Specialist",
+        "trigger": ["content_seo_specialist", "head_of_department"],
+        "approve": ["content_seo_specialist", "head_of_department"],
+        "source": "Coverage P5 — Content SEO Specialist (+ HoD full access)",
     },
     "create_topic": {
         "label": "Create Topic",
@@ -328,7 +334,7 @@ SKILL_ROLE_OWNERS: dict[str, dict[str, Any]] = {
         "owner": "content_seo_specialist",
         "trigger": ["content_seo_specialist"],
         "approve": ["content_seo_specialist"],
-        "source": "Architecture v1.9 — Content SEO Specialist",
+        "source": "After sitemap classification — new clusters only",
     },
     "keyword_clustering": {
         "label": "Keyword Clustering",
@@ -765,6 +771,35 @@ def build_playground_sections(
             out["note"] = raw.get("note")
         if raw.get("sample_urls"):
             out["sample_urls"] = raw.get("sample_urls")
+        if raw.get("site_sitemap"):
+            sm = raw.get("site_sitemap") or {}
+            out["site_sitemap"] = {
+                "url_count": sm.get("url_count"),
+                "shown_count": sm.get("shown_count"),
+                "sources": sm.get("sources"),
+                "truncated": sm.get("truncated"),
+                "sections": [
+                    {
+                        "cluster": s.get("cluster"),
+                        "label": s.get("label"),
+                        "count": s.get("count"),
+                        "pages": [
+                            {
+                                "path": p.get("path"),
+                                "url": p.get("url"),
+                                "title": p.get("title"),
+                                "status": p.get("status"),
+                                "cluster": p.get("cluster"),
+                            }
+                            for p in (s.get("pages") or [])[:40]
+                            if isinstance(p, dict)
+                        ],
+                    }
+                    for s in (sm.get("sections") or [])[:12]
+                    if isinstance(s, dict)
+                ],
+            }
+            out["sitemap_url_count"] = raw.get("sitemap_url_count") or sm.get("url_count")
         if raw.get("_draft"):
             out["sign_off"] = "Draft — awaiting Technical SEO approve"
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { httpStatusLabel, httpStatusTone } from "../../lib/httpStatusLabel";
 import { FieldGrid, MetricGrid, PresentableValue, humanLabel } from "./PresentableValue";
 
@@ -6,6 +6,35 @@ type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
   onAction: (action: string) => void;
+};
+
+type SitemapPage = {
+  url?: string;
+  path?: string;
+  title?: string;
+  status?: number | string;
+  cluster?: string;
+  cluster_label?: string;
+  depth?: number;
+  cdd_focus?: boolean;
+};
+
+type SitemapSection = {
+  cluster?: string;
+  label?: string;
+  count?: number;
+  pages?: SitemapPage[];
+};
+
+type SiteSitemap = {
+  url_count?: number;
+  shown_count?: number;
+  truncated?: boolean;
+  sources?: string[];
+  sections?: SitemapSection[];
+  pages?: SitemapPage[];
+  page_inventory_method?: string;
+  page_inventory_stats?: Record<string, unknown>;
 };
 
 const META_KEYS = new Set([
@@ -26,10 +55,143 @@ function numTone(n: unknown, warnAt: number, badAt: number): "ok" | "warn" | "ba
   return "ok";
 }
 
-function TechnicalTab({ data }: { data: Record<string, unknown> }) {
+function ClientSiteSitemap({
+  sitemap,
+  sampleUrls,
+}: {
+  sitemap?: SiteSitemap | null;
+  sampleUrls?: string[];
+}) {
+  const [open, setOpen] = useState(true);
+  const sections = useMemo((): SitemapSection[] => {
+    if (sitemap && Array.isArray(sitemap.sections) && sitemap.sections.length) {
+      return sitemap.sections;
+    }
+    if (Array.isArray(sitemap?.pages) && sitemap!.pages!.length) {
+      return [
+        {
+          label: "All pages",
+          count: sitemap!.pages!.length,
+          pages: sitemap!.pages,
+        },
+      ];
+    }
+    if (sampleUrls?.length) {
+      return [
+        {
+          label: "Discovered URLs",
+          count: sampleUrls.length,
+          pages: sampleUrls.map((url) => ({ url, path: url, title: url } as SitemapPage)),
+        },
+      ];
+    }
+    return [];
+  }, [sitemap, sampleUrls]);
+
+  if (!sections.length) return null;
+
+  const total = Number(sitemap?.url_count || sitemap?.shown_count || sampleUrls?.length || 0);
+  const sources = Array.isArray(sitemap?.sources) ? sitemap!.sources! : [];
+
+  return (
+    <div className="report-section">
+      <div className="cs-pillar-head" style={{ marginBottom: 8 }}>
+        <h4 style={{ margin: 0 }}>Client website sitemap</h4>
+        <button type="button" className="btn btn-ghost" onClick={() => setOpen((v) => !v)}>
+          {open ? "Hide" : "Show"}
+        </button>
+      </div>
+      <p className="field-hint" style={{ marginTop: 0 }}>
+        Current live-site URL inventory (crawl / XML sitemap / SEO audit / Perplexity
+        page inventory)
+        {total ? ` · ${total} URL${total === 1 ? "" : "s"}` : ""}
+        {sources.length ? ` · source: ${sources.join(", ")}` : ""}
+        {sitemap?.truncated ? " · list truncated for display" : ""}.
+      </p>
+      {sitemap?.page_inventory_method ? (
+        <p className="field-hint" style={{ marginTop: 0 }}>
+          Method: {String(sitemap.page_inventory_method).slice(0, 280)}
+          {String(sitemap.page_inventory_method).length > 280 ? "…" : ""}
+        </p>
+      ) : null}
+      {open ? (
+        <div className="site-sitemap">
+          {sections.map((section) => (
+            <div key={String(section.cluster || section.label)} className="site-sitemap-section">
+              <div className="site-sitemap-section-label">
+                <strong>{section.label || section.cluster || "Pages"}</strong>
+                <span className="cs-meta">{section.count ?? section.pages?.length ?? 0}</span>
+              </div>
+              <div className="table-wrap">
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>Path</th>
+                      <th>Title</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(section.pages || []).slice(0, 80).map((page, i) => {
+                      const tone = httpStatusTone(page.status);
+                      const badgeTone =
+                        page.status == null
+                          ? "info"
+                          : tone === "pass"
+                            ? "info"
+                            : tone === "warning"
+                              ? "warning"
+                              : "critical";
+                      const indent = Math.min(Number(page.depth) || 0, 6);
+                      return (
+                        <tr key={`${page.url || page.path}-${i}`}>
+                          <td className="url-cell">
+                            <span style={{ paddingLeft: indent * 12 }}>
+                              {page.path || page.url || "—"}
+                              {page.cdd_focus ? (
+                                <span className="cs-chip" style={{ marginLeft: 6 }}>
+                                  CDD
+                                </span>
+                              ) : null}
+                            </span>
+                          </td>
+                          <td>{page.title || "—"}</td>
+                          <td>
+                            {page.status == null ? (
+                              <span className="severity info">listed</span>
+                            ) : (
+                              <span className={`severity ${badgeTone}`}>
+                                {httpStatusLabel(page.status)}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TechnicalTab({
+  data,
+  sitemap,
+  sampleUrls,
+}: {
+  data: Record<string, unknown>;
+  sitemap?: SiteSitemap | null;
+  sampleUrls?: string[];
+}) {
   const broken = (data.broken_links || {}) as Record<string, unknown>;
   const samples = (data.status_samples || []) as { url?: string; status?: number | string }[];
   const changes = (data.notable_changes || []) as unknown[];
+  const tabSitemap = (data.site_sitemap as SiteSitemap | undefined) || sitemap;
 
   return (
     <div className="audit-panel">
@@ -37,8 +199,8 @@ function TechnicalTab({ data }: { data: Record<string, unknown> }) {
         items={[
           {
             label: "Unique pages",
-            value: data.pages_found,
-            tone: Number(data.pages_found) <= 1 ? "warn" : "neutral",
+            value: data.pages_found ?? tabSitemap?.url_count,
+            tone: Number(data.pages_found ?? tabSitemap?.url_count) <= 1 ? "warn" : "neutral",
           },
           { label: "Indexable", value: data.indexable, tone: "ok" },
           {
@@ -73,6 +235,8 @@ function TechnicalTab({ data }: { data: Record<string, unknown> }) {
           Crawl error: {String(data.error)}
         </p>
       ) : null}
+
+      <ClientSiteSitemap sitemap={tabSitemap} sampleUrls={sampleUrls} />
 
       {(broken.pages_scanned != null || broken.redirect_chain_count != null) && (
         <div className="report-section">
@@ -153,6 +317,7 @@ function TechnicalTab({ data }: { data: Record<string, unknown> }) {
             "source",
             "task_id",
             "discovered_urls",
+            "site_sitemap",
           ]}
         />
       </div>
@@ -257,6 +422,10 @@ export default function WebsiteCard({ payload, canAct, onAction }: Props) {
     data.status === "not_run_this_session" ||
     data.status === "skipped" ||
     data.status === "unavailable";
+  const siteSitemap = (payload.site_sitemap as SiteSitemap | undefined) || null;
+  const sampleUrls = Array.isArray(payload.sample_urls)
+    ? (payload.sample_urls as unknown[]).map(String).filter(Boolean)
+    : undefined;
 
   return (
     <div className="structured-card checkpoint website">
@@ -268,6 +437,9 @@ export default function WebsiteCard({ payload, canAct, onAction }: Props) {
         <strong>{String(payload.required_role || "technical_seo_specialist")}</strong>
         {Array.isArray(payload.tabs_run)
           ? ` · Ran: ${(payload.tabs_run as string[]).map((t) => humanLabel(String(t))).join(", ")}`
+          : ""}
+        {payload.sitemap_url_count != null
+          ? ` · Sitemap: ${String(payload.sitemap_url_count)} URL(s)`
           : ""}
       </p>
       <div className="tabs" role="tablist">
@@ -299,7 +471,7 @@ export default function WebsiteCard({ payload, canAct, onAction }: Props) {
           {String(data.message || data.reason || "Not run this session.")}
         </p>
       ) : tab === "technical" ? (
-        <TechnicalTab data={data} />
+        <TechnicalTab data={data} sitemap={siteSitemap} sampleUrls={sampleUrls} />
       ) : tab === "authority" ? (
         <AuthorityTab data={data} />
       ) : tab === "anomalies" ? (

@@ -104,6 +104,15 @@ async def run_site_architecture(
     profile.site_architecture_summary = summary
     profile.site_architecture_status = "pending_signoff"
 
+    # Keep Phase 5 topic_plan in sync when URL-map actions were stamped.
+    topic_plan = summary.get("topic_plan")
+    if isinstance(topic_plan, dict) and topic_plan.get("topic_ideas") is not None:
+        demand_pack = dict(profile.search_demand_summary or {})
+        demand_pack["topic_plan"] = topic_plan
+        if summary.get("topics"):
+            demand_pack["topics"] = summary["topics"]
+        profile.search_demand_summary = demand_pack
+
     await supersede_pending_findings(
         db, client_id=client.id, agent_key="site_architecture"
     )
@@ -158,6 +167,8 @@ async def run_site_architecture(
             "content": (
                 f"IA blueprint ready: {len(summary.get('target_url_tree') or [])} planned URLs, "
                 f"{len(summary.get('cluster_ownership') or summary.get('cluster_owners') or [])} cluster owners. "
+                f"URL map from sitemap-classified clusters "
+                f"({len((summary.get('url_map_report') or {}).get('final_url_map') or [])} rows). "
                 f"Audit: {cs.get('urls_crawled')} URLs, max click depth {cs.get('max_click_depth')}, "
                 f"{cs.get('depth_4_plus')} at 4+ clicks, {cs.get('orphans')} orphans. "
                 "Strategist owns the blueprint; Technical SEO should approve redirects/robots impact."

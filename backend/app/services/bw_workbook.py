@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timezone
+from typing import Any
+
 from app.services.url_mapping import resolve_sheet_url_columns
 
 CATEGORY_URL_COLUMNS = [

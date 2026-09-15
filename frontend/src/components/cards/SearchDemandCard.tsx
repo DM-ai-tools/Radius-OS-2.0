@@ -40,7 +40,7 @@ function serpTitles(
   return kwRows(row.serp_titles);
 }
 
-/** Service → Seed 1, Seed 2 … → the seed's exact/phrase/related/broad keywords. */
+/** Service → Seed 1, Seed 2 … → keywords; subservices nested with competitor gaps. */
 function ServiceSeedGroups({
   services,
 }: {
@@ -50,6 +50,11 @@ function ServiceSeedGroups({
     <>
       {services.map((service, si) => {
         const seeds = kwRows(service.seeds);
+        const subservices = kwRows(service.subservices);
+        const categoryLeader =
+          service.category_leader && typeof service.category_leader === "object"
+            ? (service.category_leader as Record<string, unknown>)
+            : null;
         return (
           <details
             key={`${String(service.service)}-${si}`}
@@ -81,140 +86,320 @@ function ServiceSeedGroups({
               </span>
               {String(service.service || "Other website topics")}{" "}
               <span style={{ fontWeight: 500, color: "var(--muted)" }}>
-                ({Number(service.seed_count ?? seeds.length)} seeds ·{" "}
-                {Number(service.keyword_count ?? 0)} keywords
+                ({Number(service.seed_count ?? seeds.length)} seeds
+                {subservices.length
+                  ? ` · ${subservices.length} subservices`
+                  : ""}{" "}
+                · {Number(service.keyword_count ?? 0)} keywords
                 {service.total_volume != null
                   ? ` · vol ${fmtVol(service.total_volume)}`
                   : ""}
                 )
               </span>
+              {categoryLeader?.competitor ? (
+                <span
+                  style={{
+                    display: "block",
+                    marginTop: 4,
+                    fontSize: 11,
+                    fontWeight: 500,
+                    color: "var(--muted)",
+                  }}
+                >
+                  Strongest competitor in{" "}
+                  {String(service.competitor_category || "category").replace(
+                    /_/g,
+                    " ",
+                  )}
+                  : {String(categoryLeader.competitor)}
+                </span>
+              ) : null}
             </summary>
             <div style={{ padding: "0 12px 10px" }}>
-              {seeds.map((seed, sj) => {
-                const keywords = kwRows(seed.keywords);
-                const counts =
-                  seed.class_counts && typeof seed.class_counts === "object"
-                    ? (seed.class_counts as Record<string, number>)
-                    : {};
-                const missing = Array.isArray(seed.classes_missing)
-                  ? (seed.classes_missing as string[])
-                  : [];
+              {subservices.map((sub, subIdx) => {
+                const subSeeds = kwRows(sub.seeds);
+                const gapCount = Number(sub.gap_keyword_count ?? 0);
+                const leaders = kwRows(sub.competitor_leaders);
                 return (
                   <details
-                    key={`${String(seed.seed)}-${sj}`}
-                    style={{ marginTop: 8 }}
+                    key={`${String(sub.subservice)}-${subIdx}`}
+                    style={{
+                      marginTop: 10,
+                      border: "1px dashed var(--line)",
+                      borderRadius: 8,
+                      padding: "0 8px 8px",
+                    }}
                   >
                     <summary
                       style={{
                         cursor: "pointer",
                         fontSize: 12,
                         fontWeight: 700,
+                        padding: "8px 4px",
                       }}
                     >
-                      {String(seed.seed_label || `Seed ${sj + 1}`)}:{" "}
-                      {String(seed.seed || "—")}{" "}
-                      <span style={{ fontWeight: 500, color: "var(--muted)" }}>
-                        ({Number(seed.keyword_count ?? keywords.length)}{" "}
-                        keywords)
-                      </span>
                       <span
                         style={{
-                          display: "block",
-                          marginTop: 3,
-                          marginLeft: 16,
-                          fontSize: 11,
-                          fontWeight: 500,
+                          fontSize: 10,
+                          fontWeight: 600,
+                          textTransform: "uppercase",
                           color: "var(--muted)",
+                          marginRight: 6,
                         }}
                       >
-                        Exact {Number(counts.exact ?? 0)} · Phrase{" "}
-                        {Number(counts.phrase ?? 0)} · Related{" "}
-                        {Number(counts.related ?? 0)} · Broad{" "}
-                        {Number(counts.broad ?? 0)}
-                        {missing.length
-                          ? ` · no results for: ${missing.join(", ")}`
-                          : ""}
+                        Subservice
                       </span>
-                    </summary>
-                    <div style={{ overflowX: "auto", paddingBottom: 8 }}>
-                      <table
-                        className="kw-report-table"
-                        style={{
-                          width: "100%",
-                          fontSize: 11,
-                          borderCollapse: "collapse",
-                        }}
-                      >
-                        <thead>
-                          <tr
-                            style={{
-                              textAlign: "left",
-                              borderBottom: "1px solid var(--line)",
-                            }}
-                          >
-                            <th style={{ padding: "3px 6px" }}>Class</th>
-                            <th style={{ padding: "3px 6px" }}>Keyword</th>
-                            <th style={{ padding: "3px 6px" }}>Intent</th>
-                            <th style={{ padding: "3px 6px" }}>Funnel</th>
-                            <th style={{ padding: "3px 6px" }}>Volume</th>
-                            <th style={{ padding: "3px 6px" }}>KD</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {keywords.map((k, kj) => (
-                            <tr
-                              key={`${String(k.keyword)}-${kj}`}
-                              style={{ borderBottom: "1px solid var(--line)" }}
-                            >
-                              <td
-                                style={{
-                                  padding: "3px 6px",
-                                  textTransform: "capitalize",
-                                }}
-                              >
-                                {String(k.match_class || "—")}
-                              </td>
-                              <td
-                                style={{ padding: "3px 6px", fontWeight: 600 }}
-                              >
-                                {String(k.keyword || "—")}
-                              </td>
-                              <td
-                                style={{
-                                  padding: "3px 6px",
-                                  textTransform: "capitalize",
-                                }}
-                              >
-                                {String(k.intent || "—")}
-                              </td>
-                              <td style={{ padding: "3px 6px" }}>
-                                <FunnelBadge stage={k.funnel} />
-                              </td>
-                              <td style={{ padding: "3px 6px" }}>
-                                {fmtVol(k.volume)}
-                              </td>
-                              <td style={{ padding: "3px 6px" }}>
-                                {fmtNum(k.difficulty)}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                      {keywords.length === 0 ? (
-                        <p style={{ fontSize: 11, color: "var(--muted)" }}>
-                          No keywords above the volume threshold were returned
-                          for this seed.
-                        </p>
+                      {String(sub.subservice || "—")}{" "}
+                      <span style={{ fontWeight: 500, color: "var(--muted)" }}>
+                        ({Number(sub.keyword_count ?? 0)} keywords
+                        {gapCount ? ` · ${gapCount} gaps` : ""})
+                      </span>
+                      {sub.page_path ? (
+                        <span
+                          style={{
+                            display: "block",
+                            marginTop: 2,
+                            fontSize: 10,
+                            fontWeight: 500,
+                            color: "var(--muted)",
+                          }}
+                        >
+                          {String(sub.page_path)}
+                        </span>
                       ) : null}
-                    </div>
+                      {leaders.length ? (
+                        <span
+                          style={{
+                            display: "block",
+                            marginTop: 2,
+                            fontSize: 10,
+                            fontWeight: 500,
+                            color: "var(--muted)",
+                          }}
+                        >
+                          Competitors ranking:{" "}
+                          {leaders
+                            .slice(0, 3)
+                            .map((l) =>
+                              String(l.name || l.domain || "—"),
+                            )
+                            .join(", ")}
+                        </span>
+                      ) : null}
+                    </summary>
+                    {subSeeds.map((seed, sj) => (
+                      <SeedKeywordBlock
+                        key={`${String(sub.subservice)}-${String(seed.seed)}-${sj}`}
+                        seed={seed}
+                      />
+                    ))}
                   </details>
                 );
               })}
+              {seeds.map((seed, sj) => (
+                <SeedKeywordBlock
+                  key={`${String(seed.seed)}-${sj}`}
+                  seed={seed}
+                />
+              ))}
             </div>
           </details>
         );
       })}
     </>
+  );
+}
+
+function SeedKeywordBlock({ seed }: { seed: Record<string, unknown> }) {
+  const keywords = kwRows(seed.keywords);
+  const counts =
+    seed.class_counts && typeof seed.class_counts === "object"
+      ? (seed.class_counts as Record<string, number>)
+      : {};
+  const missing = Array.isArray(seed.classes_missing)
+    ? (seed.classes_missing as string[])
+    : [];
+  return (
+    <details style={{ marginTop: 8 }}>
+      <summary
+        style={{
+          cursor: "pointer",
+          fontSize: 12,
+          fontWeight: 700,
+        }}
+      >
+        {String(seed.seed_label || "Seed")}: {String(seed.seed || "—")}{" "}
+        <span style={{ fontWeight: 500, color: "var(--muted)" }}>
+          ({Number(seed.keyword_count ?? keywords.length)} keywords)
+        </span>
+        <span
+          style={{
+            display: "block",
+            marginTop: 3,
+            marginLeft: 16,
+            fontSize: 11,
+            fontWeight: 500,
+            color: "var(--muted)",
+          }}
+        >
+          Exact {Number(counts.exact ?? 0)} · Phrase {Number(counts.phrase ?? 0)}{" "}
+          · Related {Number(counts.related ?? 0)} · Broad{" "}
+          {Number(counts.broad ?? 0)}
+          {missing.length ? ` · no results for: ${missing.join(", ")}` : ""}
+        </span>
+      </summary>
+      <div style={{ overflowX: "auto", paddingBottom: 8 }}>
+        <table
+          className="kw-report-table"
+          style={{
+            width: "100%",
+            fontSize: 11,
+            borderCollapse: "collapse",
+          }}
+        >
+          <thead>
+            <tr
+              style={{
+                textAlign: "left",
+                borderBottom: "1px solid var(--line)",
+              }}
+            >
+              <th style={{ padding: "3px 6px" }}>Class</th>
+              <th style={{ padding: "3px 6px" }}>Keyword</th>
+              <th style={{ padding: "3px 6px" }}>Intent</th>
+              <th style={{ padding: "3px 6px" }}>Funnel</th>
+              <th style={{ padding: "3px 6px" }}>Volume</th>
+              <th style={{ padding: "3px 6px" }}>KD</th>
+              <th style={{ padding: "3px 6px" }}>Gap</th>
+            </tr>
+          </thead>
+          <tbody>
+            {keywords.map((k, kj) => (
+              <tr
+                key={`${String(k.keyword)}-${kj}`}
+                style={{ borderBottom: "1px solid var(--line)" }}
+              >
+                <td
+                  style={{
+                    padding: "3px 6px",
+                    textTransform: "capitalize",
+                  }}
+                >
+                  {String(k.match_class || "—")}
+                </td>
+                <td style={{ padding: "3px 6px", fontWeight: 600 }}>
+                  {String(k.keyword || "—")}
+                </td>
+                <td
+                  style={{
+                    padding: "3px 6px",
+                    textTransform: "capitalize",
+                  }}
+                >
+                  {String(k.intent || "—")}
+                </td>
+                <td style={{ padding: "3px 6px" }}>
+                  <FunnelBadge stage={k.funnel} />
+                </td>
+                <td style={{ padding: "3px 6px" }}>{fmtVol(k.volume)}</td>
+                <td style={{ padding: "3px 6px" }}>{fmtNum(k.difficulty)}</td>
+                <td style={{ padding: "3px 6px" }}>
+                  {k.gap_flag ? (
+                    <span title={String((k.competitor_domains as string[])?.join(", ") || "")}>
+                      gap
+                    </span>
+                  ) : (
+                    "—"
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {keywords.length === 0 ? (
+          <p style={{ fontSize: 11, color: "var(--muted)" }}>
+            No keywords above the volume threshold were returned for this seed.
+          </p>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
+function SubserviceCompetitorMatrix({
+  rows,
+}: {
+  rows: Array<Record<string, unknown>>;
+}) {
+  if (!rows.length) return null;
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <h4 style={{ marginBottom: 6 }}>Subservices vs competitors</h4>
+      <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
+        Each sub-service page mapped to keyword gaps and which competitors rank
+        for those terms.
+      </p>
+      <div style={{ overflowX: "auto" }}>
+        <table
+          className="kw-report-table"
+          style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
+        >
+          <thead>
+            <tr
+              style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}
+            >
+              <th style={{ padding: "6px 8px" }}>Service</th>
+              <th style={{ padding: "6px 8px" }}>Subservice</th>
+              <th style={{ padding: "6px 8px" }}>Keywords</th>
+              <th style={{ padding: "6px 8px" }}>Gaps</th>
+              <th style={{ padding: "6px 8px" }}>Competitors ranking</th>
+              <th style={{ padding: "6px 8px" }}>Category leader</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => {
+              const leaders = kwRows(row.competitor_leaders);
+              const categoryLeader =
+                row.category_leader && typeof row.category_leader === "object"
+                  ? (row.category_leader as Record<string, unknown>)
+                  : null;
+              return (
+                <tr
+                  key={`${String(row.subservice)}-${i}`}
+                  style={{ borderBottom: "1px solid var(--line)" }}
+                >
+                  <td style={{ padding: "6px 8px" }}>
+                    {String(row.parent_service || "—")}
+                  </td>
+                  <td style={{ padding: "6px 8px", fontWeight: 600 }}>
+                    {String(row.subservice || "—")}
+                  </td>
+                  <td style={{ padding: "6px 8px" }}>
+                    {fmtNum(row.keyword_count)}
+                  </td>
+                  <td style={{ padding: "6px 8px" }}>
+                    {fmtNum(row.gap_keyword_count)}
+                  </td>
+                  <td style={{ padding: "6px 8px" }}>
+                    {leaders.length
+                      ? leaders
+                          .slice(0, 3)
+                          .map((l) => String(l.name || l.domain || "—"))
+                          .join(", ")
+                      : "—"}
+                  </td>
+                  <td style={{ padding: "6px 8px" }}>
+                    {categoryLeader?.competitor
+                      ? String(categoryLeader.competitor)
+                      : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -399,6 +584,7 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
       : null;
   const reportClusters = kwRows(clusterReport?.clusters);
   const serviceClusters = kwRows(clusterReport?.service_clusters);
+  const subserviceMatrix = kwRows(payload.subservice_competitor_matrix);
   const orphans = kwRows(clusterReport?.orphans);
   const roadmap = kwRows(clusterReport?.content_roadmap);
   const plan =
@@ -419,6 +605,17 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
       : null;
   const funnelWarnings = Array.isArray(funnelBal?.warnings)
     ? (funnelBal!.warnings as string[])
+    : [];
+  const intentBal =
+    payload.intent_balance && typeof payload.intent_balance === "object"
+      ? (payload.intent_balance as Record<string, unknown>)
+      : null;
+  const intentCounts =
+    intentBal?.counts && typeof intentBal.counts === "object"
+      ? (intentBal.counts as Record<string, number>)
+      : null;
+  const intentWarnings = Array.isArray(intentBal?.warnings)
+    ? (intentBal!.warnings as string[])
     : [];
   const clusterMap =
     plan?.cluster_map && typeof plan.cluster_map === "object"
@@ -569,6 +766,23 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
           ))}
         </ul>
       ) : null}
+      {intentCounts ? (
+        <p style={{ fontSize: 12, marginTop: 6 }}>
+          Intent balance: informational {intentCounts.informational ?? 0} · navigational{" "}
+          {intentCounts.navigational ?? 0} · commercial {intentCounts.commercial ?? 0} · transactional{" "}
+          {intentCounts.transactional ?? 0}
+          {intentBal?.balanced ? " · balanced" : ""}
+        </p>
+      ) : null}
+      {intentWarnings.length ? (
+        <ul className="missing-list">
+          {intentWarnings.slice(0, 3).map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+        </ul>
+      ) : null}
+
+      <SubserviceCompetitorMatrix rows={subserviceMatrix} />
 
       {seedClusters.length > 0 ? (
         <>
@@ -587,9 +801,11 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
               {Number(classCounts.related ?? 0)} · Broad{" "}
               {Number(classCounts.broad ?? 0)}
               {targetCounts
-                ? ` · Roots: services ${Number(targetCounts.service ?? 0)}, pages ${Number(
-                    targetCounts.page ?? 0,
-                  )}, keywords ${Number(targetCounts.keyword ?? 0)}`
+                ? ` · Roots: services ${Number(targetCounts.service ?? 0)}, subservices ${Number(
+                    targetCounts.sub_service ?? 0,
+                  )}, pages ${Number(targetCounts.page ?? 0)}, keywords ${Number(
+                    targetCounts.keyword ?? 0,
+                  )}`
                 : ""}
               {seedingMeta?.seeds_with_all_classes !== undefined
                 ? ` · All 4 classes: ${Number(seedingMeta.seeds_with_all_classes)}/${
@@ -788,7 +1004,22 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
                   })()
                 : ""}
           </h4>
-          {plan.selection_mode || plan.selection_version ? (
+          {plan.created_after_sitemap_classification || plan.selection_mode === "new_clusters_vs_sitemap" ? (
+            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
+              Topics drafted for new clusters after sitemap classification
+              {plan.sitemap_classification &&
+              typeof plan.sitemap_classification === "object"
+                ? ` · ${(plan.sitemap_classification as Record<string, unknown>).existing_topic_count ?? 0} existing / ${(plan.sitemap_classification as Record<string, unknown>).new_topic_count ?? 0} new`
+                : ""}
+              {Array.isArray(plan.assigned_services) && plan.assigned_services.length
+                ? ` · Services: ${(plan.assigned_services as unknown[])
+                    .slice(0, 8)
+                    .map((s) => String(s))
+                    .join(", ")}`
+                : ""}
+              .
+            </p>
+          ) : plan.selection_mode || plan.selection_version ? (
             <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
               Selection: {String(plan.selection_mode || "seeded")} ·{" "}
               {String(plan.selection_version || "")}
@@ -803,9 +1034,20 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
           ) : (
             <p style={{ fontSize: 12, color: "var(--danger, #b42318)", marginTop: 0 }}>
               This Topic Plan is from an older run. Re-run Search Demand to rebuild
-              topics one-per-service from Multi-mode seeding.
+              topics from sitemap-classified clusters.
             </p>
           )}
+          {Array.isArray(plan.existing_on_site) && plan.existing_on_site.length ? (
+            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0, marginBottom: 8 }}>
+              Already on site (optimize/review, not re-drafted):{" "}
+              {(plan.existing_on_site as Array<Record<string, unknown>>)
+                .slice(0, 6)
+                .map((e) => String(e.primary_keyword || e.cluster || ""))
+                .filter(Boolean)
+                .join(", ")}
+              {(plan.existing_on_site as unknown[]).length > 6 ? "…" : ""}
+            </p>
+          ) : null}
           <div style={{ overflowX: "auto", marginBottom: 12 }}>
             <table
               style={{

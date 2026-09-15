@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, require_permission
 from app.models import ClientDigitalProfile, User
 from app.schemas.session import ReadinessGateRequest
 from app.services.audit import log_event
@@ -25,8 +25,9 @@ router = APIRouter(tags=["readiness"])
 async def get_readiness(
     client_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
+    await require_permission(user, db, "readiness_gate", need_trigger=True)
     await recompute_readiness(db, client_id)
     profile = (
         await db.execute(
@@ -61,6 +62,7 @@ async def readiness_gate(
 
     Unlock is informational — Phase 5+ still hard-gate on predecessor approve.
     """
+    await require_permission(user, db, "readiness_gate", need_trigger=True)
     _ = body
     profile = await recompute_readiness(db, client_id)
     await db.refresh(profile)

@@ -95,13 +95,17 @@ App: http://localhost:8080
 
 ## Railway
 
-1. Create a project from this repo (uses root `Dockerfile` + `railway.json`).
+1. Create a project from this repo (root `Dockerfile` + `railway.json` / `railway.toml`).
 2. Add **PostgreSQL** and **Redis** plugins; link `DATABASE_URL` / `REDIS_URL` / `CELERY_BROKER_URL`.
-3. Set required secrets (`SECRET_KEY`, `ENCRYPTION_KEY`) and production URLs — see deployment notes in the latest release commit / team runbook.
-4. Set `ENVIRONMENT=production` and `AUTH_DISABLED=false`.
-5. Public health check: `GET /health`.
+3. Set required secrets (`SECRET_KEY`, `ENCRYPTION_KEY`) — placeholders are rejected at startup.
+4. Set `ENVIRONMENT=production`, `AUTH_DISABLED=false`, and public URLs:
+   - `FRONTEND_URL=https://<public-domain>`
+   - `OAUTH_REDIRECT_URI=https://<public-domain>/api/v1/oauth/callback`
+   - `CORS_ORIGINS=https://<public-domain>`
+5. Health check: `GET /healthz` (Railway config) or `GET /health`.
+6. Optional: add separate services for `worker` / `beat` (see `Procfile`).
 
-The production image serves the React SPA from FastAPI on Railway’s `PORT`.
+The production image serves the React SPA from FastAPI and binds `0.0.0.0:$PORT` via `scripts/start.sh`. See `.env.example` for the full Railway checklist.
 
 ## End-to-end walkthrough
 

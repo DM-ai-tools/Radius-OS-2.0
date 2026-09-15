@@ -1,4 +1,4 @@
-"""Phase 5 — Search Demand & Keyword Research (create_topic + keyword_clustering)."""
+"""Phase 5 — Search Demand: seed → cluster (intent/funnel) → sitemap classify → draft new topics."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.integrations import ahrefs, dataforseo
 from app.integrations.llm import extract_domain
 from app.models import (
@@ -29,7 +30,11 @@ from app.services.competitive_context import (
     resolve_competitors,
     resolve_geographic_focus,
 )
-from app.services.create_topic import format_audience_label, run_create_topic, topics_from_plan
+from app.services.create_topic import (
+    format_audience_label,
+    run_create_topic_for_new_clusters,
+    topics_from_plan,
+)
 from app.services.keyword_clustering import (
     build_service_seed_clusters,
     clusters_for_cdp,
@@ -40,10 +45,15 @@ from app.services.keyword_opportunity import (
     build_topics,
     detect_funnel,
     detect_intent,
+    enrich_service_clusters_with_competitors,
+    intent_balance,
+    intent_balance_warnings,
     is_stale_year_keyword,
     merge_keyword_metrics,
+    prune_redundant_acronym_seeds,
     rank_opportunities,
     select_topics_from_service_clusters,
+    stamp_keyword_intent,
 )
 from app.services.keyword_relevance import (
     build_relevance_context,
@@ -60,7 +70,12 @@ from app.services.keyword_seeding import (
     flatten_dataset,
     run_multi_mode_seeding,
 )
+from app.services.live_site_scan import scan_live_site
+from app.services.url_mapping import classify_clusters_against_sitemap
+from app.logging_config import get_logger
 from app.agents.prompts import load_skill, load_skill_file
+
+log = get_logger("search_demand")
 
 
 def _split_keywords(raw: Any) -> list[str]:
@@ -108,10 +123,31 @@ def _products_list(commercial: dict, marketing: dict, intake: dict, cdd: dict | 
     return out
 
 
-def _page_target_seeds(website: dict[str, Any]) -> list[str]:
+def _page_target_seeds(website: dict[str, Any]) -> list[dict[str, Any]]:
     """Core targeting terms for each existing service / sub-service page (Phase 3)."""
-    out: list[str] = []
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    _service_roots = {
+        "service",
+        "services",
+        "solution",
+        "solutions",
+        "offerings",
+        "products",
+        "product",
+        "what-we-do",
+    }
+
+    def _path_segments(path: str) -> list[str]:
+        return [s for s in path.replace("//", "/").strip("/").split("/") if s]
+
+    def _parent_segment(path: str, page_type: str) -> str | None:
+        segs = _path_segments(path)
+        if page_type != "sub_service" or len(segs) < 2:
+            return None
+        if segs[0].lower() in _service_roots and len(segs) >= 3:
+            return segs[1]
+        return segs[0]
 
     def _term_from_page(page: dict[str, Any]) -> str | None:
         # Prefer CDD-matched terms, then title, then last path segment
@@ -122,19 +158,34 @@ def _page_target_seeds(website: dict[str, Any]) -> list[str]:
         if title and len(title) <= 70 and title.lower() not in ("home", "services"):
             return title
         path = str(page.get("path") or page.get("url") or "").strip()
-        seg = [s for s in path.replace("//", "/").strip("/").split("/") if s]
+        seg = _path_segments(path)
         if seg:
             last = seg[-1].replace("-", " ").replace("_", " ").strip()
             if last and len(last) > 2:
                 return last
         return None
 
-    def _add(term: str | None) -> None:
+    def _add(page: dict[str, Any], term: str | None) -> None:
         t = str(term or "").strip()
         key = t.lower()
-        if t and key not in seen:
-            seen.add(key)
-            out.append(t)
+        if not t or key in seen:
+            return
+        seen.add(key)
+        path = str(page.get("path") or page.get("url") or "").strip()
+        ptype = str(page.get("page_type") or "")
+        cluster = str(page.get("cluster") or "")
+        if not ptype and cluster == "sub_services":
+            ptype = "sub_service"
+        elif not ptype and cluster in ("services", "service_hub"):
+            ptype = "service" if cluster == "services" else "hub"
+        out.append(
+            {
+                "term": t,
+                "page_type": ptype or "page",
+                "path": path,
+                "parent_segment": _parent_segment(path, ptype),
+            }
+        )
 
     for blob in website_resource_blobs(website):
         pages = blob.get("pages")
@@ -149,14 +200,14 @@ def _page_target_seeds(website: dict[str, Any]) -> list[str]:
                     "sub_services",
                     "service_hub",
                 ):
-                    _add(_term_from_page(page))
+                    _add(page, _term_from_page(page))
         hier = blob.get("page_hierarchy")
         if isinstance(hier, list):
             for row in hier:
                 if not isinstance(row, dict):
                     continue
                 if str(row.get("cluster") or "") in ("services", "sub_services", "service_hub"):
-                    _add(_term_from_page(row))
+                    _add(row, _term_from_page(row))
     return out
 
 
@@ -242,8 +293,26 @@ async def run_search_demand(
     commercial = dict(profile.commercial_scope or {})
     marketing = dict(profile.marketing_context or {})
     intake = dict(marketing.get("client_intake") or {})
-    website = dict(profile.website_situation_summary or {})
+    from app.services.site_sitemap import (
+        ensure_website_sitemap,
+        sitemap_is_truncated,
+        sitemap_pages,
+        sitemap_urls,
+    )
+
+    website = ensure_website_sitemap(
+        dict(profile.website_situation_summary or {}),
+        primary_url=client.primary_url,
+    )
+    profile.website_situation_summary = website
     competitive = dict(profile.competitive_landscape_summary or {})
+    # Fresh crawl seeded from the Phase 3 site sitemap (must exist first).
+    live_scan_task = asyncio.ensure_future(
+        scan_live_site(
+            client.primary_url,
+            seed_urls=sitemap_urls(website),
+        )
+    )
     cdd = await _load_cdd_fields(db, client.id)
 
     has_cdd = bool(
@@ -262,6 +331,7 @@ async def run_search_demand(
                 route_to="discovery_agent",
             )
         )
+        live_scan_task.cancel()
         return events
 
     events.extend(
@@ -346,7 +416,7 @@ async def run_search_demand(
         if n and n not in seen and len(n) > 1 and not is_stale_year_keyword(n):
             seen.add(n)
             clean_seeds.append(s.strip())
-    seeds = clean_seeds[:22]
+    seeds = prune_redundant_acronym_seeds(clean_seeds)[:22]
 
     domain = extract_domain(client.primary_url) or ""
 
@@ -360,6 +430,58 @@ async def run_search_demand(
     )
     competitor_domains = domains_from_comps(competitors)
     competitor_labels = names_from_comps(competitors)
+
+    from app.services.service_prioritization import (
+        apply_service_selection,
+        build_client_service_catalog,
+        build_prioritization_pack,
+        discover_competitor_service_trees,
+        expand_vertical_subservice_seeds,
+        is_prioritization_confirmed,
+        merge_competitor_subservices,
+    )
+
+    prioritization = dict(commercial.get("service_prioritization") or {})
+    if not is_prioritization_confirmed(prioritization):
+        competitor_trees = await discover_competitor_service_trees(competitors)
+        pack = build_prioritization_pack(
+            client_name=client.display_name,
+            services=services,
+            website=website,
+            page_seeds=_page_target_seeds(website),
+            competitors=competitors,
+            competitor_trees=competitor_trees,
+            existing=prioritization,
+        )
+        profile.search_demand_status = "awaiting_service_selection"
+        card = {
+            "card_type": "service_prioritization",
+            "title": pack["title"],
+            "agent_key": "search_demand",
+            "actions": ["confirm"],
+            "required_role": required_role_for("search_demand"),
+            **pack,
+        }
+        events.append(
+            {
+                "type": "agent_message",
+                "agent_key": "search_demand",
+                "content": (
+                    "Select which services and sub-services to target (80/20) before "
+                    "keyword expansion. Confirm your selection, then run Search Demand again."
+                ),
+            }
+        )
+        events.append({"type": "structured_card", "payload": card})
+        events.append({"type": "checkpoint", "payload": card})
+        events.append(
+            {
+                "type": "phase_status",
+                "payload": {"search_demand_status": "awaiting_service_selection"},
+            }
+        )
+        live_scan_task.cancel()
+        return events
 
     competitor_brand_full, competitor_brand_tokens = competitor_brand_blocklist(
         competitor_labels,
@@ -442,9 +564,9 @@ async def run_search_demand(
     # Ahrefs multi-mode seeding: expand EVERY target root (each service / product /
     # page / business keyword), not just CDD keywords. Each root -> exact/phrase/related/broad.
     seed_roots: list[str] = []
-    seed_targets: dict[str, dict[str, str]] = {}
+    seed_targets: dict[str, dict[str, Any]] = {}
 
-    def _add_root(term: str, target_type: str) -> None:
+    def _add_root(term: str, target_type: str, **meta: Any) -> None:
         t = clean_provider_seed(str(term or "").strip()) or str(term or "").strip()
         n = t.lower()
         if not t or len(n) < 2 or is_stale_year_keyword(n):
@@ -453,7 +575,11 @@ async def run_search_demand(
         if _is_competitor_brand(t):
             return
         if n not in seed_targets:
-            seed_targets[n] = {"target": t, "target_type": target_type}
+            entry: dict[str, Any] = {"target": t, "target_type": target_type}
+            for key, value in meta.items():
+                if value not in (None, ""):
+                    entry[key] = value
+            seed_targets[n] = entry
             seed_roots.append(t)
 
     # Skip template-generated variants as ROOTS (Ahrefs expansion regenerates them).
@@ -474,8 +600,17 @@ async def run_search_demand(
     for kw in cdd_keywords:
         _add_root(kw, "keyword")
     # 3) Every existing service / sub-service page (Phase 3 hierarchy)
-    for term in _page_target_seeds(website):
-        _add_root(term, "page")
+    for page_seed in _page_target_seeds(website):
+        term = str(page_seed.get("term") or "").strip()
+        ptype = str(page_seed.get("page_type") or "")
+        target_type = "sub_service" if ptype == "sub_service" else "page"
+        _add_root(
+            term,
+            target_type,
+            page_type=ptype,
+            page_path=page_seed.get("path"),
+            parent_segment=page_seed.get("parent_segment"),
+        )
     # 4) Remaining discovered seeds (website themes) — skip templated variants
     for s in seeds:
         if not _is_template_variant(s):
@@ -485,13 +620,68 @@ async def run_search_demand(
     seed_roots = sorted(
         seed_roots,
         key=lambda s: (
-            {"service": 0, "keyword": 1, "page": 2}.get(
-                seed_targets.get(s.lower(), {}).get("target_type", "keyword"), 3
+            {"service": 0, "sub_service": 1, "keyword": 2, "page": 3}.get(
+                seed_targets.get(s.lower(), {}).get("target_type", "keyword"), 4
             ),
             -len(s.split()),
             s.lower(),
         ),
     )
+
+    services, seed_targets = apply_service_selection(services, seed_targets, prioritization)
+    seed_roots = [r for r in seed_roots if r.lower() in seed_targets]
+
+    service_catalog = build_client_service_catalog(
+        services=services,
+        website=website,
+        page_seeds=_page_target_seeds(website),
+    )
+    trees = list(prioritization.get("competitor_trees") or [])
+    if not trees:
+        trees = await discover_competitor_service_trees(competitors)
+    if trees:
+        service_catalog = merge_competitor_subservices(
+            service_catalog,
+            competitor_tree=None,
+            competitor_trees=trees,
+            adopt_service_ids=list(
+                prioritization.get("adopt_competitor_service_ids") or []
+            ),
+        )
+    # Persist the exact selected hierarchy so Site Architecture does not have
+    # to rebuild CDD and competitor services through separate paths.
+    prioritization["service_catalog"] = service_catalog
+    seed_roots, seed_targets = expand_vertical_subservice_seeds(
+        seed_roots,
+        seed_targets,
+        prioritization=prioritization,
+        service_catalog=service_catalog,
+    )
+
+    from app.services.keyword_pool import resolve_client_pool_target, resolve_keyword_pool_limits
+
+    pool_target = resolve_client_pool_target(
+        commercial=commercial,
+        marketing=marketing,
+        settings=get_settings(),
+    )
+    pool_limits = resolve_keyword_pool_limits(
+        pool_target=pool_target,
+        seed_count=len(seed_roots),
+        settings=get_settings(),
+    )
+    events.append(
+        {
+            "type": "system_notice",
+            "content": (
+                f"Keyword pool target: {pool_target} "
+                f"(seeds≤{pool_limits['max_seeds']}, "
+                f"{pool_limits['limit_per_mode']}/mode, "
+                f"{pool_limits['keyword_relevance_max_per_seed']}/seed after relevance)."
+            ),
+        }
+    )
+
     relevance_ctx = build_relevance_context(
         services=services,
         cdd_keywords=cdd_keywords,
@@ -506,8 +696,8 @@ async def run_search_demand(
         seed_roots,
         country=country,
         min_volume=10,
-        max_seeds=30,
-        limit_per_mode=35,
+        max_seeds=pool_limits["max_seeds"],
+        limit_per_mode=pool_limits["limit_per_mode"],
         seed_targets=seed_targets,
         location_code=labs_location_code,
         relevance_context=relevance_ctx,
@@ -543,6 +733,8 @@ async def run_search_demand(
         services=services,
         geography=str(geo.get("geographic_focus") or geo.get("location_name") or "") or None,
         seed_targets=seed_targets,
+        max_per_seed=pool_limits["keyword_relevance_max_per_seed"],
+        max_input_per_seed=pool_limits["keyword_relevance_max_input_per_seed"],
     )
     _relevant_kw_set = {_norm_kw(r.get("keyword")) for r in keyword_dataset if r.get("keyword")}
     seed_clusters = filter_seed_clusters(seed_clusters, _relevant_kw_set)
@@ -572,6 +764,17 @@ async def run_search_demand(
             ),
         }
     )
+    if seeding.get("provider_fallback_used"):
+        events.append(
+            {
+                "type": "system_notice",
+                "content": (
+                    "Ahrefs Keywords Explorer / DataForSEO Labs are unavailable on this "
+                    "account (plan or billing). Coverage fallback supplied ≥20 keywords "
+                    "per service seed so the Phase 5 report stays usable."
+                ),
+            }
+        )
 
     if keyword_dataset or seed_clusters:
         if "ahrefs" not in providers_used:
@@ -768,17 +971,25 @@ async def run_search_demand(
         if isinstance(r, dict) and r.get("keyword")
     }
     if seed_kw_set:
-        merged = [r for r in merged if _norm_kw(r.get("keyword")) in seed_kw_set]
+        merged = [
+            r
+            for r in merged
+            if _norm_kw(r.get("keyword")) in seed_kw_set or r.get("gap_flag")
+        ]
         events.append(
             {
                 "type": "system_notice",
                 "content": (
                     f"Phase 5 seed pool filter: kept {len(merged)} of "
                     f"{merged_before_seed_filter} merged keywords "
-                    f"(Multi-mode seeding vol>{10})."
+                    f"(seed pool + competitor gap signals)."
                 ),
             }
         )
+
+    keyword_dataset = [stamp_keyword_intent(r) for r in keyword_dataset]
+    intent_bal = intent_balance(keyword_dataset)
+    intent_warnings = intent_balance_warnings(intent_bal["counts"])
 
     ranked = rank_opportunities(
         merged,
@@ -944,37 +1155,37 @@ async def run_search_demand(
     # Build the same service groups the Multi-mode UI shows, THEN pick topics
     # one-per-service so Topic Plan cannot drift to volume mega-heads.
     service_clusters = build_service_seed_clusters(seed_clusters, services)
+    service_clusters, subservice_competitor_matrix = enrich_service_clusters_with_competitors(
+        service_clusters,
+        ranked["all_scored"],
+        competitive_landscape=competitive,
+        competitors=competitors,
+    )
     topic_kw_pool = select_topics_from_service_clusters(
         service_clusters,
         products=products or services,
         limit=10,
         max_per_service=1,
     )
-    topic_plan = await run_create_topic(
-        seed=str(topic_seed),
-        message=message,
-        audience=audience,
-        best_opportunities=topic_kw_pool,
-        strong_evergreen=[],
-        keyword_pool=keyword_dataset,
-        competitor_domains=competitor_domains,
-        competitor_names=competitor_labels,
-        geographic_focus=str(geo.get("geographic_focus") or ""),
-        location_name=str(geo.get("location_name") or ""),
-        competitor_context=competitor_context_blob(competitors, competitor_sites, geo),
-        industry=client.industry,
-        products=products,
-        cdd_keywords=cdd_keywords,
-        pain_points=pain_points,
-    )
-    topic_plan["selection_mode"] = "service_round_robin"
-    topic_plan["selection_version"] = "phase5_service_intent_v2"
-    topic_plan["assigned_services"] = [
+    assigned_services = [
         str(r.get("service") or r.get("target") or r.get("seed") or "")
         for r in topic_kw_pool
     ]
+    topic_selection_context = {
+        "topic_seed": str(topic_seed),
+        "audience": audience,
+        "topic_kw_pool": topic_kw_pool,
+        "pain_points": pain_points,
+        "products": products,
+        "cdd_keywords": cdd_keywords,
+        "industry": client.industry,
+        "competitor_context": competitor_context_blob(competitors, competitor_sites, geo),
+        "selection_mode": "new_clusters_vs_sitemap",
+        "selection_version": "phase5_sitemap_then_topics_v1",
+        "assigned_services": assigned_services,
+    }
 
-    # Keyword Clustering — uses the multi-mode seeded keyword dataset directly
+    # Keyword Clustering — intent + funnel on every cluster before sitemap match
     cluster_input = list(keyword_dataset)
     seen_cluster = {str(r.get("keyword") or "").lower() for r in cluster_input}
     for ht in ranked.get("head_terms") or []:
@@ -992,90 +1203,65 @@ async def run_search_demand(
         relevance_context=relevance_ctx,
     )
     cluster_report["service_clusters"] = service_clusters
+    cluster_report["subservice_competitor_matrix"] = subservice_competitor_matrix
     cluster_report["services_clustered"] = len(service_clusters)
     cluster_report["seeds_clustered_by_service"] = sum(
         int(group.get("seed_count") or 0) for group in service_clusters
     )
+
+    try:
+        live_scan = await live_scan_task
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live_site_scan_failed", client_id=str(client.id), error=str(exc))
+        live_scan = {"pages": [], "page_count": 0, "source_counts": {}, "scanned_at": None}
+
+    # Sitemap FIRST inventory + live enrich → classify existing vs new topics
+    sm_pages = sitemap_pages(website)
+    sitemap_classification = classify_clusters_against_sitemap(
+        list(cluster_report.get("clusters") or []),
+        sitemap_pages=sm_pages,
+        live_pages=list(live_scan.get("pages") or []),
+        # A capped inventory means "no page covers this" was only checked
+        # against part of the site — the new-topic calls get flagged, not trusted.
+        inventory_complete=not sitemap_is_truncated(website),
+    )
+    cluster_report["sitemap_classification"] = sitemap_classification
+
     clusters = clusters_for_cdp(cluster_report)
 
-    # Link topic ideas to clusters + live metrics from the seeded dataset first
-    metrics_by_kw = {
-        str(r.get("keyword") or "").strip().lower(): r
-        for r in keyword_dataset
-        if r.get("keyword")
+    # Draft topics only for clusters that do not already exist on the sitemap
+    topic_plan = await run_create_topic_for_new_clusters(
+        message=message,
+        industry=client.industry,
+        audience=audience,
+        topic_seed=str(topic_seed),
+        topic_kw_pool=topic_kw_pool,
+        keyword_dataset=keyword_dataset,
+        clusters=list(cluster_report.get("clusters") or []),
+        competitor_domains=competitor_domains,
+        competitor_names=competitor_labels,
+        geographic_focus=str(geo.get("geographic_focus") or ""),
+        location_name=str(geo.get("location_name") or ""),
+        competitor_context=competitor_context_blob(competitors, competitor_sites, geo),
+        products=products,
+        cdd_keywords=cdd_keywords,
+        pain_points=pain_points,
+        serp_by_kw=serp_by_kw,
+    )
+    topic_plan["sitemap_classification"] = {
+        "existing_topic_count": sitemap_classification.get("existing_topic_count"),
+        "existing_review_count": sitemap_classification.get("existing_review_count"),
+        "new_topic_count": sitemap_classification.get("new_topic_count"),
+        "pages_used": sitemap_classification.get("pages_used"),
     }
-    for r in ranked["all_scored"]:
-        key = str(r.get("keyword") or "").strip().lower()
-        if key and key not in metrics_by_kw:
-            metrics_by_kw[key] = r
-    seed_kw_keys = set(metrics_by_kw)
-    grounded_ideas: list[dict[str, Any]] = []
-    for idea in topic_plan.get("topic_ideas") or []:
-        if not isinstance(idea, dict):
-            continue
-        mk = str(
-            idea.get("primary_keyword") or idea.get("keyword") or ""
-        ).strip().lower()
-        if mk not in seed_kw_keys:
-            continue
-        met = metrics_by_kw.get(mk) or {}
-        if idea.get("volume") is None and met.get("volume") is not None:
-            idea["volume"] = met.get("volume")
-        if idea.get("difficulty") in (None, "", "—") and met.get("difficulty") is not None:
-            idea["difficulty"] = met.get("difficulty")
-        if not idea.get("intent") and met.get("intent"):
-            idea["intent"] = met.get("intent")
-        if met.get("cpc") is not None:
-            idea["cpc"] = met.get("cpc")
-        if met.get("competitor_domains"):
-            idea["competitor_domains"] = met.get("competitor_domains")
-        if met.get("serp_titles"):
-            idea["serp_titles"] = met.get("serp_titles")
-        elif mk in serp_by_kw:
-            idea["serp_titles"] = serp_by_kw[mk]
-        # Secondaries must stay in the same seed/target family as the primary
-        primary_seed = _norm_kw(met.get("seed") or idea.get("seed"))
-        primary_target = _norm_kw(met.get("target") or idea.get("target"))
-        secondary = []
-        for s in idea.get("secondary_keywords") or idea.get("supporting_keywords") or []:
-            text = str(s).strip()
-            key = text.lower()
-            if not text or key == mk or key not in seed_kw_keys:
-                continue
-            other = metrics_by_kw.get(key) or {}
-            same_family = (
-                (primary_seed and _norm_kw(other.get("seed")) == primary_seed)
-                or (primary_target and _norm_kw(other.get("target")) == primary_target)
-            )
-            if same_family:
-                secondary.append(text)
-        if len(secondary) < 3:
-            from app.services.create_topic import _secondary_keywords_for
-
-            secondary = _secondary_keywords_for(
-                str(idea.get("primary_keyword") or idea.get("keyword") or ""),
-                pool=keyword_dataset,
-            )
-        idea["secondary_keywords"] = secondary[:8]
-        idea["supporting_keywords"] = secondary[:8]
-        if met.get("match_class") and not idea.get("match_class"):
-            idea["match_class"] = met.get("match_class")
-        if met.get("seed") and not idea.get("seed"):
-            idea["seed"] = met.get("seed")
-        if met.get("target") and not idea.get("target"):
-            idea["target"] = met.get("target")
-        # Intent/funnel already shaped from keyword — don't let clusters overwrite intent
-        for c in clusters:
-            if mk == str(c.get("primary_keyword") or "").strip().lower():
-                idea["cluster"] = c.get("name")
-                break
-        grounded_ideas.append(idea)
-    topic_plan["topic_ideas"] = grounded_ideas
-    topic_plan["keyword_source"] = "multi_mode_seeding"
 
     topics = topics_from_plan(topic_plan)
     if not topics:
-        topics = build_topics(clusters, keyword_dataset)
+        topics = build_topics(
+            [c for c in clusters if isinstance(c, dict) and c.get("topic_disposition") == "new_topic"]
+            or clusters,
+            keyword_dataset,
+        )
 
     def _detail_row(r: dict[str, Any]) -> dict[str, Any]:
         kw = str(r.get("keyword") or "")
@@ -1139,6 +1325,8 @@ async def run_search_demand(
         "cdd_keywords": cdd_keywords,
         "products": products,
         "services": services,
+        "service_catalog": service_catalog,
+        "service_prioritization": prioritization,
         "country": country,
         "geographic_focus": geo.get("geographic_focus") or "",
         "location_code": location_code,
@@ -1153,10 +1341,14 @@ async def run_search_demand(
         "competitor_names": competitor_labels,
         "competitor_sites": competitor_sites,
         "competitor_title_seeds": competitor_title_seeds[:10],
+        "subservice_competitor_matrix": subservice_competitor_matrix,
         "topic_plan": topic_plan,
+        "topic_selection_context": topic_selection_context,
+        "sitemap_classification": sitemap_classification,
         "topics": topics,
         "cluster_report": cluster_report,
         "clusters": clusters,
+        "live_site_scan": live_scan,
         "keyword_seeding": {
             "min_volume": seeding.get("min_volume", 10),
             "class_counts": seeding.get("class_counts") or {},
@@ -1171,6 +1363,10 @@ async def run_search_demand(
         "keyword_cleaning": keyword_cleaning,
         "relevance_audit": relevance_audit,
         "relevance_dropped_count": len(relevance_dropped),
+        "intent_balance": {
+            **intent_bal,
+            "warnings": intent_warnings,
+        },
         "seed_clusters": seed_clusters,
         "keyword_dataset": keyword_dataset[:500],
         "best_opportunities": [_detail_row(r) for r in ranked["best_opportunities"][:12]],
@@ -1180,15 +1376,24 @@ async def run_search_demand(
         "avoid": [_detail_row(r) for r in ranked["avoid"][:10]],
         "keyword_table": keyword_table,
         "keyword_count": len(merged),
-        "skills_used": ["create_topic", "keyword_clustering", "keyword_seeding"],
+        "keyword_pool_target": pool_target,
+        "keyword_pool_limits": pool_limits,
+        "keyword_pool_actual": len(keyword_dataset),
+        "skills_used": ["keyword_clustering", "keyword_seeding", "create_topic"],
         "note": (
-            "Multi-mode seeding (exact / phrase / related / broad, volume > 10) then "
-            "opportunity scoring. Prioritized specific service/CDD keywords with "
-            "manageable KD and competitor-gap topics. Past years demoted; "
+            "Sitemap inventory first, then multi-mode seeding, clustering with "
+            "intent/funnel, classify clusters against the sitemap (existing vs new), "
+            "and draft topics only for new clusters. URL mapping runs next in Phase 6. "
+            "Past years demoted; "
             f"present year preferred. "
             "Generic head terms kept in clusters. "
             f"Competitors locked to shared-memory set ({len(competitors)}). "
             f"Geo locked to {geo.get('location_name')}."
+            + (
+                f" Sitemap classify: {sitemap_classification.get('existing_topic_count', 0)} existing, "
+                f"{sitemap_classification.get('existing_review_count', 0)} review, "
+                f"{sitemap_classification.get('new_topic_count', 0)} new."
+            )
             + (
                 f" Cleaned to CDD/services/pages: kept {keyword_cleaning.get('kept_count')} "
                 f"of {keyword_cleaning.get('input_count')} "
@@ -1203,8 +1408,16 @@ async def run_search_demand(
         serp_by_keyword=serp_for_intent,
     )
     from app.services.bw_workbook import attach_workbook_to_search_demand
+    from app.services.json_safe import json_safe
 
     summary = attach_workbook_to_search_demand(summary)
+    summary = json_safe(summary)
+
+    if is_prioritization_confirmed(prioritization):
+        if not prioritization.get("competitor_trees"):
+            prioritization["competitor_trees"] = await discover_competitor_service_trees(competitors)
+        commercial["service_prioritization"] = prioritization
+        profile.commercial_scope = commercial
 
     profile.search_demand_summary = summary
     profile.search_demand_status = "pending_signoff"

@@ -100,16 +100,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const permissions = user?.permissions || [];
 
+  const isHod = user?.role_name === "head_of_department";
+
   const canTrigger = useCallback(
     (agentKey: string) =>
-      permissions.some((p) => p.agent_key === agentKey && p.can_trigger),
-    [permissions]
+      isHod || permissions.some((p) => p.agent_key === agentKey && p.can_trigger),
+    [permissions, isHod]
   );
 
   const canApprove = useCallback(
     (agentKey: string) =>
-      permissions.some((p) => p.agent_key === agentKey && p.can_approve),
-    [permissions]
+      isHod || permissions.some((p) => p.agent_key === agentKey && p.can_approve),
+    [permissions, isHod]
   );
 
   const value = useMemo(

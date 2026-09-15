@@ -14,7 +14,13 @@ from app.agents.publishing import resolve_mode
 from app.config import clear_settings_cache, get_settings
 from app.integrations import wordpress
 from app.integrations.wordpress import WordPressConnection
-from app.services.publish_preview import build_content_html, build_page_preview
+from app.services.publish_preview import (
+    build_content_html,
+    build_draft_site_preview,
+    build_page_preview,
+    draft_body_markdown,
+    markdown_to_content_html,
+)
 from app.services.publishing import (
     MODE_DRAFT,
     MODE_PREVIEW,
@@ -36,6 +42,38 @@ PAGE = {
     "schema_json_ld": {"@type": "Article", "headline": "Local SEO Pricing"},
 }
 ON_PAGE = {"pages": [PAGE]}
+
+# A written Phase 10 draft for the same URL. Long enough to clear the content-length
+# gate and free of placeholder markers, so it represents a publishable article.
+DRAFT_BODY = (
+    "Local SEO pricing in Australia usually lands between a few hundred and several "
+    "thousand dollars a month, and the spread comes down to how much of the work is "
+    "done for you. This guide breaks the pricing down by scope so you can tell which "
+    "band you actually need before you start calling agencies for quotes.\n\n"
+    "## What local SEO costs\n\n"
+    "Most agencies price on retainer. A single-location business with a tidy site "
+    "usually sits at the lower end, while multi-location businesses pay more because "
+    "each location needs its own landing page, citations and review pipeline. Ask what "
+    "is included before comparing two numbers that look similar.\n\n"
+    "## What affects price\n\n"
+    "- Number of locations you need to rank\n"
+    "- How competitive your category is locally\n"
+    "- Whether content production is included\n\n"
+    "See our [pricing page](/pricing) for the current bands."
+)
+PRODUCTION_WITH_DRAFT = {
+    "drafts": [
+        {
+            "url": "https://example.com/blog/local-seo-pricing",
+            "title": "Local SEO Pricing | Acme",
+            "meta_description": "What local SEO costs.",
+            "keyword": "local seo pricing",
+            "markdown": DRAFT_BODY,
+            "images": [],
+        }
+    ],
+    "briefs": [],
+}
 BRAND_OK = {
     "available": True,
     "name": "Acme",
@@ -250,15 +288,38 @@ def test_write_path_uses_the_passed_in_connection_not_global_settings(monkeypatc
 
     async def _upsert(conn, **kwargs):
         seen_conns.append(conn)
-        return {"ok": True, "action": "created", "post_id": 1, "status": "draft", "slug": kwargs["slug"]}
+        return {
+            "ok": True,
+            "action": "created",
+            "post_id": 1,
+            "post_type": kwargs.get("post_type", "posts"),
+            "status": "draft",
+            "slug": kwargs["slug"],
+        }
 
-    async def _fetch(conn, post_id):
+    async def _fetch(conn, object_id, *, post_type="posts"):
         seen_conns.append(conn)
-        return {"id": post_id, "status": "draft", "title": {"raw": "Local SEO Pricing | Acme"}}
+        return {
+            "id": object_id,
+            "status": "draft",
+            "slug": "local-seo-pricing",
+            "title": {"raw": "Local SEO Pricing | Acme"},
+            "content": {"raw": "<p>body</p>"},
+        }
+
+    async def _find_anywhere(conn, slug):
+        seen_conns.append(conn)
+        return None, None
+
+    async def _caps(conn):
+        seen_conns.append(conn)
+        return {"elementor_active": False, "seo_plugin": None}
 
     monkeypatch.setattr(wordpress, "verify_connection", _verify)
-    monkeypatch.setattr(wordpress, "upsert_post", _upsert)
-    monkeypatch.setattr(wordpress, "fetch_post", _fetch)
+    monkeypatch.setattr(wordpress, "upsert_object", _upsert)
+    monkeypatch.setattr(wordpress, "fetch_object", _fetch)
+    monkeypatch.setattr(wordpress, "find_object_anywhere", _find_anywhere)
+    monkeypatch.setattr(wordpress, "detect_site_capabilities", _caps)
 
     other_conn = WordPressConnection(
         base_url="https://a-different-client.example", username="x", app_password="y"
@@ -269,11 +330,15 @@ def test_write_path_uses_the_passed_in_connection_not_global_settings(monkeypatc
             primary_url="https://example.com",
             on_page_seo_status="complete",
             on_page_seo=ON_PAGE,
+            content_production=PRODUCTION_WITH_DRAFT,
             mode=MODE_DRAFT,
             wordpress_connection=other_conn,
         )
     )
+    # The write path itself must have run, not just the connection check.
+    assert any(c is other_conn for c in seen_conns)
     assert seen_conns and all(c is other_conn for c in seen_conns)
+    assert len(seen_conns) >= 4  # verify + capabilities + slug lookup + write + re-read
 
 
 # --- slugs / idempotency ----------------------------------------------------------------
@@ -347,3 +412,101 @@ def test_preview_marks_itself_as_a_dry_run():
         layout=None, target_status="draft", slug="s",
     )
     assert "DRY-RUN PREVIEW" in preview["preview_html"]
+
+
+def test_draft_body_markdown_strips_editorial_sections():
+    md = """# Title
+
+## Review queue — resolve before publishing
+- [ ] Named reviewer
+
+## Draft metadata
+- **URL**: /foo
+
+---
+
+# Title
+
+## Real section
+Body copy here.
+"""
+    body = draft_body_markdown(md)
+    assert "Review queue" not in body
+    assert "Draft metadata" not in body
+    assert "Real section" in body
+    assert "Body copy here" in body
+
+
+def test_markdown_to_content_html_escapes_and_structures():
+    html_out = markdown_to_content_html("## Hello\n\nPara **bold**.\n\n- one\n- two")
+    assert "<h2>Hello</h2>" in html_out
+    assert "<p>Para **bold**.</p>" in html_out
+    assert "<ul>" in html_out
+    assert "<li>one</li>" in html_out
+
+
+def test_markdown_to_content_html_renders_figure_placeholders_and_images():
+    md = (
+        "# Title\n\n"
+        "[FIGURE hero] Hero prompt for loans\n\n"
+        "## Section\n\n"
+        "[FIGURE supporting] Supporting diagram\n"
+    )
+    html_out = markdown_to_content_html(
+        md,
+        images=[
+            {"role": "hero", "status": "failed", "prompt": "Hero prompt for loans"},
+            {
+                "role": "supporting",
+                "src": "/media/drafts/demo.png",
+                "status": "ready",
+                "prompt": "Supporting diagram",
+            },
+        ],
+        media_base="http://localhost:5173",
+    )
+    assert "Image generation failed" in html_out
+    assert 'src="http://localhost:5173/media/drafts/demo.png"' in html_out
+    assert "draft-figure-placeholder" in html_out
+
+
+def test_display_meta_strips_stringified_audience_dict():
+    from app.services.publish_preview import _display_meta
+
+    ugly = (
+        "Website Conversion Optimisation for {'primary': {'gender': 'M & F', "
+        "'age_range': '32–50', 'job_titles': ['Founder']}}"
+    )
+    assert _display_meta(ugly) == "Website Conversion Optimisation"
+    assert "Founder" in _display_meta({"primary": {"job_titles": ["Founder"], "age_range": "32-50"}})
+    assert "32" in _display_meta({"primary": {"job_titles": ["Founder"], "age_range": "32-50"}})
+
+
+@pytest.mark.asyncio
+async def test_build_draft_site_preview_uses_client_brand(monkeypatch):
+    draft = {
+        "title": "SEO Services",
+        "url": "/seo-services/",
+        "meta_description": "Professional SEO help.",
+        "markdown": "---\n\n# SEO Services\n\n## Why it matters\n\nWe help you grow.",
+    }
+
+    async def fake_brand(_url):
+        return BRAND_OK
+
+    async def fake_scrape(_url):
+        return {"available": True, "url": "https://acme.example/", "markdown": "# Home\n\n## Services"}
+
+    monkeypatch.setattr("app.integrations.brandfetch.fetch_brand", fake_brand)
+    monkeypatch.setattr("app.integrations.firecrawl.scrape_page", fake_scrape)
+
+    out = await build_draft_site_preview(
+        client_name="Acme",
+        primary_url="https://acme.example",
+        draft=draft,
+        site_architecture={},
+    )
+    assert out["preview_html"].startswith("<!doctype html>")
+    assert "SITE PREVIEW" in out["preview_html"]
+    assert "Why it matters" in out["preview_html"]
+    assert out["brand_applied"] is True

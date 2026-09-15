@@ -17,6 +17,8 @@ Research and generate topic ideas based on: **$ARGUMENTS.seed**
 
 Ground every idea in live keyword metrics (Ahrefs / DataForSEO), competitor gaps, client services from the CDD, and business fit when provided in context. Never invent search volume numbers — cite metrics from context or leave volume unknown.
 
+**When this runs**: After keyword clustering and sitemap classification. Draft topics only for clusters marked `new_topic` (no strong match on the client sitemap). Existing matches are listed for optimize/review — do not invent duplicate topics for them.
+
 **Freshness**: Do not propose outdated year topics (e.g. "… 2024"). Prefer the **present calendar year** in trend/annual titles when a year is needed.
 
 **Competitor gaps**: Prefer topics where listed competitors rank and the client does not cover the topic yet.

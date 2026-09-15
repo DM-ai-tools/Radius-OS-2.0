@@ -1,8 +1,6 @@
 """Content pipeline — cluster validation through title selection."""
 
 from app.services.content_pipeline import (
-    identify_primary_keyword,
-    identify_secondary_keywords,
     run_cluster_page_pipeline,
     run_clusters_page_pipeline,
 )

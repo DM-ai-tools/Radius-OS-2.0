@@ -52,3 +52,19 @@ def test_thin_discovery_seed_triggers_supplement_threshold():
     merged = _merge_competitor_candidates(seeds, discovered)
     assert len(merged) == 11
     assert len([c for c in merged if c["source"] == "discovery_override"]) == 3
+
+
+def test_prior_scan_sources_are_carried_not_only_manual():
+    """Refresh must keep discovery_override / prior_scan peers, not only manual."""
+    seeds = [
+        {"name": "King Kong", "url": "https://kingkong.co/", "source": "discovery_override"},
+        {"name": "WebFX", "url": "https://www.webfx.com/", "source": "discovery_override"},
+        {"name": "Manual Peer", "url": "https://manual.example.com.au", "source": "manual"},
+    ]
+    # Filter placeholders the same way run_competitor does.
+    carried = [s for s in seeds if not _is_placeholder_competitor(s)]
+    # manual.example.com.au contains 'example' → placeholder; keep the two real ones
+    assert len(carried) == 2
+    merged = _merge_competitor_candidates(carried, [])
+    assert len(merged) == 2
+    assert {c["name"] for c in merged} == {"King Kong", "WebFX"}

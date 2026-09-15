@@ -327,15 +327,42 @@ def test_select_topics_from_service_clusters_one_per_service():
                 }
             ],
         },
+        {
+            "service": "AEO & GEO Services (AI/answer engine optimization)",
+            "seeds": [
+                {
+                    "seed": "AEO",
+                    "target": "AEO & GEO Services (AI/answer engine optimization)",
+                    "keywords": [
+                        {
+                            "keyword": "aeo stock price",
+                            "match_class": "related",
+                            "intent": "transactional",
+                            "volume": 720,
+                        },
+                        {
+                            "keyword": "answer engine optimization agency",
+                            "match_class": "related",
+                            "intent": "commercial",
+                            "volume": 90,
+                        },
+                    ],
+                }
+            ],
+        },
     ]
     picked = select_topics_from_service_clusters(
-        clusters, products=["Meta Ads", "Email Marketing", "AI-Powered SEO"], limit=10
+        clusters,
+        products=["Meta Ads", "Email Marketing", "AI-Powered SEO", "AEO & GEO Services"],
+        limit=10,
     )
     kws = [str(r["keyword"]).lower() for r in picked]
     services = [str(r.get("service")) for r in picked]
     assert "instagram" not in kws
+    assert "aeo stock price" not in kws
     assert "meta business suite" in kws
     assert "email deliverability checklist" in kws
+    assert "answer engine optimization agency" in kws
     assert len(services) == len(set(services))
     # Near-duplicate best seo tool/tools should not both appear
     assert sum(1 for k in kws if "best seo tool" in k) <= 1
@@ -359,3 +386,36 @@ def test_filter_seed_clusters_keeps_only_allowed_keywords():
     kws = {str(r["keyword"]).lower() for r in flat}
     assert kws == {"seo agency", "seo for agencies"}
     assert "zoho crm" not in kws
+
+
+def test_attach_url_map_to_topic_plan_stamps_actions():
+    from app.services.create_topic import attach_url_map_to_topic_plan
+
+    plan = {
+        "topic_ideas": [
+            {"primary_keyword": "seo services", "title": "SEO Services Guide"},
+            {"primary_keyword": "local seo", "title": "Local SEO"},
+        ]
+    }
+    report = {
+        "final_url_map": [
+            {
+                "primary_keyword": "seo services",
+                "action": "OPTIMIZE_EXISTING",
+                "final_url": "/services/seo",
+            },
+            {
+                "primary_keyword": "local seo",
+                "action": "CREATE",
+                "final_url": "/blog/local-seo",
+            },
+        ],
+        "summary": {"optimize_existing": 1, "create": 1},
+    }
+    out = attach_url_map_to_topic_plan(plan, report)
+    by_kw = {i["primary_keyword"]: i for i in out["topic_ideas"]}
+    assert by_kw["seo services"]["url_map_action"] == "OPTIMIZE_EXISTING"
+    assert by_kw["seo services"]["selected_url"] == "/services/seo"
+    assert by_kw["local seo"]["url_map_action"] == "CREATE"
+    assert out["created_after_url_map"] is True
+    assert out["deferred"] is False

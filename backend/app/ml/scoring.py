@@ -73,14 +73,33 @@ def cluster_competitors(items: list[dict[str, str]]) -> dict[str, str]:
 
 
 def tracking_anomaly_flags(event_counts: list[int] | None = None) -> list[str]:
-    """IsolationForest-style advisory flags."""
+    """Advisory anomaly flags from a daily event-count series.
+
+    Requires a real event-count series. Without one, this raises no flags
+    (no fabricated anomalies) unless running in mock-provider mode, where a
+    deterministic demo spike is used — mirroring detect_traffic_anomalies().
+
+    Uses a median/MAD modified z-score (Iglewicz & Hoaglin) rather than
+    mean/std: with the small samples this runs on (a week of daily counts),
+    a single-point outlier included in a mean/std calculation inflates its
+    own threshold enough to mask itself — a plain std-based check can never
+    fire here regardless of how extreme the outlier is.
+    """
+    from app.config import get_settings
+
     if event_counts is None:
-        event_counts = [100, 105, 98, 102, 400, 99, 101]  # spike
+        if not get_settings().use_mock_providers:
+            return []
+        event_counts = [100, 105, 98, 102, 400, 99, 101]  # mock-mode demo spike
+    if len(event_counts) < 2:
+        return []
     arr = np.asarray(event_counts, dtype=float)
-    mean, std = arr.mean(), arr.std() or 1
+    median = np.median(arr)
+    mad = np.median(np.abs(arr - median)) or 1.0
+    modified_z = 0.6745 * (arr - median) / mad
     flags = []
-    if (arr > mean + 3 * std).any():
+    if (modified_z > 3.5).any():
         flags.append("Suspicious traffic spike — possible bot inflation")
-    if (arr < mean - 3 * std).any():
+    if (modified_z < -3.5).any():
         flags.append("Sudden drop in event volume — possible broken tag")
     return flags

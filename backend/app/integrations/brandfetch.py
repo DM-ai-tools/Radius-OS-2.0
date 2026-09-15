@@ -68,6 +68,10 @@ def _pick_logo(logos: Any) -> dict[str, Any]:
                     best = fmt
         if not best:
             continue
+        src = str(best.get("src") or "")
+        # Never use Brandfetch's own product marks as the client logo.
+        if "brandfetch" in src.lower():
+            continue
         score = 0
         if kind == "logo":
             score += 2

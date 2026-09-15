@@ -79,7 +79,83 @@ async def ensure_phase56_columns() -> None:
             pass
 
     await ensure_phase712_columns()
+    await ensure_client_memory_retention_columns()
     await ensure_operations_tables()
+    await ensure_hot_path_indexes()
+
+
+async def ensure_client_memory_retention_columns() -> None:
+    """Add onboarding/archive columns used by client-memory retention."""
+    from sqlalchemy import text
+
+    async with engine.begin() as conn:
+        dialect = conn.dialect.name
+        bool_true = "TRUE" if dialect == "postgresql" else "1"
+        bool_false = "FALSE" if dialect == "postgresql" else "0"
+        statements = [
+            (
+                "ALTER TABLE clients ADD COLUMN IF NOT EXISTS "
+                f"is_onboarding BOOLEAN DEFAULT {bool_true}"
+            ),
+            (
+                "ALTER TABLE client_digital_profiles ADD COLUMN IF NOT EXISTS "
+                f"is_onboarding BOOLEAN DEFAULT {bool_true}"
+            ),
+            (
+                "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS "
+                f"is_onboarding BOOLEAN DEFAULT {bool_false}"
+            ),
+            "ALTER TABLE client_digital_profiles ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITH TIME ZONE",
+            "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITH TIME ZONE",
+            "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITH TIME ZONE",
+            "ALTER TABLE agent_jobs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP WITH TIME ZONE",
+        ]
+        for stmt in statements:
+            sql = stmt
+            if dialect == "sqlite":
+                sql = (
+                    sql.replace(" IF NOT EXISTS", "")
+                    .replace(" BOOLEAN", " INTEGER")
+                    .replace(" TIMESTAMP WITH TIME ZONE", "")
+                )
+            try:
+                await conn.execute(text(sql))
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            await conn.execute(
+                text(
+                    "UPDATE clients SET is_onboarding = "
+                    "CASE WHEN LOWER(status) = 'onboarding' THEN true ELSE false END "
+                    "WHERE is_onboarding IS NULL OR is_onboarding = true"
+                )
+                if dialect == "postgresql"
+                else text(
+                    "UPDATE clients SET is_onboarding = "
+                    "CASE WHEN LOWER(status) = 'onboarding' THEN 1 ELSE 0 END"
+                )
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        for name, table, column in (
+            ("ix_clients_is_onboarding", "clients", "is_onboarding"),
+            (
+                "ix_client_digital_profiles_is_onboarding",
+                "client_digital_profiles",
+                "is_onboarding",
+            ),
+            ("ix_chat_sessions_is_onboarding", "chat_sessions", "is_onboarding"),
+            ("ix_client_digital_profiles_archived_at", "client_digital_profiles", "archived_at"),
+            ("ix_chat_sessions_archived_at", "chat_sessions", "archived_at"),
+            ("ix_chat_messages_archived_at", "chat_messages", "archived_at"),
+            ("ix_agent_jobs_archived_at", "agent_jobs", "archived_at"),
+        ):
+            try:
+                await conn.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})")
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 async def ensure_operations_tables() -> None:
@@ -163,6 +239,39 @@ async def ensure_phase712_columns() -> None:
                 sql = sql.replace(" IF NOT EXISTS", "").replace(" JSON", " TEXT")
             try:
                 await conn.execute(text(sql))
+            except Exception:  # noqa: BLE001
+                pass
+
+
+async def ensure_hot_path_indexes() -> None:
+    """Add indexes on FK columns filtered in hot read paths (readiness, chat,
+    review) that predate this fix — create_all() only creates missing
+    tables, it never adds an index to a table that already exists."""
+    from sqlalchemy import text
+
+    indexes = [
+        ("ix_discovery_responses_client_id", "discovery_responses", "client_id"),
+        ("ix_tracking_audits_client_id", "tracking_audits", "client_id"),
+        ("ix_website_audits_client_id", "website_audits", "client_id"),
+        ("ix_competitor_profiles_client_id", "competitor_profiles", "client_id"),
+        ("ix_backlink_snapshots_client_id", "backlink_snapshots", "client_id"),
+        (
+            "ix_backlink_snapshots_competitor_profile_id",
+            "backlink_snapshots",
+            "competitor_profile_id",
+        ),
+        ("ix_chat_sessions_client_id", "chat_sessions", "client_id"),
+        ("ix_chat_sessions_user_id", "chat_sessions", "user_id"),
+        ("ix_agent_jobs_session_id", "agent_jobs", "session_id"),
+        ("ix_api_credentials_client_id", "api_credentials", "client_id"),
+        ("ix_readiness_scores_client_id", "readiness_scores", "client_id"),
+    ]
+    async with engine.begin() as conn:
+        for name, table, column in indexes:
+            try:
+                await conn.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({column})")
+                )
             except Exception:  # noqa: BLE001
                 pass
 

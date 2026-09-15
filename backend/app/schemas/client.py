@@ -1,14 +1,68 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
+
+
+PageType = Literal[
+    "home",
+    "hub",
+    "spoke",
+    "service",
+    "subservice",
+    "sub_service",
+    "service_hub",
+    "comparison",
+    "blog",
+    "utility",
+    "article",
+    "pillar",
+    "cluster",
+    "supporting",
+    "product",
+    "location",
+    "commercial",
+    "landing",
+    "faq",
+    "guide",
+    "listicle",
+    "tool",
+    "page",
+    "planned",
+]
+
+
+class TargetUrlNode(BaseModel):
+    """Public IA-node contract; parent is the logical hierarchy edge."""
+
+    url: str
+    path: str | None = None
+    parent: str = "/"
+    depth: int
+    page_type: PageType | None = None
+    type: PageType | None = None
+    service_id: str | None = None
+    subservice_id: str | None = None
+    supports_service_id: str | None = None
+    supports_subservice_id: str | None = None
+
+    model_config = {"extra": "allow"}
+
+
+class SiteArchitectureSummary(BaseModel):
+    target_url_tree: list[TargetUrlNode] = []
+    page_type_model: list[dict] = []
+
+    model_config = {"extra": "allow"}
 
 
 class ClientCreate(BaseModel):
     name: str
     primary_url: str
     industry: str | None = None
+    is_onboarding: bool = True
     # Optional early intake — stored on profile and used to pre-fill discovery
     primary_contact_name: str | None = None
     primary_contact_email: str | None = None
@@ -30,6 +84,7 @@ class ClientUpdate(BaseModel):
     primary_url: str | None = None
     industry: str | None = None
     status: str | None = None
+    is_onboarding: bool | None = None
     primary_contact_name: str | None = None
     primary_contact_email: str | None = None
     primary_contact_phone: str | None = None
@@ -78,6 +133,7 @@ class ClientOut(BaseModel):
     primary_url: str
     industry: str | None
     status: str
+    is_onboarding: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -91,6 +147,7 @@ def client_out(client) -> ClientOut:
         primary_url=client.primary_url,
         industry=client.industry,
         status=client.status,
+        is_onboarding=client.is_onboarding,
         created_at=client.created_at,
     )
 
@@ -105,13 +162,14 @@ class ProfileOut(BaseModel):
     competitive_landscape_summary: dict | None
     search_demand_summary: dict | None = None
     seo_strategy_summary: dict | None = None
-    site_architecture_summary: dict | None = None
+    site_architecture_summary: SiteArchitectureSummary | None = None
     technical_seo_summary: dict | None = None
     content_audit_summary: dict | None = None
     content_planning_summary: dict | None = None
     content_production_summary: dict | None = None
     on_page_seo_summary: dict | None = None
     publishing_summary: dict | None = None
+    is_onboarding: bool
     discovery_status: str
     tracking_status: str
     website_status: str
@@ -128,6 +186,7 @@ class ProfileOut(BaseModel):
     overall_readiness_score: Decimal | None
     ready_for_phase5: bool
     updated_at: datetime
+    archived_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 

@@ -7,7 +7,7 @@ import pytest
 from app.services.content_brief import generate_briefs
 from app.services.content_planning import build_roadmap, ia_gate_ok, run_content_planning_plan
 from app.services.content_production import planning_gate_ok
-from app.services.create_topic import funnel_balance, funnel_balance_warnings, funnel_from_intent
+from app.services.create_topic import funnel_balance_warnings, funnel_from_intent
 from app.services.on_page_seo import production_gate_ok, selected_on_page_rows
 from app.services.publishing import on_page_gate_ok
 from app.services.technical_seo import _ia_notes

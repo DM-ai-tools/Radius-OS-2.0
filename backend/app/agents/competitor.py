@@ -178,9 +178,9 @@ async def run_competitor(
         w in message.lower()
         for w in ("refresh", "re-run", "rerun", "re scan", "rescan", "new scan")
     )
-    cached = cache_get(cache_key)
+    cached = await cache_get(cache_key)
     if cached and _cache_looks_placeholder(cached):
-        cache_delete(cache_key)
+        await cache_delete(cache_key)
         cached = None
         events.append(
             {
@@ -190,24 +190,67 @@ async def run_competitor(
         )
 
     if cached and not force_refresh:
-        events.append(
-            {
-                "type": "system_notice",
-                "content": "Reusing cached tiered competitor analysis (Redis, 14-day window).",
-            }
-        )
-        events.append(
-            {
-                "type": "agent_message",
-                "agent_key": "competitor_market_agent",
-                "content": "Loaded cached competitive intelligence. Say 'refresh competitor scan' to re-run.",
-            }
-        )
-        events.append({"type": "structured_card", "payload": cached})
-        events.append({"type": "checkpoint", "payload": cached})
-        profile.competitor_status = "pending_signoff"
-        _publish_draft_landscape(profile, cached)
-        return events
+        # Redis can outlive a DB clear (profiles + findings wiped). A hollow
+        # cache hit would set pending_signoff with nothing to approve.
+        existing_profiles = (
+            await db.execute(
+                select(CompetitorProfile).where(CompetitorProfile.client_id == client.id)
+            )
+        ).scalars().all()
+        if not existing_profiles:
+            await cache_delete(cache_key)
+            cached = None
+            events.append(
+                {
+                    "type": "system_notice",
+                    "content": (
+                        "Cached competitor landscape had no DB profiles "
+                        "(cleared or never persisted) — running a fresh scan…"
+                    ),
+                }
+            )
+        else:
+            pending = (
+                await db.execute(
+                    select(FindingsLedger).where(
+                        FindingsLedger.client_id == client.id,
+                        FindingsLedger.agent_key == "competitor_market_agent",
+                        FindingsLedger.status == "pending",
+                    )
+                )
+            ).scalars().all()
+            if not pending:
+                for cp in existing_profiles:
+                    db.add(
+                        FindingsLedger(
+                            client_id=client.id,
+                            agent_key="competitor_market_agent",
+                            source_table="competitor_profiles",
+                            source_id=cp.id,
+                            confidence="medium",
+                            status="pending",
+                            created_by=user_id,
+                        )
+                    )
+                await db.flush()
+            events.append(
+                {
+                    "type": "system_notice",
+                    "content": "Reusing cached tiered competitor analysis (Redis, 14-day window).",
+                }
+            )
+            events.append(
+                {
+                    "type": "agent_message",
+                    "agent_key": "competitor_market_agent",
+                    "content": "Loaded cached competitive intelligence. Say 'refresh competitor scan' to re-run.",
+                }
+            )
+            events.append({"type": "structured_card", "payload": cached})
+            events.append({"type": "checkpoint", "payload": cached})
+            profile.competitor_status = "pending_signoff"
+            _publish_draft_landscape(profile, cached)
+            return events
 
     job = AgentJob(
         session_id=session_id,
@@ -228,41 +271,32 @@ async def run_competitor(
         }
     )
 
-    # Carry over from discovery + any manually added profiles (Architecture v1.9 override)
-    disc = (
-        await db.execute(
-            select(DiscoveryResponse).where(
-                DiscoveryResponse.client_id == client.id,
-                DiscoveryResponse.field_key == "competitors",
-            )
-        )
-    ).scalars().all()
+    # Competitor discovery is owned by Phase 4. Carry every previously saved
+    # competitor profile (manual + discovery_override + prior scans) so a refresh
+    # cannot wipe the set when live auto-discovery fails. Phase 1 still does not
+    # seed new rivals — these rows only exist after Phase 4 has already written them.
     carried: list[dict] = []
-    category_hints: list[str] = []
-    for d in disc:
-        val = (d.field_value or {}).get("value") or []
-        if isinstance(val, list):
-            for item in val:
-                if not isinstance(item, dict):
-                    continue
-                url = _usable_competitor_url(item)
-                if url and not _is_placeholder_competitor({**item, "url": url}):
-                    carried.append({**item, "url": url})
-                elif str(item.get("name") or "").strip():
-                    category_hints.append(str(item["name"]).strip())
-    manual_rows = (
+    prior_rows = (
         await db.execute(
             select(CompetitorProfile).where(CompetitorProfile.client_id == client.id)
         )
     ).scalars().all()
-    for mp in manual_rows:
-        if mp.source == "manual" and mp.url:
-            carried.append({"name": mp.name, "url": mp.url, "source": "manual"})
+    for row in prior_rows:
+        if not row.url:
+            continue
+        item = {
+            "name": row.name,
+            "url": row.url,
+            "source": row.source or "prior_scan",
+        }
+        if _is_placeholder_competitor(item):
+            continue
+        carried.append(item)
 
     domain = extract_domain(client.primary_url)
     industry = (client.industry or "").strip() or None
     if not industry:
-        # Prefer D1 inferred industry stored on discovery_responses
+        # Prefer the Phase 1 inferred industry stored on discovery responses.
         inferred_row = (
             await db.execute(
                 select(DiscoveryResponse)
@@ -288,12 +322,12 @@ async def run_competitor(
                     f"{domain} via ads-category-competitors skill…"
                     if not carried
                     else (
-                        f"Using {len(carried)} Discovery competitor seed(s) for {domain}"
+                        f"Using {len(carried)} saved Phase 4 competitor(s) for {domain}"
                         + (
                             f" — auto-discovery will supplement (target "
                             f"{MIN_COMPETITORS_TARGET}–{MAX_COMPETITORS_TO_SCORE})…"
                             if len(carried) < MIN_COMPETITORS_TARGET
-                            else " — scoring Discovery set…"
+                            else " — scoring saved set…"
                         )
                     )
                 ),
@@ -301,7 +335,7 @@ async def run_competitor(
         }
     )
 
-    # Discovery seeds are priority; auto-discovery supplements when the seed set is thin.
+    # Phase 4 discovery supplements explicit manual overrides when the set is thin.
     discover_error = ""
     discovered: list[dict] = []
     seed_count = len(carried)
@@ -312,7 +346,6 @@ async def run_competitor(
                 client.display_name,
                 domain,
                 industry=industry,
-                hints=category_hints,
             )
         except Exception as exc:  # noqa: BLE001
             discover_error = str(exc)[:280]
@@ -334,7 +367,7 @@ async def run_competitor(
             {
                 "type": "system_notice",
                 "content": (
-                    f"Discovery listed {seed_count} competitor(s) — supplementing with auto-discovery "
+                    f"Phase 4 has {seed_count} saved competitor(s) — supplementing with auto-discovery "
                     f"to reach {MIN_COMPETITORS_TARGET}–{MAX_COMPETITORS_TO_SCORE} for tiered scoring "
                     f"(now {len(candidates)} total)."
                 ),
@@ -345,7 +378,7 @@ async def run_competitor(
             {
                 "type": "system_notice",
                 "content": (
-                    f"Operator override: scoring {len(candidates)} Discovery competitor(s) "
+                    f"Scoring {len(candidates)} saved Phase 4 competitor(s) "
                     f"(sources: {', '.join(sources)})."
                 ),
             }
@@ -376,13 +409,13 @@ async def run_competitor(
                     (
                         "Competitor discovery failed via OpenRouter"
                         + (f": {discover_error}" if discover_error else ".")
-                        + " Check OpenRouter credits and that COMPETITOR_MODEL is available, then retry."
+                        + " Add competitors manually below, then refresh the scan — "
+                        "or retry after checking OpenRouter credits / COMPETITOR_MODEL."
                     )
                     if discover_error
                     else (
-                        "Automated competitor discovery returned no domains for this site yet "
-                        "(ads-category-competitors skill). Try 'refresh competitor scan' after "
-                        "discovery has more industry context."
+                        "Automated competitor discovery returned no domains for this site yet. "
+                        "Add at least one competitor URL below, then run 'refresh competitor scan'."
                     )
                 ),
             }
@@ -395,14 +428,25 @@ async def run_competitor(
             "empty": True,
             "invite_manual": True,
             "agent_key": "competitor_market_agent",
+            # Keep the gate actionable so Phase 4 cannot soft-lock the pipeline
+            # when live discovery fails — operator can add peers then refresh.
             "actions": [],
             "required_role": required_role_for("competitor_market_agent"),
         }
         events.append({"type": "structured_card", "payload": empty_card})
+        events.append({"type": "checkpoint", "payload": empty_card})
+        # pending_signoff would imply an approvable landscape; stay in_progress
+        # but surface a clear next step instead of a silent hang.
         profile.competitor_status = "in_progress"
         job.status = "failed"
         job.error_detail = discover_error or "no_competitor_domains"
         job.completed_at = datetime.now(timezone.utc)
+        events.append(
+            {
+                "type": "phase_status",
+                "payload": {"competitor_status": profile.competitor_status},
+            }
+        )
         return events
 
     analysis = await build_tiered_analysis(
@@ -526,7 +570,7 @@ async def run_competitor(
         "analysis_mode": "tiered_16_parameter",
         "discovery_sources": sources,
     }
-    cache_set(cache_key, card, competitor_cache_ttl())
+    await cache_set(cache_key, card, competitor_cache_ttl())
     _publish_draft_landscape(profile, card)
 
     threat = analysis["recommendations"].get("top_emerging_threat")

@@ -6,6 +6,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+from app.services.create_topic import format_audience_label
 from app.services.create_topic import funnel_balance as _funnel_balance
 from app.services.create_topic import funnel_balance_warnings as _funnel_balance_warnings
 
@@ -212,13 +213,28 @@ async def run_content_production_plan(
     reuse = [b for b in (prior_briefs or []) if isinstance(b, dict)]
     selected = bool(selected_url or selected_keyword)
     if selected and reuse:
-        briefs = reuse
+        from app.services.content_brief import refresh_brief_author_gates
+
+        # Re-evaluate YMYL/author standing — cached briefs can still carry a stale
+        # "credentials" blocker after CDD positioning / expertise is available.
+        briefs = [
+            refresh_brief_author_gates(
+                b,
+                industry=industry,
+                marketing=marketing,
+                client_name=client_name,
+            )
+            for b in reuse
+        ]
         brief_pack: dict[str, Any] = {"briefs": briefs, "skipped_new_urls": []}
     else:
         brief_pack = await generate_briefs(
             client_name=client_name,
             industry=industry,
-            audience=str((dict(seo_strategy or {}).get("target_audience") or "") or "") or None,
+            audience=(
+                format_audience_label(dict(seo_strategy or {}).get("target_audience"))
+                or None
+            ),
             marketing=marketing,
             seo_strategy=seo_strategy,
             site_architecture=site_architecture,
@@ -296,6 +312,15 @@ async def run_content_production_plan(
                     excerpt = _existing_excerpt(
                         site, str(chosen.get("url") or chosen.get("path") or "")
                     )
+                mkt = dict(marketing or {})
+                intake = dict(mkt.get("client_intake") or {})
+                location = str(
+                    mkt.get("geographic_focus")
+                    or mkt.get("location")
+                    or intake.get("geographic_focus")
+                    or (seo_strategy or {}).get("location")
+                    or ""
+                ).strip() or None
                 written = await write_one_page(
                     brief=chosen,
                     client_name=client_name,
@@ -304,9 +329,22 @@ async def run_content_production_plan(
                     seo_strategy=seo_strategy,
                     marketing=marketing,
                     industry=industry,
+                    location=location,
                     search_demand=search_demand,
                 )
                 if written.get("ok"):
+                    from app.services.publish_preview import build_draft_site_preview
+
+                    try:
+                        written["site_preview"] = await build_draft_site_preview(
+                            client_name=client_name,
+                            primary_url=primary_url,
+                            draft=written,
+                            site_architecture=site_architecture,
+                        )
+                    except Exception:  # noqa: BLE001
+                        # Preview is additive — never block the draft write.
+                        written["site_preview"] = {"preview_html": "", "error": "preview_failed"}
                     drafts.append(written)
                     queued_ready = [
                         {
@@ -322,11 +360,16 @@ async def run_content_production_plan(
                     write_refusal = written
                     awaiting = True
 
+    site_preview = None
+    if drafts and isinstance(drafts[0].get("site_preview"), dict):
+        site_preview = drafts[0]["site_preview"]
+
     return {
         "client_name": client_name,
         "primary_url": primary_url,
         "briefs": briefs,
         "drafts": drafts,
+        "site_preview": site_preview,
         "held_briefs": held,
         "queued_for_next_write": queued_ready,
         "topic_choices": choices,

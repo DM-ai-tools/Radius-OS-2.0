@@ -40,7 +40,6 @@ async def fetch_ahrefs_technical_seo(
 ) -> dict[str, Any]:
     """Fetch and normalize Ahrefs Site Audit data. Never fabricates metrics."""
     settings = get_settings()
-    audit_state = "FETCHING_DATA"
     errors: list[str] = []
     api_calls = 0
 
@@ -60,15 +59,28 @@ async def fetch_ahrefs_technical_seo(
     )
     errors.extend(proj_errors)
     if not project:
+        if "ahrefs_insufficient_plan" in errors:
+            reason = (
+                "Ahrefs Site Audit API is not included in this Ahrefs plan "
+                "(API returned Insufficient plan). Upgrade the Ahrefs plan for Site Audit API "
+                "access, or continue with the crawl-based audit fallback."
+            )
+        elif any(e in errors for e in ("ahrefs_forbidden", "ahrefs_site_audit_projects_failed")):
+            reason = (
+                "Ahrefs Site Audit projects API failed (auth/plan/permission). "
+                "Check the API key scope, or continue with the crawl-based audit fallback."
+            )
+        else:
+            reason = (
+                "No Ahrefs Site Audit project found for this domain. "
+                "Create a project in Ahrefs with verified ownership, or set "
+                "AHREFS_SITE_AUDIT_PROJECT_ID."
+            )
         return {
             "available": False,
             "audit_state": "FAILED",
             "errors": errors,
-            "reason": (
-                "No Ahrefs Site Audit project found for this domain. "
-                "Create a project in Ahrefs with verified ownership, or set "
-                "AHREFS_SITE_AUDIT_PROJECT_ID."
-            ),
+            "reason": reason,
         }
 
     pid = int(project.get("project_id") or project.get("id") or resolved_id or 0)
@@ -124,7 +136,6 @@ async def fetch_ahrefs_technical_seo(
 
     log.info("normalization_completed", pages=len(pages))
 
-    audit_state = "ANALYZING"
     ahrefs_issues = issues_from_ahrefs(issues_raw)
     supplemental = issues_from_pages(pages) if pages else []
     all_issues = merge_issues(ahrefs_issues, supplemental)

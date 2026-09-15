@@ -29,6 +29,29 @@ def _ctx(**kwargs):
     return build_relevance_context(**defaults)
 
 
+def test_drops_finance_bleed_from_ambiguous_acronym_seed():
+    ctx = build_relevance_context(
+        services=["AEO & GEO Services (AI/answer engine optimization)", "SEO Services"],
+        cdd_keywords=["AEO", "GEO", "answer engine optimization"],
+        page_terms=[],
+        themes=[],
+        seeds=["AEO", "AEO & GEO Services (AI/answer engine optimization)"],
+        competitor_names=[],
+        competitor_domains=[],
+        brand_name="ClickTrends",
+        domain="clicktrends.com.au",
+    )
+    keep, reason, _ = evaluate_keyword(
+        "aeo stock price", ctx, match_class="related", seed="AEO"
+    )
+    assert not keep
+    assert reason in {"noisy", "ambiguous_seed_drift"}
+    keep, reason, _ = evaluate_keyword(
+        "answer engine optimization", ctx, match_class="related", seed="AEO"
+    )
+    assert keep
+
+
 def test_keeps_cdd_and_service_keywords():
     ctx = _ctx()
     keep, reason, _ev = evaluate_keyword("seo services melbourne", ctx, match_class="phrase", seed="SEO Services")

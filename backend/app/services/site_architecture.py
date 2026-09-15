@@ -10,6 +10,9 @@ from urllib.parse import urlparse
 from app.integrations.llm import synthesize_json
 from app.integrations.web_fetch import absolute_links, fetch_url, parse_html
 from app.agents.prompts import load_skill_file
+from app.logging_config import get_logger
+
+log = get_logger("site_architecture")
 
 
 def _slug(text: str) -> str:
@@ -278,6 +281,31 @@ def _money_keywords(commercial: dict[str, Any], demand: dict[str, Any]) -> list[
     return clean[:12]
 
 
+def _declared_services(commercial: dict[str, Any], demand: dict[str, Any]) -> list[str]:
+    """CDD/Phase-5 service names, excluding generic opportunity keywords."""
+    raw_values: list[Any] = [
+        demand.get("services"),
+        demand.get("products"),
+        commercial.get("products"),
+        commercial.get("products_for_promotion"),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        values = (
+            [x.strip() for x in raw.replace(";", ",").split(",")]
+            if isinstance(raw, str)
+            else raw if isinstance(raw, list) else []
+        )
+        for value in values:
+            name = str(value or "").strip()
+            key = name.lower()
+            if name and key not in seen:
+                seen.add(key)
+                out.append(name)
+    return out
+
+
 def build_blueprint(
     *,
     client_name: str,
@@ -293,6 +321,7 @@ def build_blueprint(
     topic_plan = dict(demand.get("topic_plan") or {})
     core_topics = list(seo_strategy.get("core_topics") or [])
     money = _money_keywords(commercial, demand)
+    declared_services = _declared_services(commercial, demand)
 
     base = f"https://{domain}"
 
@@ -323,11 +352,19 @@ def build_blueprint(
         },
         {
             "type": "Service / product",
-            "url_pattern": "/services/{service}/",
-            "parent": "Category",
-            "breadcrumb": "Home > Services > Service",
+            "url_pattern": "/{service}/",
+            "parent": "Home",
+            "breadcrumb": "Home > Service",
             "indexable": True,
-            "count": len(money) or 3,
+            "count": len(declared_services) or 3,
+        },
+        {
+            "type": "Sub-service",
+            "url_pattern": "/{service}/{subservice}/",
+            "parent": "Its service",
+            "breadcrumb": "Home > Service > Sub-service",
+            "indexable": True,
+            "count": "varies",
         },
         {
             "type": "Comparison / alternative",
@@ -497,39 +534,55 @@ def build_blueprint(
                 }
             )
 
-    # Commercial services
-    for mk in money[:5]:
-        path = f"/services/{_slug(mk)}/"
-        if _path_n(path) in existing_paths:
-            continue
-        existing_paths.add(_path_n(path))
-        target_url_tree.append(
-            {
-                "url": _path_n(path),
-                "path": path,
-                "type": "service",
-                "page_type": "service",
-                "depth": 2,
-                "primary_keyword": mk,
-                "keyword": mk,
-                "parent": "/services",
-                "absolute_url": f"{base}{path}",
-            }
+    # One service hierarchy for CDD, live-site, and competitor sources.
+    from app.services.service_prioritization import (
+        build_client_service_catalog,
+        competitor_tree_for_architecture,
+        ia_nodes_from_competitor_tree,
+        merge_competitor_subservices,
+    )
+
+    prioritization = dict(
+        commercial.get("service_prioritization")
+        or demand.get("service_prioritization")
+        or {}
+    )
+    service_catalog = list(
+        demand.get("service_catalog")
+        or prioritization.get("service_catalog")
+        or build_client_service_catalog(services=declared_services)
+    )
+    competitor_tree = competitor_tree_for_architecture(commercial, demand)
+    if competitor_tree:
+        service_catalog = merge_competitor_subservices(
+            service_catalog,
+            competitor_tree=competitor_tree,
         )
-    if money:
-        primary_nav.append({"label": "Services", "url": f"{base}/services/", "depth": 1})
-        if len(primary_nav) < 7:
-            target_url_tree.insert(
-                0 if False else len(target_url_tree),
+    service_nodes = ia_nodes_from_competitor_tree(
+        {"name": "Unified client service catalog", "services": service_catalog},
+        domain=domain,
+        selected_service_ids=list(prioritization.get("selected_service_ids") or []),
+        selected_subservice_ids=list(
+            prioritization.get("selected_subservice_ids") or []
+        ),
+        adopt_service_ids=list(
+            prioritization.get("adopt_competitor_service_ids") or []
+        ),
+    )
+    for node in service_nodes:
+        path = _path_n(str(node.get("url") or node.get("path") or ""))
+        if path in existing_paths:
+            continue
+        existing_paths.add(path)
+        target_url_tree.append(node)
+    if declared_services:
+        for service_name in declared_services[: max(0, 6 - len(primary_nav))]:
+            primary_nav.append(
                 {
-                    "url": "/services/",
-                    "path": "/services/",
-                    "type": "hub",
+                    "label": service_name,
+                    "url": f"{base}/{_slug(service_name)}/",
                     "depth": 1,
-                    "parent": "/",
-                    "primary_keyword": "services",
-                    "absolute_url": f"{base}/services/",
-                },
+                }
             )
 
     primary_nav.append({"label": "Blog", "url": f"{base}/blog/", "depth": 1})
@@ -601,6 +654,40 @@ def build_blueprint(
         {"item": "Publish sequence", "receiving": "Publishing & Indexation (Phase 12)"},
     ]
 
+    # Logical parentage follows topical support even when the publishing URL
+    # remains under /blog/.  Prefer the most-specific matching sub-service.
+    from app.services.content_planning import (
+        _matching_service_target,
+        _page_type,
+        _service_targets,
+    )
+
+    service_targets = _service_targets(target_url_tree)
+    for node in target_url_tree:
+        if _page_type(node) not in {
+            "article",
+            "blog",
+            "guide",
+            "spoke",
+            "cluster",
+            "supporting",
+        }:
+            continue
+        keyword = str(
+            node.get("primary_keyword")
+            or node.get("keyword")
+            or node.get("title")
+            or ""
+        )
+        target = _matching_service_target(node, keyword=keyword, targets=service_targets)
+        if not target:
+            continue
+        parent = _path_n(str(target.get("url") or target.get("path") or ""))
+        node["parent"] = parent
+        node["supports_service_id"] = target.get("service_id")
+        node["supports_subservice_id"] = target.get("subservice_id")
+        node["depth"] = int(target.get("depth") or 0) + 1
+
     return {
         "client": client_name,
         "current_state": {
@@ -632,8 +719,9 @@ def build_blueprint(
             "breadcrumb_pattern": {
                 "hub": "Home > {Hub}",
                 "spoke": "Home > {Hub} > {Spoke}",
-                "service": "Home > Services > {Service}",
-                "blog": "Home > Blog > {Post}",
+                "service": "Home > {Service}",
+                "subservice": "Home > {Service} > {Sub-service}",
+                "blog": "Home > {Supporting service, when relevant} > {Post}",
             },
             "depth_remediation": depth_remediation[:20],
             "rule": "Money pages within 3 clicks; indexable within 4; breadcrumbs must match URL hierarchy",
@@ -690,6 +778,18 @@ async def run_site_architecture_plan(
     competitor_sites = list(
         demand.get("competitor_sites") or seo_strategy.get("competitor_sites") or []
     )
+
+    from app.services.service_prioritization import (
+        build_client_service_catalog,
+        competitor_tree_for_architecture,
+        ia_nodes_from_competitor_tree,
+        merge_competitor_subservices,
+    )
+
+    prioritization = dict(
+        commercial.get("service_prioritization") or demand.get("service_prioritization") or {}
+    )
+    competitor_service_tree = competitor_tree_for_architecture(commercial, demand)
     geo_focus = (
         demand.get("geographic_focus")
         or commercial.get("geographic_focus")
@@ -742,10 +842,20 @@ async def run_site_architecture_plan(
     )
 
     from app.services.url_mapping import apply_url_map_to_architecture, build_final_url_map
+    from app.services.site_sitemap import ensure_website_sitemap, sitemap_pages
+
+    # Phase 3 site sitemap is the process-wide inventory. Phase 5 live scan
+    # enriches titles/H1 on those URLs when present; otherwise use the sitemap.
+    website_for_mapping = ensure_website_sitemap(dict(website))
+    live_scan = demand.get("live_site_scan") or {}
+    if live_scan.get("pages"):
+        website_for_mapping["pages"] = live_scan["pages"]
+    elif sitemap_pages(website_for_mapping):
+        website_for_mapping["pages"] = sitemap_pages(website_for_mapping)
 
     url_map_report = build_final_url_map(
         cluster_report,
-        website=website,
+        website=website_for_mapping,
         content_audit=seo_strategy.get("content_audit") or demand.get("content_audit"),
         serp_by_keyword=demand.get("serp_by_keyword") or seo_strategy.get("serp_by_keyword") or {},
         commercial=commercial,
@@ -756,6 +866,133 @@ async def run_site_architecture_plan(
     blueprint["url_map_report"] = url_map_report
     if isinstance(blueprint.get("target_url_tree"), list):
         blueprint["target_url_tree"] = _normalize_url_tree(blueprint["target_url_tree"])
+
+    # Topics were drafted in Phase 5 for new clusters only; stamp URL map actions.
+    from app.services.create_topic import attach_url_map_to_topic_plan, topics_from_plan
+
+    existing_plan = dict(demand.get("topic_plan") or {})
+    if existing_plan.get("topic_ideas") or existing_plan.get("existing_on_site"):
+        topic_plan = attach_url_map_to_topic_plan(dict(existing_plan), url_map_report)
+        blueprint["topic_plan"] = topic_plan
+        blueprint["topics"] = topics_from_plan(topic_plan)
+    blueprint["sitemap_classification"] = (
+        demand.get("sitemap_classification")
+        or (demand.get("cluster_report") or {}).get("sitemap_classification")
+    )
+
+    # Build one canonical hierarchy for CDD, existing-site, and competitor
+    # services.  This replaces the old two-track merge where only competitor
+    # sub-services were nested.
+    service_catalog = list(
+        demand.get("service_catalog")
+        or prioritization.get("service_catalog")
+        or []
+    )
+    if not service_catalog:
+        service_catalog = build_client_service_catalog(
+            services=_declared_services(commercial, demand),
+            website=website,
+            page_seeds=[],
+        )
+    if competitor_service_tree:
+        service_catalog = merge_competitor_subservices(
+            service_catalog,
+            competitor_tree=competitor_service_tree,
+        )
+        blueprint["competitor_service_tree"] = competitor_service_tree
+
+    if service_catalog:
+        blueprint["service_catalog"] = service_catalog
+        service_tree = {
+            "name": "Unified client service catalog",
+            "services": service_catalog,
+        }
+        service_nodes = ia_nodes_from_competitor_tree(
+            service_tree,
+            domain=domain,
+            selected_service_ids=list(prioritization.get("selected_service_ids") or []),
+            selected_subservice_ids=list(
+                prioritization.get("selected_subservice_ids") or []
+            ),
+            adopt_service_ids=list(
+                prioritization.get("adopt_competitor_service_ids") or []
+            ),
+        )
+        blueprint["service_ia_nodes"] = service_nodes
+        if competitor_service_tree:
+            blueprint["competitor_ia_nodes"] = [
+                node for node in service_nodes if node.get("from_competitor_ia")
+            ]
+        existing_paths = {
+            _path_n(str(n.get("url") or n.get("path") or ""))
+            for n in blueprint.get("target_url_tree") or []
+        }
+        merged_tree = list(blueprint.get("target_url_tree") or [])
+        by_path = {
+            _path_n(str(n.get("url") or n.get("path") or "")): index
+            for index, n in enumerate(merged_tree)
+            if isinstance(n, dict)
+        }
+        for node in service_nodes:
+            path = _path_n(str(node.get("url") or node.get("path") or ""))
+            if not path:
+                continue
+            # Canonical service metadata wins over a generic strategy/hub row
+            # at the same URL.
+            if path in existing_paths:
+                merged_tree[by_path[path]] = {**merged_tree[by_path[path]], **node}
+            else:
+                merged_tree.append(node)
+                by_path[path] = len(merged_tree) - 1
+                existing_paths.add(path)
+        blueprint["target_url_tree"] = _normalize_url_tree(merged_tree)
+
+    if competitor_service_tree:
+        # Retained as a separate response field for consumers that display the
+        # competitor evidence behind the unified hierarchy.
+        blueprint["competitor_service_tree"] = competitor_service_tree
+
+    # Content URLs remain under their publishing path (for example /blog/...),
+    # but their logical IA parent is the most relevant service/sub-service.
+    # Content Planning applies the same rule to its roadmap rows.
+    from app.services.content_planning import (
+        _matching_service_target,
+        _page_type,
+        _service_targets,
+    )
+
+    tree_rows = list(blueprint.get("target_url_tree") or [])
+    service_targets = _service_targets(tree_rows)
+    for node in tree_rows:
+        if not isinstance(node, dict) or _page_type(node) not in {
+            "article",
+            "blog",
+            "guide",
+            "spoke",
+            "cluster",
+            "supporting",
+        }:
+            continue
+        keyword = str(
+            node.get("primary_keyword")
+            or node.get("keyword")
+            or node.get("title")
+            or ""
+        )
+        target = _matching_service_target(node, keyword=keyword, targets=service_targets)
+        if not target:
+            continue
+        parent = _path_n(str(target.get("url") or target.get("path") or ""))
+        if not parent:
+            continue
+        node["parent"] = parent
+        node["supports_service_id"] = target.get("service_id")
+        node["supports_subservice_id"] = target.get("subservice_id")
+        try:
+            node["depth"] = int(target.get("depth")) + 1
+        except (TypeError, ValueError):
+            node["depth"] = max(1, parent.strip("/").count("/") + 2)
+    blueprint["target_url_tree"] = _normalize_url_tree(tree_rows)
 
     from app.services.phase_pipeline import enrich_phase6_pack
 
@@ -784,7 +1021,13 @@ async def run_site_architecture_plan(
             f"Geographic focus: {geo_focus or 'not set'} → {location_name}\n"
             f"Shared-memory competitors: {', '.join(competitor_names[:6] or competitor_domains[:5])}\n"
             f"Competitor IA snapshots: {competitor_ia}\n"
-            f"Current state: {blueprint['current_state']}\n"
+            + (
+                f"Selected competitor service org chart ({competitor_service_tree.get('name')}): "
+                f"{competitor_service_tree.get('services')}\n"
+                if competitor_service_tree
+                else ""
+            )
+            + f"Current state: {blueprint['current_state']}\n"
             f"Hubs: {blueprint['target_url_tree'][:8]}\n"
             f"Ownership: {blueprint['cluster_ownership'][:6]}\n"
         )
@@ -802,8 +1045,8 @@ async def run_site_architecture_plan(
                     [e for e in extras if isinstance(e, dict)][:10]
                 )
             blueprint["source"] = "site_architecture_skill"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("site_architecture_llm_polish_failed", client=client_name, error=str(exc))
 
     if not blueprint.get("executive_summary"):
         cs = blueprint["current_state"]

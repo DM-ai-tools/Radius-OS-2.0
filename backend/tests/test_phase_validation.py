@@ -91,13 +91,37 @@ def _card(agent_key: str, **payload):
     ]
 
 
+_SOLAR_CLUSTER = {
+    "clusters": [
+        {
+            "name": "Rooftop solar",
+            "primary_keyword": "rooftop solar sydney",
+            "keywords": [{"keyword": "rooftop solar sydney"}],
+            "intent": "commercial",
+            "funnel": "MOFU",
+            "topic_disposition": "new_topic",
+        }
+    ]
+}
+
+_SOLAR_CLASSIFICATION = {
+    "existing_topic_count": 0,
+    "existing_review_count": 0,
+    "new_topic_count": 1,
+    "pages_used": 1,
+}
+
+
 @pytest.mark.asyncio
 async def test_valid_search_demand_passes_deterministic_and_semantic():
     client = _client()
     profile = _profile()
     events = _card(
         "search_demand",
-        topic_plan=[{"title": "Rooftop solar for Sydney homes", "keyword": "rooftop solar sydney"}],
+        topic_plan={"topic_ideas": [{"title": "Rooftop solar for Sydney homes", "keyword": "rooftop solar sydney"}]},
+        topic_selection_context={"topic_kw_pool": [{"keyword": "rooftop solar sydney"}]},
+        cluster_report=_SOLAR_CLUSTER,
+        sitemap_classification=_SOLAR_CLASSIFICATION,
         topics=[{"title": "Rooftop solar for Sydney homes"}],
         seed_keywords=["rooftop solar", "battery storage sydney"],
         best_opportunities=[{"keyword": "rooftop solar sydney", "volume": 1200}],
@@ -154,6 +178,8 @@ async def test_unrelated_domain_fails_semantic():
     events = _card(
         "search_demand",
         topic_plan=[{"title": "Best crypto trading bots 2026"}],
+        cluster_report=_SOLAR_CLUSTER,
+        sitemap_classification=_SOLAR_CLASSIFICATION,
         topics=[{"title": "Best crypto trading bots 2026"}],
         seed_keywords=["crypto bots"],
     )
@@ -398,6 +424,8 @@ async def test_technically_valid_but_poor_quality():
     events = _card(
         "search_demand",
         topic_plan=[{"title": "Stuff", "keyword": "stuff"}],
+        cluster_report=_SOLAR_CLUSTER,
+        sitemap_classification=_SOLAR_CLASSIFICATION,
         topics=[{"title": "Stuff"}],
         seed_keywords=["stuff"],
     )
@@ -480,6 +508,8 @@ async def test_malformed_validator_does_not_destroy_phase():
     events = _card(
         "search_demand",
         topic_plan=[{"title": "Rooftop solar for Sydney homes"}],
+        cluster_report=_SOLAR_CLUSTER,
+        sitemap_classification=_SOLAR_CLASSIFICATION,
         topics=[{"title": "Rooftop solar for Sydney homes"}],
         seed_keywords=["rooftop solar"],
     )
@@ -650,12 +680,16 @@ def test_extract_phase_output_skips_validation_report_card():
     profile = _profile(
         search_demand_summary={
             "topic_plan": [{"title": "Car loans Melbourne"}],
+            "cluster_report": _SOLAR_CLUSTER,
+            "sitemap_classification": _SOLAR_CLASSIFICATION,
         }
     )
     events = _card(
         "search_demand",
         card_type="search_demand_report",
         topic_plan=[{"title": "Car loans Melbourne"}],
+        cluster_report=_SOLAR_CLUSTER,
+        sitemap_classification=_SOLAR_CLASSIFICATION,
         seed_keywords=["car loan melbourne"],
     )
     events.extend(
@@ -1227,12 +1261,16 @@ async def test_search_demand_surfaces_validation_report(db_session):
             "topic_plan": [
                 {"title": "Rooftop solar for Sydney homes", "keyword": "rooftop solar sydney"}
             ],
+            "cluster_report": _SOLAR_CLUSTER,
+            "sitemap_classification": _SOLAR_CLASSIFICATION,
             "seed_keywords": ["rooftop solar", "battery storage sydney"],
         }
         return _card(
             "search_demand",
             card_type="search_demand_report",
             topic_plan=profile.search_demand_summary["topic_plan"],
+            cluster_report=_SOLAR_CLUSTER,
+            sitemap_classification=_SOLAR_CLASSIFICATION,
             seed_keywords=profile.search_demand_summary["seed_keywords"],
         )
 

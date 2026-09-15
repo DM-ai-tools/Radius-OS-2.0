@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.api import auth, chat, clients, cost_tracker, engine_room, findings, integrations, oauth, readiness, sessions, technical_seo, workbook
@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.db import Base, AsyncSessionLocal, engine
 from app.logging_config import get_logger, setup_logging
 from app.seed import seed_all
+from app.services.public_seo import build_robots_txt, build_sitemap_xml
 
 # Ensure models are registered
 import app.models  # noqa: F401
@@ -107,6 +108,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    """Baseline hardening headers. No CSP here on purpose — this app also
+    serves the SPA build, and a wrong CSP silently breaks the frontend in a
+    way this pass can't visually verify; the headers below are safe defaults
+    with no such risk."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if request.url.scheme == "https":
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+    return response
+
+
 prefix = "/api/v1"
 app.include_router(auth.router, prefix=prefix)
 app.include_router(clients.router, prefix=prefix)
@@ -149,8 +168,9 @@ async def health():
     except Exception:  # noqa: BLE001
         db_ok = False
     try:
-        # Sync Redis must not block the event loop (socket timeouts on client).
-        r = await asyncio.to_thread(get_redis)
+        # get_redis() is async and already offloads its own connect+ping via
+        # asyncio.to_thread — only the extra explicit ping below needs it here.
+        r = await get_redis()
         redis_ok = bool(r and await asyncio.to_thread(r.ping))
     except Exception:  # noqa: BLE001
         redis_ok = False
@@ -176,7 +196,29 @@ _API_PREFIXES = {
     "openapi.json",
     "assets",
     "media",
+    "robots.txt",
+    "sitemap.xml",
 }
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots_txt():
+    """Crawl policy — public landing only; private workspace/API disallowed."""
+    return PlainTextResponse(
+        build_robots_txt(),
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/sitemap.xml")
+async def sitemap_xml():
+    """XML sitemap with the single public canonical URL."""
+    return Response(
+        content=build_sitemap_xml(),
+        media_type="application/xml; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.get("/")
@@ -191,7 +233,8 @@ async def spa_or_api_root():
         "<p>The web UI bundle is not in this container (<code>/app/static</code> missing).</p>"
         "<p>In Railway: set the service to use the <strong>root Dockerfile</strong> "
         "(not <code>backend/Dockerfile</code>), Root Directory = <code>/</code>.</p>"
-        "<p><a href='/docs'>Open API docs</a> · <a href='/healthz'>Health</a></p>"
+        "<p><a href='/docs'>Open API docs</a> · <a href='/healthz'>Health</a> · "
+        "<a href='/robots.txt'>robots.txt</a> · <a href='/sitemap.xml'>sitemap</a></p>"
         "</body></html>",
         status_code=200,
     )

@@ -466,7 +466,7 @@ def _crawl_from_research_pages(research: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def crawl_site(url: str) -> dict[str, Any]:
+async def crawl_site(url: str, *, max_pages: int | None = None) -> dict[str, Any]:
     settings = get_settings()
     if settings.use_mock_providers:
         return {
@@ -493,7 +493,8 @@ async def crawl_site(url: str) -> dict[str, Any]:
     if not url.startswith("http"):
         url = "https://" + url
 
-    max_pages = settings.effective_seo_audit_max_pages
+    requested_cap = int(max_pages or settings.effective_seo_audit_max_pages)
+    max_pages = max(1, min(requested_cap, 2000))
 
 
     async def _remote_crawl() -> dict[str, Any] | None:
@@ -805,6 +806,23 @@ async def check_broken_links(url: str) -> dict[str, Any]:
     import httpx
     from html.parser import HTMLParser
 
+    from app.integrations.web_fetch import assert_safe_url
+
+    url_ok, safe_url = assert_safe_url(url)
+    if not url_ok:
+        return {
+            "pages_scanned": 0,
+            "total_links_checked": 0,
+            "broken_count": 0,
+            "redirect_chain_count": 0,
+            "internal": [],
+            "external": [],
+            "redirect_chains": [],
+            "quick_fixes": [],
+            "error": safe_url,
+            "severity": "warning",
+        }
+
     class _LinkParser(HTMLParser):
         def __init__(self) -> None:
             super().__init__()
@@ -821,7 +839,7 @@ async def check_broken_links(url: str) -> dict[str, Any]:
     external: list[dict] = []
     async with httpx.AsyncClient(follow_redirects=False, timeout=12) as client:
         try:
-            home = await client.get(url)
+            home = await client.get(safe_url)
         except Exception as exc:  # noqa: BLE001
             return {
                 "pages_scanned": 0,
@@ -858,8 +876,11 @@ async def check_broken_links(url: str) -> dict[str, Any]:
 
         async def _check(target: str) -> tuple[str, int | str]:
             async with sem:
+                target_ok, safe_target = assert_safe_url(target)
+                if not target_ok:
+                    return target, "blocked_unsafe_host"
                 try:
-                    resp = await client.head(target)
+                    resp = await client.head(safe_target)
                     return target, resp.status_code
                 except Exception:  # noqa: BLE001
                     return target, "timeout"
@@ -989,6 +1010,20 @@ async def optimize_on_page(
     import httpx
     from html.parser import HTMLParser
 
+    from app.integrations.web_fetch import assert_safe_url
+
+    url_ok, safe_url = assert_safe_url(url)
+    if not url_ok:
+        return {
+            "page_name": page_name,
+            "page_url": url,
+            "target_keyword": target,
+            "current_score": 0,
+            "optimized_score": 0,
+            "error": safe_url,
+            "severity": "warning",
+        }
+
     class _MetaParser(HTMLParser):
         def __init__(self) -> None:
             super().__init__()
@@ -1014,7 +1049,7 @@ async def optimize_on_page(
 
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            resp = await client.get(url)
+            resp = await client.get(safe_url)
             parser = _MetaParser()
             parser.feed(resp.text or "")
         before_title = parser.title.strip() or f"{display_name}"
@@ -1162,65 +1197,191 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
             "severity": "warning" if overall < 80 else "info",
         }
 
-    # Live lightweight checks
-    import httpx
+    # Live checks — web_fetch (host fallback) + Firecrawl when bot protection blocks HTML
+    from app.integrations.web_fetch import fetch_page_html, fetch_url
 
+    seed = url if url.startswith("http") else f"https://{domain}"
     findings_crawl: list[str] = []
     findings_index: list[str] = []
     findings_sec: list[str] = []
     findings_mobile: list[str] = []
     findings_schema: list[str] = []
+    priority_fixes: list[dict[str, str]] = []
     homepage_fetched = False
-    async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
-        try:
-            robots = await client.get(f"https://{domain}/robots.txt")
-            findings_crawl.append(
-                f"robots.txt status {robots.status_code}"
-                + (" — Sitemap referenced" if "sitemap" in (robots.text or "").lower() else "")
+    ld_count = 0
+
+    # HTTP → HTTPS redirect
+    http_seed = seed.replace("https://", "http://", 1) if seed.startswith("https://") else f"http://{domain}"
+    http_probe = await fetch_url(http_seed, follow=False)
+    if int(http_probe.get("status_code") or 0) in (301, 302, 307, 308):
+        loc = (http_probe.get("headers") or {}).get("location") or ""
+        if str(loc).startswith("https://"):
+            findings_sec.append("HTTP → HTTPS redirect in place")
+        else:
+            findings_sec.append(f"HTTP redirect present but not clearly to HTTPS ({loc[:80]})")
+            priority_fixes.append(
+                {
+                    "priority": "High",
+                    "issue": "HTTP does not redirect cleanly to HTTPS",
+                    "fix": "Issue a 301 from http:// to https:// on the canonical host",
+                }
             )
-        except Exception as exc:  # noqa: BLE001
-            findings_crawl.append(f"robots.txt unreachable: {exc}")
-        try:
-            sm = await client.get(f"https://{domain}/sitemap.xml")
-            findings_crawl.append(f"sitemap.xml status {sm.status_code}")
-        except Exception as exc:  # noqa: BLE001
-            findings_crawl.append(f"sitemap.xml unreachable: {exc}")
+    elif int(http_probe.get("status_code") or 0) == 200:
+        findings_sec.append("WARNING: HTTP version serves 200 without redirect to HTTPS")
+        priority_fixes.append(
+            {
+                "priority": "Critical",
+                "issue": "HTTP serves content without redirecting to HTTPS",
+                "fix": "Force HTTPS at CDN/host; redirect all http:// requests to https://",
+            }
+        )
 
-        html = ""
-        try:
-            home = await client.get(url if url.startswith("http") else f"https://{domain}")
-            findings_index.append(f"Homepage status {home.status_code}")
-            if str(home.url).startswith("https"):
-                findings_sec.append("HTTPS in use")
-            else:
-                findings_sec.append("Homepage not on HTTPS")
-            html = home.text or ""
-            homepage_fetched = True
-        except Exception as exc:  # noqa: BLE001
-            findings_index.append(f"Homepage fetch failed: {exc}")
+    robots_text = ""
+    robots = await fetch_url(f"https://{domain}/robots.txt", follow=True, timeout=12)
+    r_status = int(robots.get("status_code") or 0)
+    robots_text = str(robots.get("text") or "")
+    if r_status == 200 and robots_text:
+        findings_crawl.append("robots.txt reachable")
+        if re.search(r"disallow:\s*/\s*$", robots_text, re.I | re.M):
+            findings_crawl.append("WARNING: robots.txt contains Disallow: / for a user-agent")
+            priority_fixes.append(
+                {
+                    "priority": "Critical",
+                    "issue": "robots.txt may block entire site",
+                    "fix": "Remove blanket Disallow: / unless intentionally staging",
+                }
+            )
+        sitemap_refs = re.findall(r"(?im)^sitemap:\s*(\S+)", robots_text)
+        if sitemap_refs:
+            findings_crawl.append(f"Sitemap referenced in robots.txt ({len(sitemap_refs)})")
+        else:
+            findings_crawl.append("No Sitemap: line in robots.txt")
+    else:
+        findings_crawl.append(f"robots.txt status {r_status or 'unreachable'}")
 
-        if html:
-            low = html.lower()
-            if 'rel="canonical"' in low or "rel='canonical'" in low:
-                findings_crawl.append("Canonical tag present on homepage")
-            else:
-                findings_crawl.append("No canonical tag found on homepage sample")
-            if re.search(r'name=["\']robots["\'][^>]*noindex', low):
-                findings_index.append("WARNING: homepage meta robots contains noindex")
+    sitemap_urls = re.findall(r"(?im)^sitemap:\s*(\S+)", robots_text) or [
+        f"https://{domain}/sitemap.xml",
+        f"https://{domain}/sitemap_index.xml",
+    ]
+    sitemap_ok = False
+    for sm_url in sitemap_urls[:4]:
+        sm = await fetch_url(sm_url, follow=True, timeout=15)
+        sm_status = int(sm.get("status_code") or 0)
+        if sm_status == 200 and ("<urlset" in (sm.get("text") or "") or "<sitemapindex" in (sm.get("text") or "")):
+            findings_crawl.append(f"Sitemap OK: {sm_url}")
+            sitemap_ok = True
+            break
+        findings_crawl.append(f"Sitemap probe {sm_url}: status {sm_status}")
+    if not sitemap_ok:
+        priority_fixes.append(
+            {
+                "priority": "High",
+                "issue": "XML sitemap not confirmed",
+                "fix": "Publish sitemap_index.xml, reference it in robots.txt, submit in GSC",
+            }
+        )
 
-            has_viewport = bool(re.search(r'<meta[^>]+name=["\']viewport["\']', low))
-            findings_mobile.append(
-                "Viewport meta tag present"
-                if has_viewport
-                else "No viewport meta tag found — mobile rendering at risk"
+    home_meta: dict[str, Any] = {}
+    html, home_meta = await fetch_page_html(seed)
+    home_status = int(home_meta.get("status_code") or 0)
+    final_url = str(home_meta.get("final_url") or seed)
+    if html:
+        homepage_fetched = True
+        findings_index.append(f"Homepage status {home_status} ({home_meta.get('source')})")
+        if final_url.startswith("https://"):
+            findings_sec.append("HTTPS in use on homepage")
+        else:
+            findings_sec.append("Homepage not on HTTPS")
+        if "www." in final_url and "www." not in seed:
+            findings_index.append(f"Host canonicalization: redirects to {final_url}")
+    else:
+        findings_index.append(
+            f"Homepage fetch failed (status {home_status}, {home_meta.get('error') or 'empty body'})"
+        )
+        priority_fixes.append(
+            {
+                "priority": "Critical",
+                "issue": "Homepage HTML not readable by crawler",
+                "fix": "Allowlist SEO crawlers / reduce bot challenges; verify SSR content is in initial HTML",
+            }
+        )
+
+    if html:
+        low = html.lower()
+        if 'rel="canonical"' in low or "rel='canonical'" in low:
+            findings_crawl.append("Canonical tag present on homepage")
+        else:
+            findings_crawl.append("No canonical tag found on homepage sample")
+            priority_fixes.append(
+                {
+                    "priority": "High",
+                    "issue": "Missing canonical on homepage",
+                    "fix": "Add self-referencing rel=canonical on all indexable templates",
+                }
+            )
+        if re.search(r'name=["\']robots["\'][^>]*noindex', low):
+            findings_index.append("WARNING: homepage meta robots contains noindex")
+            priority_fixes.append(
+                {
+                    "priority": "Critical",
+                    "issue": "Homepage is noindex",
+                    "fix": "Remove noindex from production homepage unless intentionally blocked",
+                }
             )
 
-            ld_count = low.count("application/ld+json")
-            findings_schema.append(
-                f"{ld_count} JSON-LD block(s) found on homepage"
-                if ld_count
-                else "No JSON-LD structured data found on homepage"
+        has_viewport = bool(re.search(r'<meta[^>]+name=["\']viewport["\']', low))
+        findings_mobile.append(
+            "Viewport meta tag present"
+            if has_viewport
+            else "No viewport meta tag found — mobile rendering at risk"
+        )
+        if not has_viewport:
+            priority_fixes.append(
+                {
+                    "priority": "High",
+                    "issue": "Missing viewport meta tag",
+                    "fix": 'Add <meta name="viewport" content="width=device-width, initial-scale=1">',
+                }
             )
+
+        lang_m = re.search(r"<html[^>]+lang=[\"']([^\"']+)[\"']", html, re.I)
+        if lang_m:
+            findings_mobile.append(f"html lang={lang_m.group(1)}")
+        else:
+            findings_mobile.append("Missing lang attribute on <html>")
+
+        h1_count = len(re.findall(r"<h1\b", html, re.I))
+        if h1_count == 1:
+            findings_index.append("Single H1 on homepage sample")
+        elif h1_count == 0:
+            findings_index.append("No H1 found on homepage sample")
+            priority_fixes.append(
+                {
+                    "priority": "Medium",
+                    "issue": "Homepage missing H1",
+                    "fix": "Add one descriptive H1 aligned to primary intent",
+                }
+            )
+        else:
+            findings_index.append(f"Multiple H1 tags ({h1_count}) on homepage sample")
+
+        ld_count = low.count("application/ld+json")
+        findings_schema.append(
+            f"{ld_count} JSON-LD block(s) found on homepage"
+            if ld_count
+            else "No JSON-LD structured data found on homepage"
+        )
+        if not ld_count:
+            priority_fixes.append(
+                {
+                    "priority": "Medium",
+                    "issue": "No JSON-LD on homepage",
+                    "fix": "Add Organization + WebSite schema; validate in Rich Results Test",
+                }
+            )
+
+        if "http://" in html and "https://" in final_url:
+            findings_sec.append("WARNING: mixed http:// asset references may exist in HTML")
 
     # Presence checks below are real signal (found or not), unlike a fabricated
     # mid-range number — but they only cover the homepage sample, so they're a
@@ -1228,9 +1389,15 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
     # all (performance) get score=None, never a guessed number — per this
     # skill's own rule: a confident score on an unmeasured category is worse
     # than an admitted gap.
+    crawl_score = 70 if sitemap_ok and "robots.txt reachable" in findings_crawl else 45
+    if any("WARNING" in f for f in findings_crawl):
+        crawl_score = min(crawl_score, 50)
+    index_score = 65 if homepage_fetched and not any("noindex" in f for f in findings_index) else 40
+    sec_score = 80 if any("HTTPS" in f for f in findings_sec) else 45
+
     sections: dict[str, dict[str, Any]] = {
-        "crawlability": {"score": 60, "findings": findings_crawl or ["Insufficient data"]},
-        "indexation": {"score": 60, "findings": findings_index or ["Insufficient data"]},
+        "crawlability": {"score": crawl_score, "findings": findings_crawl or ["Insufficient data"]},
+        "indexation": {"score": index_score, "findings": findings_index or ["Insufficient data"]},
         "performance": {
             "score": None,
             "findings": [
@@ -1238,7 +1405,7 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
                 "Run the cwv-measurement skill for real numbers."
             ],
         },
-        "security": {"score": 70, "findings": findings_sec or ["Insufficient data"]},
+        "security": {"score": sec_score, "findings": findings_sec or ["Insufficient data"]},
     }
     if homepage_fetched:
         sections["mobile"] = {
@@ -1259,6 +1426,15 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
             "findings": ["Homepage fetch failed — structured data presence not checked"],
         }
 
+    if not priority_fixes:
+        priority_fixes.append(
+            {
+                "priority": "High",
+                "issue": "Complete performance + schema validation",
+                "fix": "Run cwv-measurement for real Core Web Vitals; expand crawl for duplicate titles/meta",
+            }
+        )
+
     scores = [s["score"] for s in sections.values() if isinstance(s.get("score"), (int, float))]
     overall = round(sum(scores) / len(scores)) if scores else None
     return {
@@ -1266,14 +1442,9 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
         "display_name": display_name,
         "score": overall,
         "sections": sections,
-        "priority_fixes": [
-            {
-                "priority": "High",
-                "issue": "Complete performance + schema validation",
-                "fix": "Run cwv-measurement for real Core Web Vitals; add JSON-LD if structured data is missing",
-            }
-        ],
-        "severity": "info",
+        "priority_fixes": priority_fixes[:12],
+        "severity": "warning" if overall is not None and overall < 70 else "info",
+        "fetch_source": home_meta.get("source") if homepage_fetched else None,
     }
 
 
@@ -1939,6 +2110,24 @@ async def run_seo_audit(
         "soft_forbidden",
         "empty_or_shell_page",
     }
+    canonical_base = ""
+    home_final = str(home_probe.get("url") or (url if url.startswith("http") else f"https://{domain}"))
+    if int(home_probe.get("status_code") or 0) == 200 and (home_probe.get("text") or ""):
+        parsed_home = urlparse(home_final)
+        if parsed_home.scheme and parsed_home.netloc:
+            canonical_base = f"{parsed_home.scheme}://{parsed_home.netloc}"
+
+    def _canonical_page_url(page_url: str) -> str:
+        if not canonical_base:
+            return page_url
+        parsed = urlparse(page_url)
+        bare = parsed.netloc.lower().removeprefix("www.")
+        canon_bare = urlparse(canonical_base).netloc.lower().removeprefix("www.")
+        if bare != canon_bare:
+            return page_url
+        path = parsed.path or "/"
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{canonical_base}{path}{query}"
     if home_blocked:
         from app.integrations.site_research import research_ready, research_site_crawl
 
@@ -2051,6 +2240,7 @@ async def run_seo_audit(
         max_pages=max_pages,
         home_url=url if url.startswith("http") else f"https://{domain}",
     )
+    page_urls = list(dict.fromkeys(_canonical_page_url(u) for u in page_urls))
 
     # Perplexity only when the live crawl found almost nothing (JS / WAF).
     from app.integrations.site_research import research_ready, research_site_crawl
@@ -2100,13 +2290,32 @@ async def run_seo_audit(
 
     async def _audit_one(page_url: str) -> dict[str, Any]:
         async with sem:
-            res = await fetch_url(page_url, timeout=15)
-            final_url = res.get("url") or page_url
-            return _audit_html(
-                final_url,
-                res.get("text") or "",
-                int(res.get("status_code") or 0),
-            )
+            from app.integrations.web_fetch import fetch_page_html
+
+            html, meta = await fetch_page_html(page_url, timeout=15)
+            final_url = str(meta.get("final_url") or page_url)
+            status_code = int(meta.get("status_code") or 0)
+            if not html:
+                return {
+                    "url": final_url,
+                    "path": _path_label(final_url),
+                    "title": _path_label(final_url),
+                    "meta_description": "",
+                    "status": status_code,
+                    "status_label": _status_label(status_code) if status_code else "Unreachable",
+                    "overall_score": 0,
+                    "score_band": "Not measured",
+                    "critical": [],
+                    "warnings": [
+                        {
+                            "issue": "Live HTML blocked by captcha/WAF — on-page checks skipped",
+                            "ref": page_url,
+                        }
+                    ],
+                    "opportunities": [],
+                    "passing": [],
+                }
+            return _audit_html(final_url, html, status_code or 200)
 
     page_reports = await asyncio.gather(*[_audit_one(u) for u in page_urls])
     pages_list = list(page_reports)
@@ -2134,7 +2343,11 @@ async def run_seo_audit(
             passing.append(item)
 
     if pages_list:
-        score = round(sum(int(p["overall_score"]) for p in pages_list) / len(pages_list))
+        measurable = [p for p in pages_list if p.get("score_band") != "Not measured"]
+        if measurable:
+            score = round(sum(int(p["overall_score"]) for p in measurable) / len(measurable))
+        else:
+            score = None
     else:
         score = _page_score(critical, warnings, opportunities)
 
@@ -2143,13 +2356,21 @@ async def run_seo_audit(
         "display_name": display_name,
         "pages_analyzed": len(pages_list),
         "overall_score": score,
-        "score_band": _score_band(score),
+        "score_band": _score_band(score) if score is not None else "Not measured (WAF)",
         "critical": critical,
         "warnings": warnings,
         "opportunities": opportunities,
         "passing": passing,
         "pages": pages_list,
-        "severity": "critical" if score < 50 else "warning" if score < 80 else "info",
+        "severity": (
+            "critical"
+            if score is not None and score < 50
+            else "warning"
+            if score is not None and score < 80
+            else "info"
+            if score is not None
+            else "warning"
+        ),
     })
 
 

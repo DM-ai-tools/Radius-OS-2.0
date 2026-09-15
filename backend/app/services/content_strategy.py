@@ -6,9 +6,12 @@ import re
 from typing import Any
 
 from app.integrations.llm import synthesize_json, synthesize_text
+from app.logging_config import get_logger
 from app.services.create_topic import funnel_balance, funnel_from_intent as _funnel_from_intent
 from app.services.topic_naming import specific_page_title
 from app.agents.prompts import skill_system_preamble
+
+log = get_logger("content_strategy")
 
 
 def _slug(text: str) -> str:
@@ -72,8 +75,10 @@ def image_suggestions_for(
     *,
     industry: str | None = None,
     location: str | None = None,
+    outline: list[Any] | None = None,
+    count: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Topic-specific hero + supporting image prompts for the priority queue."""
+    """Topic-specific image prompts — hero plus as many supporting frames as the page needs."""
     kw = (keyword or "").strip() or "this topic"
     place = (location or "").strip() or "the client's market"
     vert = (industry or "").strip() or "this industry"
@@ -86,39 +91,80 @@ def image_suggestions_for(
             "No stock-photo smiles, no logos, no readable text, no watermarks, no collage."
         ),
     }
-    if ct == "comparison" or " vs " in kw.lower():
-        supporting = {
-            "role": "supporting",
-            "prompt": (
-                f"Clean comparison infographic for '{kw}': two or three labeled columns, "
-                "simple icons, white background, no fake brand logos, no tiny unreadable text."
-            ),
-        }
-    elif ct == "listicle":
-        supporting = {
-            "role": "supporting",
-            "prompt": (
-                f"Numbered visual overview of the main considerations for '{kw}' as a simple "
-                "diagram on a light background. No stock photography, no logos."
-            ),
-        }
+
+    body_titles: list[str] = []
+    for row in outline or []:
+        if isinstance(row, dict):
+            title = str(row.get("title") or row.get("heading") or "").strip()
+        else:
+            title = str(row or "").strip()
+        if not title or title.upper() in ("FAQ", "CTA", "NEXT STEP", "CONCLUSION"):
+            continue
+        body_titles.append(title)
+
+    # Target count: explicit override, else 1 hero + section-aware supporting set.
+    if count is not None and count > 0:
+        target = max(1, min(int(count), 12))
+    elif ct == "listicle" or kw.lower().startswith(("best ", "top ")):
+        target = min(12, 1 + max(3, len(body_titles) or 4))
+    elif ct == "comparison" or " vs " in kw.lower():
+        target = min(12, 1 + max(2, len(body_titles) or 3))
     elif ct == "landing" or (intent or "").lower() == "transactional":
-        supporting = {
-            "role": "supporting",
-            "prompt": (
-                f"Simple process diagram of how a {vert} firm delivers '{kw}' for a client in "
-                f"{place}: 3–4 labeled steps, flat vector style, no logos."
-            ),
-        }
+        target = min(12, 1 + max(2, len(body_titles) or 2))
+    elif body_titles:
+        # Roughly one visual every two body sections, plus hero.
+        target = min(12, 1 + max(1, (len(body_titles) + 1) // 2))
     else:
-        supporting = {
-            "role": "supporting",
-            "prompt": (
-                f"Original process or architecture diagram illustrating '{kw}' for {vert} in "
-                f"{place}. Clean labeled parts, white background, not stock, no logos."
-            ),
-        }
-    return [hero, supporting]
+        target = 2
+
+    supporting_prompts: list[str] = []
+    if ct == "comparison" or " vs " in kw.lower():
+        supporting_prompts.append(
+            f"Clean comparison infographic for '{kw}': two or three labeled columns, "
+            "simple icons, white background, no fake brand logos, no tiny unreadable text."
+        )
+    elif ct == "listicle":
+        supporting_prompts.append(
+            f"Numbered visual overview of the main considerations for '{kw}' as a simple "
+            "diagram on a light background. No stock photography, no logos."
+        )
+    elif ct == "landing" or (intent or "").lower() == "transactional":
+        supporting_prompts.append(
+            f"Simple process diagram of how a {vert} firm delivers '{kw}' for a client in "
+            f"{place}: 3–4 labeled steps, flat vector style, no logos."
+        )
+    else:
+        supporting_prompts.append(
+            f"Original process or architecture diagram illustrating '{kw}' for {vert} in "
+            f"{place}. Clean labeled parts, white background, not stock, no logos."
+        )
+
+    for title in body_titles:
+        supporting_prompts.append(
+            f"Original editorial illustration for the '{title}' section of an article about "
+            f"'{kw}' in {vert}, {place}. Clear subject, no logos, no readable paragraphs of text."
+        )
+
+    # Pad with distinct angles when outline is thin but target asks for more frames.
+    pad_angles = (
+        f"Before/after or outcomes visual for '{kw}' in {place} — realistic scene, no logos.",
+        f"Checklist or decision-criteria diagram for choosing '{kw}' in {vert}. Flat vector, no logos.",
+        f"Team or customer journey moment tied to '{kw}' in {place}. Photorealistic, no stock smiles.",
+        f"Tools / inputs diagram used when delivering '{kw}' for {vert}. Clean labels, white background.",
+        f"Local proof or market-context visual for '{kw}' in {place}. No fake charts with invented numbers.",
+    )
+    for angle in pad_angles:
+        if len(supporting_prompts) >= target - 1:
+            break
+        if angle not in supporting_prompts:
+            supporting_prompts.append(angle)
+
+    out = [hero]
+    for prompt in supporting_prompts:
+        if len(out) >= target:
+            break
+        out.append({"role": "supporting", "prompt": prompt})
+    return out
 
 
 def _content_type(intent: str, keyword: str = "") -> str:
@@ -419,6 +465,20 @@ def _queue_row_from_source(
         if source.get("opportunity_score") is not None
         else idea.get("opportunity_score"),
         "business_fit": source.get("business_fit") or idea.get("business_fit"),
+        "service": idea.get("service") or source.get("service"),
+        "subservice": idea.get("subservice") or source.get("subservice"),
+        "target": idea.get("target") or source.get("target"),
+        "target_type": idea.get("target_type") or source.get("target_type"),
+        "seed": idea.get("seed") or source.get("seed"),
+        "supports_service_id": idea.get("supports_service_id")
+        or source.get("supports_service_id")
+        or source.get("service_id"),
+        "supports_subservice_id": idea.get("supports_subservice_id")
+        or source.get("supports_subservice_id")
+        or source.get("subservice_id"),
+        "parent_service_id": idea.get("parent_service_id")
+        or source.get("parent_service_id"),
+        "parent_segment": idea.get("parent_segment") or source.get("parent_segment"),
         "suggested_url": f"https://{domain}{path}",
         "beat_competitors": source.get("competitor_domains")
         or idea.get("competitor_domains")
@@ -1205,7 +1265,8 @@ async def run_content_strategy_plan(
                     if isinstance(link, dict) and link.get("from"):
                         plan["internal_linking"].append(link)
                 plan["source"] = "content_strategy_skill"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log.warning("content_strategy_summary_json_failed", client=client_name, error=str(exc))
         try:
             polished = await synthesize_text(
                 "You are an SEO content strategist. Write 4-6 sentences.",
@@ -1215,8 +1276,12 @@ async def run_content_strategy_plan(
             )
             if polished and len(polished.strip()) > 40:
                 plan["executive_summary"] = polished.strip()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as fallback_exc:  # noqa: BLE001
+            log.warning(
+                "content_strategy_summary_fallback_failed",
+                client=client_name,
+                error=str(fallback_exc),
+            )
 
     from app.services.bw_workbook import attach_workbook_to_content_strategy
 

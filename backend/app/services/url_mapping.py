@@ -1,34 +1,28 @@
-"""URL mapping pipeline: cluster → crawl → score → optimize | review | create.
+"""URL mapping — execute the topic decision against real URLs.
 
-KEYWORD CLUSTERS
+URL mapping runs LAST. By the time a cluster arrives here,
+``topic_classification`` has already compared it against the site map and
+decided *what it is* (existing / needs optimization / needs consolidation /
+new / supporting / cannibalization risk / out of scope / uncertain). This module
+picks the URL that decision implies and scores the evidence for it — it does not
+get to invent the topic structure a second time.
+
+CLUSTER (+ topic_status from Phase 5)
       ↓
-PRIMARY KEYWORD
+PRIMARY KEYWORD → SEARCH INTENT → SERP ANALYSIS
       ↓
-SEARCH INTENT
+WEBSITE URL CRAWL → URL CANDIDATES
       ↓
-SERP ANALYSIS
+Semantic / Intent / Keyword-topic / Ranking / Business scoring
+   (real on-site matches only — fallback and proposed-URL rows never score)
       ↓
-WEBSITE URL CRAWL
+URL SCORE → HIGH / MEDIUM / LOW
       ↓
-URL CANDIDATES
+topic_status governs:
+  existing_url | existing_url_needs_optimization | existing_url_needs_consolidation
+  | new_proposed_url | no_dedicated_url
       ↓
-Semantic Matching
-      ↓
-Intent Matching
-      ↓
-Keyword/Topic Match
-      ↓
-Ranking Evidence
-      ↓
-Traffic/Business Data
-      ↓
-URL SCORE
-      ↓
-HIGH / MEDIUM / LOW
-      ↓
-OPTIMIZE EXISTING | REVIEW/MERGE/REDIRECT | CREATE
-      ↓
-FINAL URL MAP
+duplicate-proposed-URL check → FINAL URL MAP (every row with a reason)
 """
 
 from __future__ import annotations
@@ -53,8 +47,8 @@ _HIGH_THRESHOLD = 65
 _MEDIUM_THRESHOLD = 35
 
 _INTENT_PAGE_AFFINITY = {
-    "transactional": {"service", "service_hub", "services", "sub_services", "location", "product", "landing"},
-    "commercial": {"service", "services", "comparison", "guides", "location", "sub_services"},
+    "transactional": {"service", "subservice", "sub_service", "service_hub", "services", "sub_services", "location", "product", "landing"},
+    "commercial": {"service", "subservice", "sub_service", "services", "comparison", "guides", "location", "sub_services"},
     "informational": {"blog", "guides", "guide", "article", "hub", "spoke"},
     "navigational": {"home", "service_hub", "other"},
 }
@@ -185,6 +179,12 @@ def _tokens(text: str) -> set[str]:
 
 
 def _overlap_ratio(a: str, b: str) -> float:
+    """Containment-biased overlap, used for *scoring* a candidate's slug/title.
+
+    Deliberately asymmetric: a slug that contains the keyword is a strong signal
+    even though the slug is longer. Not suitable for deciding whether a page is
+    a candidate at all — see _jaccard.
+    """
     na, nb = _norm_kw(a), _norm_kw(b)
     if not na or not nb:
         return 0.0
@@ -196,12 +196,56 @@ def _overlap_ratio(a: str, b: str) -> float:
     return len(aw & bw) / max(1, min(len(aw), len(bw)))
 
 
+def _jaccard(a: str, b: str) -> float:
+    """Symmetric token overlap, used to *gate* candidates.
+
+    _overlap_ratio divides by the smaller token set, so a one-word page ("/pricing",
+    titled "Pricing") scores 1.0 against any keyword containing that word — which
+    is how "payroll software pricing" used to acquire /pricing as a genuine
+    existing-page match. Jaccard refuses that.
+    """
+    aw, bw = _tokens(a), _tokens(b)
+    if not aw or not bw:
+        return 0.0
+    return len(aw & bw) / len(aw | bw)
+
+
+def _topical_candidate_reason(
+    *,
+    primary_keyword: str,
+    want: str,
+    want_tokens: set[str],
+    blob: str,
+    title: str,
+    page_keyword: str,
+) -> str | None:
+    """Is this page a plausible target for the keyword? Reason, or None.
+
+    Requires a majority of the keyword's tokens (and at least two, for
+    multi-word keywords) rather than the old "half, rounded down, minimum one".
+    """
+    if want and want in blob:
+        return "keyword_topic_overlap"
+    if want_tokens:
+        need = max(1, (len(want_tokens) + 1) // 2)
+        if len(want_tokens) >= 2:
+            need = max(2, need)
+        if len(want_tokens & _tokens(blob)) >= need:
+            return "keyword_topic_overlap"
+    if _jaccard(primary_keyword, title) >= 0.5 or _jaccard(primary_keyword, page_keyword) >= 0.5:
+        return "title_or_keyword_overlap"
+    return None
+
+
 def collect_crawl_pages(
     *,
     website: dict[str, Any] | None = None,
     content_audit: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Normalize crawled / audited pages into URL candidates."""
+    """Normalize crawled / audited pages into URL candidates.
+
+    Prefers the Phase 3 ``site_sitemap`` inventory when present.
+    """
     website = dict(website or {})
     audit = dict(content_audit or {})
     by_path: dict[str, dict[str, Any]] = {}
@@ -217,6 +261,11 @@ def collect_crawl_pages(
         merged.setdefault("url", row.get("url") or path)
         by_path[path] = merged
 
+    from app.services.site_sitemap import sitemap_pages
+
+    for item in sitemap_pages(website):
+        _add(item)
+
     for key in ("pages", "crawled_pages", "top_pages", "sample_urls"):
         raw = website.get(key)
         if isinstance(raw, list):
@@ -226,13 +275,30 @@ def collect_crawl_pages(
                 elif item:
                     _add({"url": str(item), "title": str(item)})
 
-    crawl = website.get("crawl")
+    site_sitemap = website.get("site_sitemap")
+    if isinstance(site_sitemap, dict):
+        for item in site_sitemap.get("pages") or []:
+            if isinstance(item, dict):
+                _add(item)
+            elif item:
+                _add({"url": str(item)})
+        for item in site_sitemap.get("urls") or []:
+            if isinstance(item, str):
+                _add({"url": item})
+
+    crawl = website.get("crawl") or website.get("crawl_technical")
     if isinstance(crawl, dict):
-        for item in crawl.get("discovered_urls") or []:
+        summary = crawl.get("summary") if isinstance(crawl.get("summary"), dict) else crawl
+        for item in summary.get("discovered_urls") or []:
             if isinstance(item, str):
                 _add({"url": item})
             elif isinstance(item, dict):
                 _add(item)
+        nested = summary.get("site_sitemap")
+        if isinstance(nested, dict):
+            for item in nested.get("pages") or []:
+                if isinstance(item, dict):
+                    _add(item)
 
     for key in ("inventory", "refresh_queue", "dispositions"):
         for row in audit.get(key) or []:
@@ -248,8 +314,15 @@ def build_url_candidates(
     crawled_pages: list[dict[str, Any]],
     suggested_url: str | None = None,
     limit: int = 40,
+    include_suggested_stub: bool = True,
 ) -> list[dict[str, Any]]:
-    """Return crawl pages that could plausibly map to this cluster."""
+    """Return crawl pages that could plausibly map to this cluster.
+
+    ``include_suggested_stub`` controls whether a *non-existent* suggested URL is
+    returned as a placeholder candidate. Decision-making callers pass False: a
+    URL the cluster merely proposed is not evidence about the live site, and
+    letting it into the scored pool lets an invented page set the score band.
+    """
     want = _norm_kw(primary_keyword)
     want_tokens = _tokens(primary_keyword)
     sug = url_n(suggested_url or "")
@@ -268,7 +341,7 @@ def build_url_candidates(
             if url_n(str(page.get("path") or page.get("url") or "")) == sug:
                 _maybe_add(page, reason="suggested_url_exact")
                 break
-        if sug not in seen:
+        if sug not in seen and include_suggested_stub:
             _maybe_add({"url": sug, "path": sug, "title": primary_keyword.title()}, reason="suggested_url_only")
 
     for page in crawled_pages:
@@ -277,11 +350,16 @@ def build_url_candidates(
         slug = path.strip("/").replace("-", " ")
         kw = str(page.get("keyword") or page.get("primary_keyword") or "")
         blob = f"{title} {slug} {kw}".lower()
-        if want in blob or (want_tokens and len(want_tokens & _tokens(blob)) >= max(1, len(want_tokens) // 2)):
-            _maybe_add(page, reason="keyword_topic_overlap")
-            continue
-        if _overlap_ratio(primary_keyword, title) >= 0.5 or _overlap_ratio(primary_keyword, kw) >= 0.5:
-            _maybe_add(page, reason="title_or_keyword_overlap")
+        reason = _topical_candidate_reason(
+            primary_keyword=primary_keyword,
+            want=want,
+            want_tokens=want_tokens,
+            blob=blob,
+            title=title,
+            page_keyword=kw,
+        )
+        if reason:
+            _maybe_add(page, reason=reason)
 
     if not out:
         for page in crawled_pages[: min(limit, 12)]:
@@ -342,7 +420,7 @@ def score_intent_match(
     if (
         pattern
         and (serp_summary or {}).get("validated")
-        and page_type in ("service", "hub", "sub_service")
+        and page_type in ("service", "hub", "subservice", "sub_service")
         and not pattern.search(f"{title} {url}".lower())
     ):
         score = min(score, 6.0)
@@ -481,6 +559,14 @@ def score_url_candidate(
         "candidate_reason": page.get("candidate_reason"),
         "disposition": page.get("disposition"),
         "metrics": page.get("metrics"),
+        # Site-map judgements about the page itself. Carried through so topic
+        # classification can tell "right page, under-built" from "right page,
+        # already good" without re-reading the inventory.
+        "page_type": page.get("page_type") or page.get("cluster"),
+        "content_quality": page.get("content_quality"),
+        "word_count": page.get("word_count"),
+        "canonical_url": page.get("canonical_url"),
+        "potential_cannibalization": page.get("potential_cannibalization") or [],
     }
 
 
@@ -493,11 +579,12 @@ def band_from_score(score: float) -> str:
 
 
 def find_existing_page_url(scored: list[dict[str, Any]]) -> str | None:
-    """Best on-site URL that genuinely matches the keyword (not crawl fallback)."""
-    for candidate in scored:
-        reason = str(candidate.get("candidate_reason") or "")
-        if reason not in _REAL_CRAWL_MATCH_REASONS:
-            continue
+    """Best on-site URL that genuinely matches the keyword (not crawl fallback).
+
+    Kept as the single-value convenience over ``real_match_candidates``, which
+    callers use when they also need the matched page's score and breakdown.
+    """
+    for candidate in real_match_candidates(scored):
         path = url_n(str(candidate.get("path") or candidate.get("url") or ""))
         if path and path != "/":
             return path
@@ -526,12 +613,266 @@ def resolve_sheet_url_columns(
         return None, new_url or sel
     if sel and sel != "/":
         return sel, None
+    # Nothing resolvable on either side (e.g. a cluster held for review with no
+    # existing page and no proposed URL). Previously fell off the end returning
+    # a bare None, which blew up at the `current_url, proposed_url = ...` unpack.
+    return None, None
+
+
 def action_from_band(band: str, *, has_existing_page: bool) -> str:
     if not has_existing_page:
         return "CREATE"
     if band == "HIGH":
         return "OPTIMIZE_EXISTING"
     return "REVIEW_MERGE_REDIRECT"
+
+
+def real_match_candidates(scored: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Scored candidates that are genuine on-site matches for the keyword.
+
+    Excludes the crawl-pool fallback (arbitrary pages returned when nothing
+    matched) and any placeholder built from a merely *proposed* URL. Only these
+    rows may drive the URL score, the band, or the competing-URL list — anything
+    else attributes a score to a page that never matched.
+    """
+    return [
+        c
+        for c in scored
+        if str(c.get("candidate_reason") or "") in _REAL_CRAWL_MATCH_REASONS
+    ]
+
+
+def find_existing_match_for_cluster(
+    cluster: dict[str, Any],
+    *,
+    crawled_pages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Cheap "does the live site already cover this cluster" lookup.
+
+    Reuses the same scoring machinery as map_cluster_to_url() but skips the
+    taxonomy/sheet-column work that only matters once Phase 6b commits to a
+    final URL decision. Used after keyword clustering to classify clusters
+    against the Phase 3 sitemap (plus any live enrichments) before URL mapping.
+
+    The returned score/band describe the *matched* page, and the score breakdown
+    is carried through so topic classification can tell "the right page, weakly
+    optimized" apart from "the right-looking URL, wrong page type".
+    """
+    primary = identify_primary_keyword(cluster)
+    secondaries = identify_secondary_keywords(cluster)
+    intent = str(cluster.get("intent") or detect_intent(primary)).lower()
+    candidates = build_url_candidates(
+        primary_keyword=primary,
+        crawled_pages=crawled_pages,
+        suggested_url=cluster.get("recommended_url"),
+        include_suggested_stub=False,
+    )
+    scored = [
+        score_url_candidate(
+            page,
+            cluster=cluster,
+            primary_keyword=primary,
+            secondary_keywords=secondaries,
+            cluster_intent=intent,
+        )
+        for page in candidates
+    ]
+    scored.sort(key=lambda x: (-float(x.get("url_score") or 0), str(x.get("path") or "")))
+    real = real_match_candidates(scored)
+    best = real[0] if real else None
+    existing_url = str((best or {}).get("path") or "") or None
+    if existing_url == "/":
+        existing_url, best = None, None
+    match_score = float((best or {}).get("url_score") or 0)
+    return {
+        "matched": bool(existing_url),
+        "matched_url": existing_url,
+        "match_score": match_score,
+        "match_band": band_from_score(match_score),
+        "score_breakdown": (best or {}).get("score_breakdown") or {},
+        "matched_page": {
+            "url": best.get("url"),
+            "title": best.get("title"),
+            "page_type": best.get("page_type"),
+            "content_quality": best.get("content_quality"),
+            "word_count": best.get("word_count"),
+            "canonical_url": best.get("canonical_url"),
+            "potential_cannibalization": best.get("potential_cannibalization") or [],
+        }
+        if best
+        else {},
+        "candidates_considered": len(scored),
+        "competing_urls": [
+            str(c.get("path")) for c in real[1:4] if c.get("path") and c.get("path") != existing_url
+        ],
+        # When the runner-up scores nearly as well, the site itself has two
+        # pages chasing one topic — that is site-side cannibalization, and it
+        # must be visible before anything is mapped or created.
+        "runner_up_url": str(real[1].get("path")) if len(real) > 1 else None,
+        "runner_up_score": float(real[1].get("url_score") or 0) if len(real) > 1 else None,
+    }
+
+
+def _merge_inventory_pages(
+    sitemap_pages: list[dict[str, Any]] | None,
+    live_pages: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Prefer sitemap inventory; overlay live-scan title/H1 when the URL matches."""
+    by_path: dict[str, dict[str, Any]] = {}
+
+    def _path(page: dict[str, Any]) -> str:
+        raw = str(page.get("path") or page.get("url") or "").strip()
+        if not raw:
+            return ""
+        if raw.startswith("http"):
+            from urllib.parse import urlparse
+
+            return (urlparse(raw).path or "/").rstrip("/") or "/"
+        return raw.rstrip("/") or "/"
+
+    for page in sitemap_pages or []:
+        if not isinstance(page, dict):
+            continue
+        path = _path(page)
+        if path:
+            by_path[path] = dict(page)
+    for page in live_pages or []:
+        if not isinstance(page, dict):
+            continue
+        path = _path(page)
+        if not path:
+            continue
+        if path in by_path:
+            merged = {**by_path[path], **{k: v for k, v in page.items() if v not in (None, "", [])}}
+            by_path[path] = merged
+        else:
+            by_path[path] = dict(page)
+    return list(by_path.values())
+
+
+def classify_clusters_against_sitemap(
+    clusters: list[dict[str, Any]],
+    *,
+    sitemap_pages: list[dict[str, Any]] | None = None,
+    live_pages: list[dict[str, Any]] | None = None,
+    inventory_complete: bool = True,
+) -> dict[str, Any]:
+    """After clustering, before URL mapping: classify every cluster against the
+    existing site map.
+
+    Thin wrapper that merges the Phase 3 sitemap with any live-scan enrichment
+    and hands the work to ``topic_classification``, which owns the full status
+    taxonomy (existing / needs-optimization / needs-consolidation / new /
+    supporting / cannibalization / out-of-scope / uncertain), the reason for
+    each call, and its confidence.
+    """
+    from app.services.topic_classification import classify_clusters_against_site_map
+
+    pages = _merge_inventory_pages(sitemap_pages, live_pages)
+    report = classify_clusters_against_site_map(
+        [c for c in clusters if isinstance(c, dict)],
+        pages=pages,
+        inventory_complete=inventory_complete,
+    )
+    report["sitemap_page_count"] = len(sitemap_pages or [])
+    report["live_page_count"] = len(live_pages or [])
+    return report
+
+
+# Topic status (from topic_classification) → URL mapping decision. `action`
+# stays inside the three legacy values every downstream reader already switches
+# on; the richer answer travels in `url_status` / `dedicated_url`.
+_STATUS_TO_MAPPING = {
+    "EXISTING_TOPIC": ("OPTIMIZE_EXISTING", "existing_url", True),
+    "EXISTING_TOPIC_NEEDS_OPTIMIZATION": ("OPTIMIZE_EXISTING", "existing_url_needs_optimization", True),
+    "EXISTING_TOPIC_NEEDS_CONSOLIDATION": ("REVIEW_MERGE_REDIRECT", "existing_url_needs_consolidation", True),
+    "CANNIBALIZATION_RISK": ("REVIEW_MERGE_REDIRECT", "existing_url_needs_consolidation", False),
+    "NEW_TOPIC": ("CREATE", "new_proposed_url", True),
+    "SUPPORTING_TOPIC": ("OPTIMIZE_EXISTING", "no_dedicated_url", False),
+    "IRRELEVANT": ("REVIEW_MERGE_REDIRECT", "no_dedicated_url", False),
+}
+# Fallback for clusters that never went through topic classification.
+_LEGACY_DISPOSITION_TO_STATUS = {
+    "existing_topic": "EXISTING_TOPIC",
+    "existing_review": "EXISTING_TOPIC_NEEDS_CONSOLIDATION",
+    "new_topic": "NEW_TOPIC",
+    "supporting_topic": "SUPPORTING_TOPIC",
+    "out_of_scope": "IRRELEVANT",
+}
+
+
+def _apply_topic_status(
+    cluster: dict[str, Any],
+    *,
+    action: str,
+    band: str,
+    existing_page_url: str | None,
+    has_existing: bool,
+) -> dict[str, Any]:
+    """Let the Phase 5 topic decision govern the URL action, not re-derive it.
+
+    URL mapping executes a decision that has already been made against the site
+    map; it does not get to decide the topic structure a second time here.
+    """
+    status = str(cluster.get("topic_status") or "").upper()
+    if not status:
+        legacy = str(cluster.get("topic_disposition") or "").lower()
+        status = _LEGACY_DISPOSITION_TO_STATUS.get(legacy, "")
+    # UNCERTAIN carries no URL opinion of its own — act on the provisional call
+    # but keep the row flagged so nothing ships on a coin flip.
+    effective = status
+    if status == "UNCERTAIN":
+        effective = str(cluster.get("provisional_topic_status") or "NEW_TOPIC").upper()
+
+    prior_url = str(
+        (cluster.get("existing_page_match") or {}).get("matched_url")
+        or (cluster.get("sitemap_match") or {}).get("matched_url")
+        or ""
+    ).strip()
+
+    mapped = _STATUS_TO_MAPPING.get(effective)
+    if not mapped:
+        return {
+            "action": action,
+            "existing_page_url": existing_page_url,
+            "has_existing": has_existing,
+            "dedicated_url": True,
+            "url_status": "existing_url" if has_existing else "new_proposed_url",
+            "topic_status": status or None,
+            "needs_review": bool(cluster.get("topic_needs_review")),
+        }
+
+    new_action, url_status, dedicated = mapped
+    if effective in ("EXISTING_TOPIC", "EXISTING_TOPIC_NEEDS_OPTIMIZATION", "EXISTING_TOPIC_NEEDS_CONSOLIDATION"):
+        if prior_url:
+            existing_page_url = prior_url
+        has_existing = bool(existing_page_url)
+        if not has_existing:
+            # Classified as existing but no URL survived — do not silently
+            # create; surface it instead.
+            new_action = "REVIEW_MERGE_REDIRECT"
+            url_status = "no_dedicated_url"
+            dedicated = False
+    elif effective == "NEW_TOPIC":
+        if band == "LOW" or not has_existing:
+            existing_page_url = None
+            has_existing = False
+    elif effective in ("SUPPORTING_TOPIC", "CANNIBALIZATION_RISK", "IRRELEVANT"):
+        if prior_url and not existing_page_url:
+            existing_page_url = prior_url
+        has_existing = bool(existing_page_url)
+        if not has_existing:
+            new_action = "REVIEW_MERGE_REDIRECT"
+
+    return {
+        "action": new_action,
+        "existing_page_url": existing_page_url,
+        "has_existing": has_existing,
+        "dedicated_url": dedicated,
+        "url_status": url_status,
+        "topic_status": status or effective,
+        "needs_review": bool(cluster.get("topic_needs_review")) or status == "UNCERTAIN",
+    }
 
 
 def map_cluster_to_url(
@@ -552,6 +893,7 @@ def map_cluster_to_url(
         primary_keyword=primary,
         crawled_pages=crawled_pages,
         suggested_url=suggested,
+        include_suggested_stub=False,
     )
     scored = [
         score_url_candidate(
@@ -568,26 +910,53 @@ def map_cluster_to_url(
         for page in candidates
     ]
     scored.sort(key=lambda x: (-float(x.get("url_score") or 0), str(x.get("path") or "")))
-    best = scored[0] if scored else None
+    # The score band must describe the page we would actually map to. Scoring
+    # off scored[0] let a crawl-pool fallback page (or, before the stub was
+    # removed, an invented URL) set a HIGH band for a cluster whose real match
+    # scored 20 — and that band drove the OPTIMIZE vs REVIEW vs CREATE decision.
+    real = real_match_candidates(scored)
+    best = real[0] if real else None
     best_score = float((best or {}).get("url_score") or 0)
     band = band_from_score(best_score)
     create_url = str(suggested or cluster.get("recommended_url") or f"/blog/{_slug(primary)}")
 
-    existing_page_url = find_existing_page_url(scored)
+    existing_page_url = str((best or {}).get("path") or "") or None
+    # Prefer Phase 5 topic classification when present
+    prior_match = cluster.get("existing_page_match") or cluster.get("sitemap_match") or {}
+    prior_url = str(
+        prior_match.get("matched_url")
+        or (cluster.get("sitemap_match") or {}).get("matched_url")
+        or ""
+    ).strip()
+    if prior_url and not existing_page_url:
+        existing_page_url = prior_url
+        best_score = best_score or float(prior_match.get("match_score") or 0)
+        band = band_from_score(best_score)
     has_existing = bool(existing_page_url)
     action = action_from_band(band, has_existing_page=has_existing)
 
+    decision = _apply_topic_status(
+        cluster,
+        action=action,
+        band=band,
+        existing_page_url=existing_page_url,
+        has_existing=has_existing,
+    )
+    action = decision["action"]
+    existing_page_url = decision["existing_page_url"]
+    has_existing = decision["has_existing"]
+
     current_url, proposed_url = resolve_sheet_url_columns(
         current_url=existing_page_url,
-        proposed_url=create_url if not has_existing else None,
+        proposed_url=create_url if (not has_existing and decision["dedicated_url"]) else None,
         action=action,
         selected_url=existing_page_url,
-        create_url=create_url,
+        create_url=create_url if decision["dedicated_url"] else None,
     )
-    final_url = current_url or proposed_url or create_url
+    final_url = current_url or proposed_url or (create_url if decision["dedicated_url"] else None)
     competing = [
         c["path"]
-        for c in scored[1:4]
+        for c in real[1:4]
         if c.get("path") and c.get("path") != final_url and c.get("path") != current_url
     ]
 
@@ -618,6 +987,29 @@ def map_cluster_to_url(
         "match_confidence": round(best_score / 100, 2),
         "competing_urls": competing,
         "create_url": create_url,
+        # --- URL Mapping entity: the decision, its basis, and its confidence --
+        "cluster_id": cluster.get("cluster_id") or _slug(str(cluster.get("name") or primary)),
+        "topic_status": decision["topic_status"],
+        "url_status": decision["url_status"],
+        "target_type": (
+            "new_page" if decision["url_status"] == "new_proposed_url"
+            else "none" if decision["url_status"] == "no_dedicated_url"
+            else "existing_page"
+        ),
+        "target_url": final_url,
+        "dedicated_url": decision["dedicated_url"],
+        "mapping_status": decision["url_status"],
+        "mapping_reason": _mapping_reason(cluster, decision, band=band, score=best_score, url=final_url),
+        "cannibalization_risk": bool(
+            cluster.get("cannibalization") or decision["url_status"] == "existing_url_needs_consolidation"
+        ),
+        "needs_human_review": decision["needs_review"],
+        "confidence": (
+            float(cluster.get("topic_confidence"))
+            if isinstance(cluster.get("topic_confidence"), (int, float))
+            else round(best_score / 100, 2)
+        ),
+        "supporting_parent": (cluster.get("supporting_parent") or {}).get("parent_cluster"),
         # --- URL Mapping & Taxonomy sheet ------------------------------
         "level": taxonomy["level"],
         "l1_category": taxonomy["l1_category"],
@@ -658,6 +1050,38 @@ def map_cluster_to_url(
 def _slug(text: str) -> str:
     s = re.sub(r"[^a-z0-9\s-]", "", (text or "").lower())
     return re.sub(r"[\s_]+", "-", s).strip("-") or "page"
+
+
+_URL_STATUS_REASON = {
+    "existing_url": "Mapped to the existing page — it already owns this topic and intent.",
+    "existing_url_needs_optimization": "Mapped to the existing page; it is the right target but needs optimization.",
+    "existing_url_needs_consolidation": "Existing page is a partial/competing target — consolidate or retarget before creating anything.",
+    "new_proposed_url": "No existing page satisfies this cluster — new URL proposed.",
+    "no_dedicated_url": "No dedicated URL: this cluster supports another page or is held for review.",
+}
+
+
+def _mapping_reason(
+    cluster: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    band: str,
+    score: float,
+    url: str | None,
+) -> str:
+    """Every mapping must say why. Prefers the Phase 5 topic reason (which cites
+    the site-map evidence) and appends the Phase 6 scoring outcome."""
+    bits: list[str] = []
+    topic_reason = str(cluster.get("topic_reason") or "").strip()
+    bits.append(topic_reason or _URL_STATUS_REASON.get(decision["url_status"], "Mapped by URL score."))
+    if url:
+        bits.append(f"URL {url} scored {score:g}/100 ({band}).")
+    else:
+        bits.append(f"No URL assigned (best on-site candidate {score:g}/100, {band}).")
+    parent = (cluster.get("supporting_parent") or {}).get("parent_cluster")
+    if parent:
+        bits.append(f"Folds into '{parent}'.")
+    return " ".join(bits)
 
 
 def build_final_url_map(
@@ -709,14 +1133,23 @@ def build_final_url_map(
             entry["pillar"] = pillar_map[cluster_name]
         entries.append(entry)
 
+    _resolve_supporting_targets(entries)
+    duplicate_proposed = _flag_duplicate_proposed_urls(entries)
+
     by_action = {"OPTIMIZE_EXISTING": 0, "REVIEW_MERGE_REDIRECT": 0, "CREATE": 0}
     for row in entries:
         by_action[row.get("action") or "CREATE"] = by_action.get(row.get("action") or "CREATE", 0) + 1
+
+    by_url_status: dict[str, int] = {}
+    for row in entries:
+        key = str(row.get("url_status") or "unclassified")
+        by_url_status[key] = by_url_status.get(key, 0) + 1
 
     return {
         "final_url_map": entries,
         "crawl_page_count": len(crawled),
         "mapped_cluster_count": len(entries),
+        "duplicate_proposed_urls": duplicate_proposed,
         "summary": {
             "optimize_existing": by_action["OPTIMIZE_EXISTING"],
             "review_merge_redirect": by_action["REVIEW_MERGE_REDIRECT"],
@@ -724,8 +1157,82 @@ def build_final_url_map(
             "high_band": sum(1 for e in entries if e.get("score_band") == "HIGH"),
             "medium_band": sum(1 for e in entries if e.get("score_band") == "MEDIUM"),
             "low_band": sum(1 for e in entries if e.get("score_band") == "LOW"),
+            "by_url_status": by_url_status,
+            "no_dedicated_url": by_url_status.get("no_dedicated_url", 0),
+            "cannibalization_risk": sum(1 for e in entries if e.get("cannibalization_risk")),
+            "needs_human_review": sum(1 for e in entries if e.get("needs_human_review")),
+            "duplicate_proposed_urls": len(duplicate_proposed),
         },
     }
+
+
+def _resolve_supporting_targets(entries: list[dict[str, Any]]) -> None:
+    """Point supporting clusters at the URL their parent cluster actually owns.
+
+    map_cluster_to_url() only sees one cluster, so a supporting row leaves the
+    batch with its own (or no) URL. Here — where every row is visible — the
+    supporting row is repointed at the parent's page so its keywords strengthen
+    that page instead of quietly becoming a second URL.
+    """
+    by_cluster = {
+        str(e.get("cluster") or ""): e for e in entries if isinstance(e, dict) and e.get("cluster")
+    }
+    for entry in entries:
+        parent_name = str(entry.get("supporting_parent") or "")
+        if not parent_name:
+            continue
+        parent = by_cluster.get(parent_name)
+        if not parent:
+            continue
+        parent_url = parent.get("selected_url") or parent.get("current_url") or parent.get("proposed_url")
+        if not parent_url:
+            continue
+        entry["selected_url"] = parent_url
+        entry["target_url"] = parent_url
+        entry["current_url"] = parent.get("current_url")
+        entry["proposed_url"] = None
+        entry["action"] = "OPTIMIZE_EXISTING" if parent.get("current_url") else "REVIEW_MERGE_REDIRECT"
+        entry["status"] = _STATUS_LABELS.get(entry["action"], entry["action"])
+        entry["mapping_reason"] = (
+            f"{entry.get('mapping_reason') or ''} Target resolved to parent page {parent_url}."
+        ).strip()
+
+
+def _flag_duplicate_proposed_urls(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Two clusters proposing the same brand-new URL is cannibalization created
+    by us, before the page even exists. Previously nothing checked this: the
+    architecture merge skipped every CREATE row, so colliding proposals shipped.
+    """
+    by_url: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        if not entry.get("dedicated_url", True):
+            continue
+        proposed = url_n(str(entry.get("proposed_url") or ""))
+        if not proposed or proposed == "/":
+            continue
+        by_url.setdefault(proposed, []).append(entry)
+
+    collisions: list[dict[str, Any]] = []
+    for proposed, rows in by_url.items():
+        if len(rows) < 2:
+            continue
+        rows.sort(key=lambda e: -float(e.get("combined_cluster_volume") or 0))
+        owner = rows[0]
+        for loser in rows[1:]:
+            loser["cannibalization_risk"] = True
+            loser["needs_human_review"] = True
+            loser["mapping_reason"] = (
+                f"{loser.get('mapping_reason') or ''} Proposed URL {proposed} is already "
+                f"proposed by cluster '{owner.get('cluster')}' — resolve before creating."
+            ).strip()
+        collisions.append(
+            {
+                "proposed_url": proposed,
+                "owner_cluster": owner.get("cluster"),
+                "competing_clusters": [r.get("cluster") for r in rows[1:]],
+            }
+        )
+    return collisions
 
 
 def apply_url_map_to_architecture(

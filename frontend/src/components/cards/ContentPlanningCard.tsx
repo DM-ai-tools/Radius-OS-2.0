@@ -19,6 +19,27 @@ function asStringList(raw: unknown): string[] {
   return raw.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).filter(Boolean);
 }
 
+function contentTypeLabel(row: Record<string, unknown>): string {
+  const raw = row.content_type_label || row.content_type || row.page_type || row.type;
+  if (!raw) return "—";
+  const key = String(raw).trim().toLowerCase();
+  const labels: Record<string, string> = {
+    blog: "Blog",
+    article: "Blog",
+    post: "Blog",
+    service: "Service page",
+    "service page": "Service page",
+    landing: "Landing page",
+    "landing page": "Landing page",
+    faq: "FAQ",
+    guide: "Guide",
+    comparison: "Comparison",
+    listicle: "Listicle",
+    tool: "Tool",
+  };
+  return labels[key] || String(raw);
+}
+
 export default function ContentPlanningCard({ payload, canAct, onAction }: Props) {
   const pages = asRows(payload.pages).length ? asRows(payload.pages) : asRows(payload.roadmap);
   const excluded = asRows(payload.excluded);
@@ -70,6 +91,7 @@ export default function ContentPlanningCard({ payload, canAct, onAction }: Props
                 <th style={{ padding: "6px 8px" }}>#</th>
                 <th style={{ padding: "6px 8px" }}>URL</th>
                 <th style={{ padding: "6px 8px" }}>Keyword</th>
+                <th style={{ padding: "6px 8px" }}>Content type</th>
                 <th style={{ padding: "6px 8px" }}>Action</th>
                 <th style={{ padding: "6px 8px" }}>Disposition</th>
                 <th style={{ padding: "6px 8px" }}>Tier</th>
@@ -87,6 +109,9 @@ export default function ContentPlanningCard({ payload, canAct, onAction }: Props
                     </div>
                   </td>
                   <td style={{ padding: "6px 8px" }}>{String(r.primary_keyword || r.keyword || "—")}</td>
+                  <td style={{ padding: "6px 8px" }}>
+                    <span className="cs-chip">{contentTypeLabel(r)}</span>
+                  </td>
                   <td style={{ padding: "6px 8px" }}>
                     <span className="cs-chip">{String(r.action || "—")}</span>
                   </td>

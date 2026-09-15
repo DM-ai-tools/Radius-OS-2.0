@@ -528,6 +528,23 @@
   font-weight: 700;
 }
 
+.landing-footer-nav {
+  display: flex;
+  gap: 16px;
+}
+
+.landing-footer-nav a {
+  color: rgba(232, 240, 239, 0.85);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.landing-footer-nav a:hover,
+.landing-footer-nav a:focus-visible {
+  color: #f4faf9;
+  text-decoration: underline;
+}
+
 @media (max-width: 860px) {
   .landing-method {
     grid-template-columns: 1fr;

@@ -97,6 +97,39 @@ def detect_intent(keyword: str, existing: str | None = None) -> str:
             return aliases[raw]
         return raw
     k = _norm(keyword)
+    _GEO = (
+        "melbourne",
+        "sydney",
+        "brisbane",
+        "perth",
+        "adelaide",
+        "gold coast",
+        "near me",
+        "australia",
+        "auckland",
+        "wellington",
+    )
+    _SERVICE = (
+        "seo",
+        "sem",
+        "ppc",
+        "ads",
+        "adwords",
+        "marketing",
+        "agency",
+        "web design",
+        "web development",
+        "website",
+        "aeo",
+        "geo",
+    )
+    if any(g in k for g in _GEO) and any(s in k for s in _SERVICE):
+        # Local service queries are commercial unless clearly educational.
+        if any(x in k for x in ("what is", "what are", "how to", "guide", "meaning", "definition")):
+            return "informational"
+        if any(x in k for x in ("buy", "pricing", "price", "cost", "hire", "quote")):
+            return "transactional"
+        return "commercial"
     if any(
         x in k
         for x in (
@@ -122,7 +155,60 @@ def detect_intent(keyword: str, existing: str | None = None) -> str:
         return "commercial"
     if any(x in k for x in ("how to", "what is", "what are", "guide", "tips", "examples")):
         return "informational"
+    if re.search(r"\b(login|sign in|signin|portal|dashboard|my account|customer portal)\b", k):
+        return "navigational"
+    if re.search(r"\b(official site|official website|contact number|phone number)\b", k):
+        return "navigational"
     return "informational"
+
+
+INTENT_LABELS = {
+    "informational": "Informational",
+    "navigational": "Navigational",
+    "commercial": "Commercial",
+    "transactional": "Transactional",
+}
+
+
+def intent_balance(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count intent mix across a keyword pool."""
+    counts = {key: 0 for key in INTENT_LABELS}
+    for row in rows:
+        intent = str(row.get("intent") or detect_intent(str(row.get("keyword") or ""), row.get("intent"))).lower()
+        if intent not in counts:
+            intent = "informational"
+        counts[intent] += 1
+    total = sum(counts.values())
+    percent = {key: round((counts[key] / total) * 100, 1) if total else 0.0 for key in counts}
+    dominant = max(counts, key=counts.get) if total else None
+    dominant_share = (counts[dominant] / total) if total and dominant else 0.0
+    represented = sum(1 for key in counts if counts[key] > 0)
+    balanced = total > 0 and dominant_share <= 0.65 and represented >= 3
+    return {
+        "counts": counts,
+        "percent": percent,
+        "total": total,
+        "balanced": balanced,
+        "dominant_intent": dominant,
+        "dominant_share": round(dominant_share * 100, 1) if total else 0.0,
+    }
+
+
+def intent_balance_warnings(counts: dict[str, int]) -> list[str]:
+    """Flag intent pools that skew too heavily toward one stage."""
+    total = sum(counts.values())
+    if total == 0:
+        return []
+    warnings: list[str] = []
+    for key, label in INTENT_LABELS.items():
+        share = counts.get(key, 0) / total
+        if counts.get(key, 0) == 0:
+            warnings.append(f"No {label.lower()} keywords in pool — consider seeding or gap pulls for that intent.")
+        elif share >= 0.7:
+            warnings.append(
+                f"Intent pool is {share * 100:.0f}% {label.lower()} — broaden seeds to balance informational/commercial/transactional mix."
+            )
+    return warnings
 
 
 def stamp_keyword_intent(row: dict[str, Any]) -> dict[str, Any]:
@@ -210,6 +296,13 @@ def is_noisy_keyword(keyword: str, brand_name: str | None = None) -> bool:
         return True
     if is_stale_year_keyword(kw):
         return True
+    # Finance / ticker bleed from short acronym seeds (e.g. AEO → "aeo stock price")
+    if re.search(
+        r"\b(stock price|share price|stock quote|nasdaq|nyse|ticker|earnings|"
+        r"market cap|dividend|ipo|options chain)\b",
+        kw,
+    ):
+        return True
     # Random brand+geo mashups with very odd tokens
     if re.search(r"\b(io|gmbh|llc|inc)\b", kw) and "white label" not in kw:
         # Allow only if clearly a product phrase; otherwise noisy
@@ -220,6 +313,62 @@ def is_noisy_keyword(keyword: str, brand_name: str | None = None) -> bool:
         if bn and bn in kw and len(kw.split()) <= 2:
             return True
     return False
+
+
+def is_ambiguous_seed(seed: str) -> bool:
+    """True for short acronym-like seeds that expand into unrelated industries."""
+    tokens = [t for t in _norm(seed).split() if t]
+    if len(tokens) == 1 and len(tokens[0]) <= 4:
+        return True
+    return False
+
+
+def prune_redundant_acronym_seeds(seeds: list[str]) -> list[str]:
+    """Drop bare acronyms when a longer seed already contains that token.
+
+    Example: keep 'AEO & GEO Services (AI/answer engine…)' and drop bare 'AEO'.
+    """
+    norms = [_norm(s) for s in seeds if str(s or "").strip()]
+    out: list[str] = []
+    for seed in seeds:
+        text = str(seed or "").strip()
+        if not text:
+            continue
+        sn = _norm(text)
+        tokens = sn.split()
+        if len(tokens) == 1 and len(tokens[0]) <= 4:
+            token = tokens[0]
+            if any(
+                other != sn and token in other.split() and len(other) > len(sn)
+                for other in norms
+            ):
+                continue
+        out.append(text)
+    return out
+
+
+def service_token_overlap(keyword: str, service: str) -> int:
+    """Count distinctive token overlap between a keyword and its owning service."""
+    weak = {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "for",
+        "to",
+        "of",
+        "in",
+        "on",
+        "with",
+        "services",
+        "service",
+        "agency",
+        "company",
+    }
+    st = {t for t in _norm(service).split() if len(t) > 2 and t not in weak}
+    kt = {t for t in _norm(keyword).split() if len(t) > 2 and t not in weak}
+    return len(st & kt)
 
 
 def specificity_score(keyword: str, products: list[str] | None = None) -> float:
@@ -935,6 +1084,173 @@ def _keyword_stem(keyword: str) -> str:
     return " ".join(tokens)
 
 
+def map_service_to_competitor_category(service: str) -> str | None:
+    """Map a CDD service label to Phase 4 competitor category slug."""
+    text = _norm(service)
+    if not text:
+        return None
+    rules: list[tuple[str, tuple[str, ...]]] = [
+        ("seo", ("seo", "search engine", "organic search", "link building")),
+        ("google_ads", ("google ads", "ppc", "paid search", "sem", "adwords")),
+        ("meta", ("meta", "facebook ads", "instagram ads", "paid social", "social ads")),
+        ("email_marketing", ("email", "newsletter", "drip campaign", "email marketing")),
+        ("cro", ("cro", "conversion rate", "landing page", "a/b test", "ux audit")),
+    ]
+    for category, phrases in rules:
+        if any(phrase in text for phrase in phrases):
+            return category
+    return None
+
+
+def _scored_keyword_lookup(scored_keywords: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("keyword") or "").strip().lower(): row
+        for row in scored_keywords
+        if isinstance(row, dict) and row.get("keyword")
+    }
+
+
+def _rollup_keyword_competitors(
+    keywords: list[dict[str, Any]],
+    lookup: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    from collections import Counter
+
+    gap_keywords: list[dict[str, Any]] = []
+    gap_count = 0
+    comp_counts: Counter[str] = Counter()
+    for kw_row in keywords:
+        if not isinstance(kw_row, dict):
+            continue
+        kw = str(kw_row.get("keyword") or "").strip().lower()
+        full = lookup.get(kw) or kw_row
+        if full.get("gap_flag"):
+            gap_count += 1
+            if len(gap_keywords) < 8:
+                gap_keywords.append(
+                    {
+                        "keyword": full.get("keyword"),
+                        "volume": full.get("volume"),
+                        "competitor_domains": list(full.get("competitor_domains") or [])[:5],
+                    }
+                )
+        for domain in full.get("competitor_domains") or []:
+            d = str(domain).lower().removeprefix("www.").split("/")[0]
+            if d:
+                comp_counts[d] += 1
+    return {
+        "gap_keyword_count": gap_count,
+        "gap_keywords": gap_keywords,
+        "competitor_leaders": [
+            {"domain": domain, "keyword_hits": count}
+            for domain, count in comp_counts.most_common(5)
+        ],
+    }
+
+
+def _enrich_seed_bucket(
+    seed: dict[str, Any],
+    lookup: dict[str, dict[str, Any]],
+) -> None:
+    for kw_row in seed.get("keywords") or []:
+        if not isinstance(kw_row, dict):
+            continue
+        kw = str(kw_row.get("keyword") or "").strip().lower()
+        full = lookup.get(kw)
+        if not full:
+            continue
+        if full.get("gap_flag") is not None:
+            kw_row["gap_flag"] = bool(full.get("gap_flag"))
+        if full.get("competitor_domains"):
+            kw_row["competitor_domains"] = list(full.get("competitor_domains") or [])
+    rollup = _rollup_keyword_competitors(seed.get("keywords") or [], lookup)
+    seed.update(rollup)
+
+
+def enrich_service_clusters_with_competitors(
+    service_clusters: list[dict[str, Any]],
+    scored_keywords: list[dict[str, Any]],
+    *,
+    competitive_landscape: dict[str, Any] | None = None,
+    competitors: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Attach gap keywords and competitor leaders to subservices for Phase 5 UI."""
+    lookup = _scored_keyword_lookup(scored_keywords)
+    svc_comparison = (competitive_landscape or {}).get("service_level_comparison") or {}
+    best_by_service = svc_comparison.get("best_by_service") or {}
+
+    comp_name_by_domain: dict[str, str] = {}
+    for comp in competitors or []:
+        if not isinstance(comp, dict):
+            continue
+        raw = str(comp.get("domain") or comp.get("url") or "").strip().lower()
+        raw = raw.removeprefix("https://").removeprefix("http://").removeprefix("www.")
+        domain = raw.split("/")[0]
+        if domain:
+            comp_name_by_domain[domain] = str(comp.get("name") or domain)
+
+    matrix: list[dict[str, Any]] = []
+    for group in service_clusters:
+        if not isinstance(group, dict):
+            continue
+        service = str(group.get("service") or "")
+        category = map_service_to_competitor_category(service)
+        category_leader = best_by_service.get(category) if category else None
+        group["competitor_category"] = category
+        group["category_leader"] = category_leader
+
+        for seed in group.get("seeds") or []:
+            if isinstance(seed, dict):
+                _enrich_seed_bucket(seed, lookup)
+
+        for sub in group.get("subservices") or []:
+            if not isinstance(sub, dict):
+                continue
+            all_keywords: list[dict[str, Any]] = []
+            for seed in sub.get("seeds") or []:
+                if isinstance(seed, dict):
+                    _enrich_seed_bucket(seed, lookup)
+                    all_keywords.extend(seed.get("keywords") or [])
+            rollup = _rollup_keyword_competitors(all_keywords, lookup)
+            sub.update(rollup)
+            sub["competitor_category"] = category
+            sub["category_leader"] = category_leader
+            leaders: list[dict[str, Any]] = []
+            for leader in sub.get("competitor_leaders") or []:
+                if not isinstance(leader, dict):
+                    continue
+                domain = str(leader.get("domain") or "")
+                leaders.append(
+                    {
+                        **leader,
+                        "name": comp_name_by_domain.get(domain, domain),
+                    }
+                )
+            sub["competitor_leaders"] = leaders
+            matrix.append(
+                {
+                    "parent_service": service,
+                    "subservice": sub.get("subservice"),
+                    "page_path": sub.get("page_path"),
+                    "keyword_count": sub.get("keyword_count"),
+                    "gap_keyword_count": sub.get("gap_keyword_count"),
+                    "gap_keywords": sub.get("gap_keywords") or [],
+                    "competitor_leaders": leaders,
+                    "competitor_category": category,
+                    "category_leader": category_leader,
+                }
+            )
+
+    matrix.sort(
+        key=lambda row: (
+            -int(row.get("gap_keyword_count") or 0),
+            str(row.get("parent_service") or "").lower(),
+            str(row.get("subservice") or "").lower(),
+        )
+    )
+    return service_clusters, matrix
+
+
 def select_topics_from_service_clusters(
     service_clusters: list[dict[str, Any]],
     *,
@@ -959,34 +1275,59 @@ def select_topics_from_service_clusters(
         if not service or _norm(service) in {"_other", "other website topics"}:
             # Still allow "Other" only after real services are exhausted
             continue
-        candidates: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for seed_entry in group.get("seeds") or []:
-            if not isinstance(seed_entry, dict):
-                continue
-            seed = seed_entry.get("seed")
-            target = seed_entry.get("target") or service
-            for row in seed_entry.get("keywords") or []:
-                if not isinstance(row, dict):
+
+        def _collect_candidates(
+            seeds: list[dict[str, Any]],
+            *,
+            subservice: str | None = None,
+        ) -> list[dict[str, Any]]:
+            candidates: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for seed_entry in seeds:
+                if not isinstance(seed_entry, dict):
                     continue
-                kw = str(row.get("keyword") or "").strip()
-                nkw = _norm(kw)
-                if not nkw or nkw in seen or is_stale_year_keyword(nkw):
-                    continue
-                if is_noisy_keyword(kw):
-                    continue
-                match_class = str(row.get("match_class") or "broad").lower()
-                words = nkw.split()
-                broad = is_broad_head_term(kw, products)
-                # Drop 1–2 word broad heads (instagram, google ads) always for topics
-                if len(words) <= 2 and (broad or match_class == "broad"):
-                    continue
-                if match_class == "broad" and len(words) < 4:
-                    continue
-                intent = detect_intent(kw, row.get("intent"))
-                seen.add(nkw)
-                candidates.append(
-                    {
+                seed = seed_entry.get("seed")
+                target = seed_entry.get("target") or service
+                for row in seed_entry.get("keywords") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    kw = str(row.get("keyword") or "").strip()
+                    nkw = _norm(kw)
+                    if not nkw or nkw in seen or is_stale_year_keyword(nkw):
+                        continue
+                    if is_noisy_keyword(kw):
+                        continue
+                    match_class = str(row.get("match_class") or "broad").lower()
+                    words = nkw.split()
+                    broad = is_broad_head_term(kw, products)
+                    if len(words) <= 2 and (broad or match_class == "broad"):
+                        continue
+                    if match_class == "broad" and len(words) < 4:
+                        continue
+                    intent = detect_intent(kw, row.get("intent"))
+                    seen.add(nkw)
+                    fit = service_token_overlap(kw, service)
+                    if subservice:
+                        fit = max(fit, service_token_overlap(kw, subservice))
+                    # Require at least weak service fit when the service name is specific
+                    service_tokens = [
+                        t
+                        for t in _norm(service).split()
+                        if len(t) > 2
+                        and t
+                        not in {
+                            "the",
+                            "and",
+                            "for",
+                            "services",
+                            "service",
+                            "agency",
+                            "company",
+                        }
+                    ]
+                    if len(service_tokens) >= 2 and fit <= 0 and match_class in ("related", "broad"):
+                        continue
+                    item = {
                         **row,
                         "keyword": kw,
                         "intent": intent,
@@ -995,20 +1336,40 @@ def select_topics_from_service_clusters(
                         "seed": seed,
                         "target": target,
                         "service": service,
+                        "service_fit": fit,
+                        "gap_flag": bool(row.get("gap_flag")),
+                        "opportunity_score": float(row.get("opportunity_score") or 0),
                     }
+                    if subservice:
+                        item["subservice"] = subservice
+                    candidates.append(item)
+            candidates.sort(
+                key=lambda r: (
+                    class_rank.get(str(r.get("match_class") or "broad"), 3),
+                    0 if not r.get("is_broad_head") else 1,
+                    # Prefer rows that actually share tokens with the service name
+                    -int(r.get("service_fit") or 0),
+                    intent_rank.get(str(r.get("intent") or "informational"), 3),
+                    0 if r.get("gap_flag") else 1,
+                    -(float(r.get("opportunity_score") or 0)),
+                    -(r.get("volume") or 0) if (r.get("volume") or 0) < 50000 else 0,
+                    abs((r.get("volume") or 0) - 3000),
                 )
-        candidates.sort(
-            key=lambda r: (
-                class_rank.get(str(r.get("match_class") or "broad"), 3),
-                0 if not r.get("is_broad_head") else 1,
-                intent_rank.get(str(r.get("intent") or "informational"), 3),
-                -(r.get("volume") or 0) if (r.get("volume") or 0) < 50000 else 0,
-                # Prefer mid-volume over mega-heads that survived filters
-                abs((r.get("volume") or 0) - 3000),
             )
-        )
+            return candidates
+
+        candidates = _collect_candidates(group.get("seeds") or [])
         if candidates:
             per_service.append((service, candidates))
+        for sub in group.get("subservices") or []:
+            if not isinstance(sub, dict):
+                continue
+            sub_name = str(sub.get("subservice") or "").strip()
+            if not sub_name:
+                continue
+            sub_candidates = _collect_candidates(sub.get("seeds") or [], subservice=sub_name)
+            if sub_candidates:
+                per_service.append((f"{service} · {sub_name}", sub_candidates))
 
     # Sort services by total opportunity (prefer those with better exact/phrase rows)
     per_service.sort(

@@ -28,6 +28,8 @@ type AuditItem = {
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
+  /** Known-changes submit — only while Tracking is still in_progress (not at sign-off). */
+  canSubmit?: boolean;
   canGrant: boolean;
   onAction: (action: string) => void;
   onGrant: (provider: string) => void;
@@ -72,6 +74,7 @@ function CardShell({
 export default function TrackingCard({
   payload,
   canAct,
+  canSubmit = false,
   canGrant,
   onAction,
   onGrant,
@@ -111,6 +114,18 @@ export default function TrackingCard({
           Continue without Google
         </button>
       </CardShell>
+    );
+  }
+
+  if (cardType === "tracking_report") {
+    return (
+      <TrackingReportCard
+        payload={payload}
+        canAct={canAct}
+        canSubmit={canSubmit}
+        onAction={onAction}
+        onSubmitKnownChanges={onSubmitKnownChanges}
+      />
     );
   }
 
@@ -262,19 +277,36 @@ export default function TrackingCard({
   }
 
   if (cardType === "tracking_t5_known_changes") {
+    const reportPayload = {
+      ...payload,
+      title: "Phase 2 — Tracking & access report",
+      subtitle: "Client context before confirmation",
+      step: "Phase 2",
+    };
     return (
       <KnownChangesForm
-        payload={payload}
-        canAct={canAct}
+        payload={reportPayload}
+        canSubmit={canSubmit}
         onSubmit={(fields) => onSubmitKnownChanges?.(fields)}
       />
     );
   }
 
-  if (cardType === "tracking_t6_signoff" || cardType === "tracking_health") {
-    return (
-      <SignOffCard payload={payload} canAct={canAct} onAction={onAction} />
-    );
+  if (
+    cardType === "tracking_t6_signoff" ||
+    cardType === "tracking_confirmation" ||
+    cardType === "tracking_health"
+  ) {
+    const confirmationPayload =
+      cardType === "tracking_t6_signoff"
+        ? {
+            ...payload,
+            title: "Tracking confirmation gate",
+            subtitle: "Technical SEO Specialist approval",
+            step: "Confirmation gate",
+          }
+        : payload;
+    return <SignOffCard payload={confirmationPayload} canAct={canAct} onAction={onAction} />;
   }
 
   return (
@@ -284,13 +316,195 @@ export default function TrackingCard({
   );
 }
 
-function KnownChangesForm({
+function TrackingReportCard({
   payload,
   canAct,
-  onSubmit,
+  canSubmit,
+  onAction,
+  onSubmitKnownChanges,
 }: {
   payload: Record<string, unknown>;
   canAct: boolean;
+  canSubmit: boolean;
+  onAction: (action: string) => void;
+  onSubmitKnownChanges?: (fields: Record<string, unknown>) => void;
+}) {
+  const platforms = (payload.platforms || []) as Platform[];
+  const providerStatus = (payload.provider_status || {}) as Record<string, string>;
+  const audit = (payload.audit || {}) as { items?: AuditItem[] };
+  const conversions = (payload.conversions || {}) as {
+    events?: { name: string; status: string }[];
+    summary?: string;
+  };
+  const baseline = (payload.baseline || {}) as {
+    metrics?: Record<string, unknown>;
+    access?: Record<string, boolean>;
+    status?: string;
+    window_months?: number | string;
+  };
+  const knownFields = (payload.known_change_fields || []) as {
+    key: string;
+    label: string;
+    help?: string;
+  }[];
+
+  return (
+    <CardShell payload={payload}>
+      <p className="tracking-report-intro">
+        One consolidated view of access connections, analytics checks, conversion validation,
+        and historical performance. Submit known changes once to open the confirmation gate.
+      </p>
+
+      <div className="tracking-report-metrics">
+        <div className="metric-tile tone-neutral">
+          <div className="metric-label">Connections</div>
+          <div className="metric-value">{platforms.length}</div>
+        </div>
+        <div className="metric-tile tone-neutral">
+          <div className="metric-label">Analytics checks</div>
+          <div className="metric-value">{audit.items?.length || 0}</div>
+        </div>
+        <div className="metric-tile tone-neutral">
+          <div className="metric-label">Conversions</div>
+          <div className="metric-value">{conversions.events?.length || 0}</div>
+        </div>
+        <div className="metric-tile tone-neutral">
+          <div className="metric-label">Baseline</div>
+          <div className="metric-value metric-value-sm">
+            {String(baseline.status || "Not connected").replaceAll("_", " ")}
+          </div>
+        </div>
+      </div>
+
+      <div className="report-section">
+        <h4>Access and connections</h4>
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>Platform</th>
+                <th>Status</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {platforms.map((platform) => (
+                <tr key={platform.key}>
+                  <td>{platform.label}</td>
+                  <td>
+                    <span className={`status-pill ${statusTone(platform.status)}`}>
+                      <span aria-hidden>●</span>
+                      {platform.status.replaceAll("_", " ")}
+                    </span>
+                  </td>
+                  <td>{platform.detail}</td>
+                </tr>
+              ))}
+              {Object.entries(providerStatus).map(([provider, status]) => (
+                <tr key={`provider-${provider}`}>
+                  <td>{humanLabel(provider)}</td>
+                  <td>
+                    <span className={`status-pill ${statusTone(status)}`}>
+                      <span aria-hidden>●</span>
+                      {status}
+                    </span>
+                  </td>
+                  <td>Optional provider connection</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {audit.items?.length ? (
+        <div className="report-section">
+          <h4>Analytics checks</h4>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Check</th>
+                  <th>Result</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {audit.items.map((item) => (
+                  <tr key={item.element + item.check}>
+                    <td>{item.check}</td>
+                    <td>
+                      <span className={`status-pill ${item.result}`}>
+                        <span aria-hidden>●</span>
+                        {item.result}
+                      </span>
+                    </td>
+                    <td>{item.message || item.fix || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {conversions.events?.length ? (
+        <div className="report-section">
+          <h4>Conversion validation</h4>
+          <p className="tracking-report-note">{conversions.summary}</p>
+          <ul className="tracking-conv-list">
+            {conversions.events.map((event) => (
+              <li key={event.name}>
+                <span>{event.name}</span>
+                <span className={`status-pill ${event.status}`}>
+                  <span aria-hidden>●</span>
+                  {event.status}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      <div className="report-section">
+        <h4>Historical baseline</h4>
+        <FieldGrid data={baseline.metrics || {}} />
+      </div>
+
+      <KnownChangesForm
+        payload={{
+          ...payload,
+          title: "Known changes",
+          subtitle: "Client context before approval",
+          fields: knownFields,
+        }}
+        canSubmit={canSubmit}
+        embedded
+        onSubmit={(fields) => onSubmitKnownChanges?.(fields)}
+      />
+      {canAct ? (
+        <div className="card-actions">
+          <button type="button" className="btn btn-primary" onClick={() => onAction("approve")}>
+            Approve baseline
+          </button>
+          <button type="button" className="btn btn-amber" onClick={() => onAction("flag_for_client")}>
+            Flag for client remediation
+          </button>
+        </div>
+      ) : null}
+    </CardShell>
+  );
+}
+
+function KnownChangesForm({
+  payload,
+  canSubmit,
+  embedded = false,
+  onSubmit,
+}: {
+  payload: Record<string, unknown>;
+  canSubmit: boolean;
+  embedded?: boolean;
   onSubmit: (fields: Record<string, unknown>) => void;
 }) {
   type FieldDef = { key: string; label: string; help?: string };
@@ -312,18 +526,30 @@ function KnownChangesForm({
   }
 
   return (
-    <div className="structured-card checkpoint tracking questionnaire-card">
-      <div className="tracking-card-head">
-        <p className="page-kicker" style={{ marginBottom: 6 }}>
-          {String(payload.step || "T5")} · {String(payload.subtitle || "CSM + client")}
-        </p>
-        <ModeBadge mode={String(payload.mode || "HUMAN INPUT")} />
-      </div>
-      <h3 className="card-title">{String(payload.title || "T5 — Known-changes log")}</h3>
+    <div className={embedded ? "report-section tracking-known-changes" : "structured-card checkpoint tracking questionnaire-card"}>
+      {embedded ? (
+        <h4>{String(payload.title || "Known changes")}</h4>
+      ) : (
+        <>
+          <div className="tracking-card-head">
+            <p className="page-kicker" style={{ marginBottom: 6 }}>
+              {String(payload.step || "T5")} · {String(payload.subtitle || "CSM + client")}
+            </p>
+            <ModeBadge mode={String(payload.mode || "HUMAN INPUT")} />
+          </div>
+          <h3 className="card-title">{String(payload.title || "T5 — Known-changes log")}</h3>
+        </>
+      )}
       <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
         Institutional memory only — redesigns, domain moves, past SEO, manual actions,
         security incidents, algorithm timing. APIs cannot see this.
       </p>
+      {!canSubmit ? (
+        <p className="hint-line" style={{ marginTop: 0 }}>
+          Known changes already submitted. Use <strong>Approve</strong> on this report or in
+          Operations to finish Phase 2.
+        </p>
+      ) : null}
       <form onSubmit={handleSubmit}>
         {fields.map((f) => (
           <div key={f.key} className="field q-field q-client-only">
@@ -335,6 +561,7 @@ function KnownChangesForm({
             <textarea
               rows={2}
               value={values[f.key] ?? ""}
+              disabled={!canSubmit}
               onChange={(e) =>
                 setValues((prev) => ({ ...prev, [f.key]: e.target.value }))
               }
@@ -342,10 +569,10 @@ function KnownChangesForm({
             />
           </div>
         ))}
-        {canAct && (
+        {canSubmit && (
           <div className="card-actions">
             <button className="btn btn-primary" type="submit">
-              Submit known-changes → T6
+              Submit known changes → confirmation gate
             </button>
           </div>
         )}
@@ -414,7 +641,7 @@ function SignOffCard({
       )}
       {Object.keys(known).length > 0 && (
         <div className="report-section">
-          <h4>Known changes (T5)</h4>
+          <h4>Known changes</h4>
           <FieldGrid data={known} />
         </div>
       )}

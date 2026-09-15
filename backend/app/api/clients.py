@@ -1,16 +1,21 @@
+import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import get_settings
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, require_permission
+from app.integrations.web_fetch import normalize_primary_url
+from app.logging_config import get_logger
 from app.models import (
     AgentJob,
     ApiCredential,
+    ApiUsageLog,
     AuditTrail,
     BacklinkSnapshot,
     ChatMessage,
@@ -38,11 +43,80 @@ from app.schemas.client import (
 )
 from app.services.audit import log_event
 
+log = get_logger("clients_api")
+
 router = APIRouter(prefix="/clients", tags=["clients"])
+
+
+def _can_manage_clients(user: User) -> bool:
+    if get_settings().auth_disabled:
+        return True
+    role = (user.role.name if user.role else "") or ""
+    return role in ("head_of_department", "client_success_manager")
+
+
+async def require_client_management(user: User = Depends(get_current_user)) -> User:
+    """Gate for identity-mutating client endpoints (create/update/delete).
+
+    Read endpoints stay open to any authenticated role, since most phase
+    specialists only need to view a client to do their own work — but
+    creating, editing, or deleting the client record itself is CSM/HoD
+    onboarding-and-offboarding work, not something every role should do.
+    """
+    if not _can_manage_clients(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Managing clients requires Head of Department or CSM role.",
+        )
+    return user
 
 
 class AiFillRequest(BaseModel):
     url: str
+
+
+class DraftSitePreviewRequest(BaseModel):
+    title: str | None = None
+    url: str | None = None
+    meta_description: str | None = None
+    keyword: str | None = None
+    markdown: str = ""
+    images: list[dict] | None = None
+    media_base: str | None = None
+
+
+@router.post("/{client_id}/content-production/site-preview")
+async def content_production_site_preview(
+    client_id: UUID,
+    body: DraftSitePreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Build a fresh client-branded site preview from a draft (not cached in chat history)."""
+    await require_permission(user, db, "publishing", need_trigger=True)
+    from app.services.publish_preview import build_draft_site_preview
+
+    result = await db.execute(
+        select(Client)
+        .options(selectinload(Client.profile))
+        .where(Client.id == client_id)
+    )
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(404, "Client not found")
+    if not body.markdown.strip():
+        raise HTTPException(400, "Draft markdown is required")
+
+    profile = client.profile
+    site_architecture = (
+        profile.site_architecture_summary if profile and profile.site_architecture_summary else {}
+    )
+    return await build_draft_site_preview(
+        client_name=client.display_name,
+        primary_url=client.primary_url,
+        draft=body.model_dump(),
+        site_architecture=site_architecture if isinstance(site_architecture, dict) else {},
+    )
 
 
 @router.post("/ai-fill")
@@ -61,10 +135,14 @@ async def ai_fill_client_form(
 
 @router.get("", response_model=list[ClientOut])
 async def list_clients(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=2000),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Client).order_by(Client.created_at.desc()))
+    result = await db.execute(
+        select(Client).order_by(Client.created_at.desc()).offset(offset).limit(limit)
+    )
     return [client_out(c) for c in result.scalars().all()]
 
 
@@ -72,22 +150,24 @@ async def list_clients(
 async def create_client(
     body: ClientCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_client_management),
 ):
     name = body.name.strip()
     client = Client(
         legal_name=name,
         display_name=name,
-        primary_url=body.primary_url,
+        primary_url=normalize_primary_url(body.primary_url),
         industry=body.industry,
         tier="B",
         status="onboarding",
+        is_onboarding=body.is_onboarding,
     )
     db.add(client)
     await db.flush()
     intake = intake_from_body(body)
     profile = ClientDigitalProfile(
         client_id=client.id,
+        is_onboarding=client.is_onboarding,
         marketing_context={"client_intake": intake} if intake else {},
     )
     db.add(profile)
@@ -111,7 +191,7 @@ async def update_client(
     client_id: UUID,
     body: ClientUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_client_management),
 ):
     result = await db.execute(
         select(Client)
@@ -133,10 +213,14 @@ async def update_client(
         client.legal_name = name
         client.display_name = name
         core["name"] = name
-    for key in ("primary_url", "industry", "status"):
+    for key in ("primary_url", "industry", "status", "is_onboarding"):
         if key in data:
-            setattr(client, key, data[key])
-            core[key] = data[key]
+            value = normalize_primary_url(data[key]) if key == "primary_url" else data[key]
+            setattr(client, key, value)
+            core[key] = value
+    if "status" in data and "is_onboarding" not in data:
+        client.is_onboarding = str(data["status"] or "").lower() == "onboarding"
+        core["is_onboarding"] = client.is_onboarding
 
     if intake_patch and client.profile:
         ctx = dict(client.profile.marketing_context or {})
@@ -164,12 +248,30 @@ async def update_client(
 async def delete_client(
     client_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(require_client_management),
 ):
     result = await db.execute(select(Client).where(Client.id == client_id))
     client = result.scalar_one_or_none()
     if not client:
         raise HTTPException(404, "Client not found")
+
+    # Structured log, not an AuditTrail row: AuditTrail.client_id is a hard FK
+    # to clients.id, so a row logged here would either get wiped by the
+    # AuditTrail cleanup below or (if left behind) block the Client delete
+    # itself with the same FK-violation failure mode this function otherwise
+    # has for ApiUsageLog (see the api_usage_log cleanup below).
+    log.warning(
+        "client_deleted",
+        client_id=str(client_id),
+        client_name=client.display_name,
+        actor_id=str(user.id),
+        actor_email=user.email,
+    )
+
+    # Every metered external API call logs a row here; without cleaning it up
+    # first, the Client delete below raises a foreign-key violation on any
+    # client that has ever incurred one (i.e. virtually every real client).
+    await db.execute(delete(ApiUsageLog).where(ApiUsageLog.client_id == client_id))
 
     session_ids = list(
         (
@@ -293,6 +395,7 @@ async def import_discovery_document(
     user: User = Depends(get_current_user),
 ):
     """Parse CDD spreadsheet / Word / PDF and write discovery_responses for questionnaire."""
+    await require_permission(user, db, "discovery_agent", need_trigger=True)
     from decimal import Decimal
 
     from app.services.intake_ai import extract_cdd_fields_from_text, extract_text_from_upload
@@ -311,7 +414,10 @@ async def import_discovery_document(
 
     filename = file.filename or "upload"
     try:
-        text = extract_text_from_upload(filename, raw)
+        # extract_text_from_upload is a synchronous, CPU-bound parser (XLSX/DOCX/
+        # PDF up to 12MB) — running it inline would block the single event loop
+        # thread for every other concurrent request (chat SSE streams included).
+        text = await asyncio.to_thread(extract_text_from_upload, filename, raw)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"Could not read file: {exc}") from exc
 
@@ -329,7 +435,7 @@ async def import_discovery_document(
     if fields.get("website_url"):
         url = str(fields["website_url"]).strip()
         if url:
-            client.primary_url = url if url.startswith("http") else f"https://{url}"
+            client.primary_url = normalize_primary_url(url)
     if fields.get("inferred_industry"):
         client.industry = str(fields["inferred_industry"]).strip()
 
@@ -366,8 +472,122 @@ async def import_discovery_document(
     }
 
 
+class ServicePrioritizationUpdate(BaseModel):
+    selected_service_ids: list[str] = []
+    selected_subservice_ids: list[str] = []
+    primary_service_ids: list[str] = []
+    service_catalog: list[dict] = []
+    competitor_tree_id: str | None = None
+    adopt_competitor_service_ids: list[str] = []
+    competitor_trees: list[dict] | None = None
+    keyword_pool_target: int | None = None
+    confirmed: bool = True
+
+
+@router.get("/{client_id}/service-prioritization")
+async def get_service_prioritization(
+    client_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Build or return the service prioritization pack (pre–Phase 5 checkpoint)."""
+    await require_permission(user, db, "search_demand", need_trigger=True)
+    from app.services.competitive_context import resolve_competitors
+    from app.services.service_prioritization import (
+        build_prioritization_pack,
+        discover_competitor_service_trees,
+    )
+    from app.agents.search_demand import _page_target_seeds, _products_list
+
+    result = await db.execute(
+        select(Client)
+        .options(selectinload(Client.profile))
+        .where(Client.id == client_id)
+    )
+    client = result.scalar_one_or_none()
+    if not client or not client.profile:
+        raise HTTPException(404, "Client not found")
+
+    profile = client.profile
+    commercial = dict(profile.commercial_scope or {})
+    marketing = dict(profile.marketing_context or {})
+    intake = dict(marketing.get("client_intake") or {})
+    website = dict(profile.website_situation_summary or {})
+    competitive = dict(profile.competitive_landscape_summary or {})
+    services = _products_list(commercial, marketing, intake, commercial)
+    competitors = await resolve_competitors(
+        db,
+        client.id,
+        competitive_summary=competitive,
+        marketing=marketing,
+        limit=8,
+        prefer_confirmed=True,
+    )
+    trees = await discover_competitor_service_trees(competitors)
+    pack = build_prioritization_pack(
+        client_name=client.display_name,
+        services=services,
+        website=website,
+        page_seeds=_page_target_seeds(website),
+        competitors=competitors,
+        competitor_trees=trees,
+        existing=dict(commercial.get("service_prioritization") or {}),
+    )
+    return pack
+
+
+@router.put("/{client_id}/service-prioritization")
+async def save_service_prioritization(
+    client_id: UUID,
+    body: ServicePrioritizationUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await require_permission(
+        user,
+        db,
+        "search_demand",
+        need_trigger=not body.confirmed,
+        need_approve=body.confirmed,
+    )
+    from app.services.service_prioritization import confirm_prioritization
+
+    result = await db.execute(
+        select(ClientDigitalProfile).where(ClientDigitalProfile.client_id == client_id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(404, "Profile not found")
+
+    commercial = dict(profile.commercial_scope or {})
+    payload = confirm_prioritization(
+        {
+            **body.model_dump(exclude_none=True),
+            "selected_service_ids": body.selected_service_ids,
+            "selected_subservice_ids": body.selected_subservice_ids,
+            "primary_service_ids": body.primary_service_ids,
+            "service_catalog": body.service_catalog,
+            "competitor_tree_id": body.competitor_tree_id,
+            "adopt_competitor_service_ids": body.adopt_competitor_service_ids,
+            "competitor_trees": body.competitor_trees,
+        }
+        if body.confirmed
+        else body.model_dump(exclude={"confirmed"}, exclude_none=True)
+    )
+    if not body.confirmed:
+        payload.pop("confirmed_at", None)
+    commercial["service_prioritization"] = payload
+    if body.keyword_pool_target is not None:
+        commercial["keyword_pool_target"] = body.keyword_pool_target
+    profile.commercial_scope = commercial
+    if body.confirmed:
+        profile.search_demand_status = "not_started"
+    await db.flush()
+    return {"ok": True, "service_prioritization": payload}
+
+
 @router.get("/{client_id}/profile", response_model=ProfileOut)
-async def get_profile(
+async def get_profile_endpoint(
     client_id: UUID,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),

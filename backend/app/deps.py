@@ -65,6 +65,11 @@ async def require_permission(
     if get_settings().auth_disabled:
         return
 
+    role_name = user.role.name if user.role else ""
+    # Head of Department has full trigger + approve on every skill.
+    if role_name == "head_of_department":
+        return
+
     result = await db.execute(
         select(RolePermission).where(
             RolePermission.role_id == user.role_id,

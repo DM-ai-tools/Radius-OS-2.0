@@ -1,13 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.deps import get_current_user, require_permission
-from app.models import CompetitorProfile, DiscoveryResponse, FindingsLedger, User
+from app.models import ChatSession, CompetitorProfile, DiscoveryResponse, FindingsLedger, User
 from app.schemas.session import (
     ManualCompetitor,
     QuestionnaireSubmit,
@@ -21,6 +21,7 @@ router = APIRouter(tags=["findings"])
 
 class KnownChangesSubmit(BaseModel):
     fields: dict
+    session_id: UUID | None = None
 
 
 @router.get("/clients/{client_id}/phases/{agent_key}/validation")
@@ -67,13 +68,17 @@ async def get_phase_validation_history(
 async def list_findings(
     client_id: UUID,
     status: str | None = "pending",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     q = select(FindingsLedger).where(FindingsLedger.client_id == client_id)
     if status:
         q = q.where(FindingsLedger.status == status)
-    result = await db.execute(q.order_by(FindingsLedger.created_at.desc()))
+    result = await db.execute(
+        q.order_by(FindingsLedger.created_at.desc()).offset(offset).limit(limit)
+    )
     rows = result.scalars().all()
     return [
         {
@@ -156,6 +161,36 @@ async def submit_questionnaire(
     from app.agents.discovery import build_discovery_signoff_events
 
     events = await build_discovery_signoff_events(db, client_id=client_id)
+    # Questionnaire submission is a separate REST action from the chat stream.
+    # Persist its D3/D4 transition events so a refresh or re-entry does not
+    # reload only the old D1/D2 cards and make Discovery appear stuck.
+    session = None
+    if body.session_id:
+        session = (
+            await db.execute(
+                select(ChatSession).where(
+                    ChatSession.id == body.session_id,
+                    ChatSession.client_id == client_id,
+                    ChatSession.user_id == user.id,
+                )
+            )
+        ).scalar_one_or_none()
+    if session is None:
+        session = (
+            await db.execute(
+                select(ChatSession)
+                .where(
+                    ChatSession.client_id == client_id,
+                    ChatSession.user_id == user.id,
+                )
+                .order_by(ChatSession.started_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if session is not None:
+        from app.orchestration.pipeline import _persist_agent_events
+
+        await _persist_agent_events(db, session, client_id, events)
     return {"ok": True, "fields": list(body.fields.keys()), "events": events}
 
 
@@ -181,6 +216,35 @@ async def submit_known_changes(
     events = await build_tracking_signoff_events(
         db, client_id=client_id, known_changes=body.fields
     )
+    # Persist confirmation-gate events the same way questionnaire does, so a refresh
+    # does not drop the Approve card and leave Tracking stuck on the draft report.
+    session = None
+    if body.session_id:
+        session = (
+            await db.execute(
+                select(ChatSession).where(
+                    ChatSession.id == body.session_id,
+                    ChatSession.client_id == client_id,
+                    ChatSession.user_id == user.id,
+                )
+            )
+        ).scalar_one_or_none()
+    if session is None:
+        session = (
+            await db.execute(
+                select(ChatSession)
+                .where(
+                    ChatSession.client_id == client_id,
+                    ChatSession.user_id == user.id,
+                )
+                .order_by(ChatSession.started_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    if session is not None:
+        from app.orchestration.pipeline import _persist_agent_events
+
+        await _persist_agent_events(db, session, client_id, events)
     return {"ok": True, "fields": list(body.fields.keys()), "events": events}
 
 

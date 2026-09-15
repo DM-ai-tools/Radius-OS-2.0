@@ -12,7 +12,9 @@ class ApiCredential(Base):
     __tablename__ = "api_credentials"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("clients.id"), nullable=False, index=True
+    )
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     scope: Mapped[str] = mapped_column(Text, nullable=False)

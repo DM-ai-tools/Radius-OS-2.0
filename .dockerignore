@@ -1,6 +1,10 @@
 # Root context for production image (Railway / docker compose)
 .git
 .github
+.cursor
+.claude
+.railway
+.gstack
 .env
 **/.env
 **/.venv
@@ -9,18 +13,24 @@
 **/*.pyc
 **/.pytest_cache
 **/.mypy_cache
+**/.ruff_cache
 **/node_modules
 frontend/dist
 frontend/node_modules
 backend/.venv
 backend/**/__pycache__
+backend/tests
+backend/scripts
+backend/.pytest_cache
 *.db
 *.log
+logs_*.txt
 .idea
 .vscode
 .~lock.*
 docs
 *.xlsx
+*.pdf
 APSA*
 Client_Discovery*
 SearchFit*
@@ -33,3 +43,4 @@ TR_SEO*
 06_*
 RADIUS_*
 README.md
+agent-transcripts

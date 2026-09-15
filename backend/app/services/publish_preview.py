@@ -14,11 +14,20 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from typing import Any
 from urllib.parse import urlparse
 
 NEUTRAL_PRIMARY = "#334155"
 NEUTRAL_FONT = "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+
+_META_HEADINGS = (
+    "review queue",
+    "draft metadata",
+    "differentiation delivered",
+    "coverage check",
+    "notes for the editor",
+)
 
 
 def _esc(value: Any) -> str:
@@ -41,8 +50,29 @@ def _title_of(page: dict[str, Any]) -> str:
 def _meta_of(page: dict[str, Any]) -> str:
     block = page.get("meta_description")
     if isinstance(block, dict):
-        return str(block.get("after") or "")
-    return str(block or "")
+        return _display_meta(block.get("after") or "")
+    return _display_meta(block or "")
+
+
+def _display_meta(value: Any) -> str:
+    """Human-readable meta for SERP preview — never show raw dict blobs."""
+    from app.services.create_topic import format_audience_label
+
+    if isinstance(value, dict):
+        return (format_audience_label(value) or "")[:160]
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("{") and "primary" in text:
+        return ""
+    # Audience dicts sometimes get stringified into brief meta descriptions.
+    text = re.sub(r"\s+for\s+\{.*", "", text, flags=re.DOTALL).strip()
+    return text[:160]
+
+
+def sanitize_meta_description(value: Any) -> str:
+    """Public helper — use when persisting meta from briefs into drafts."""
+    return _display_meta(value)
 
 
 def build_content_html(page: dict[str, Any], brief: dict[str, Any] | None = None) -> str:
@@ -117,6 +147,8 @@ def render_preview_html(
     brand: dict[str, Any],
     layout: dict[str, Any] | None = None,
     target_status: str = "draft",
+    banner_label: str = "DRY-RUN PREVIEW",
+    banner_subtitle: str = "no CMS write has occurred",
 ) -> str:
     """A self-contained HTML document for reviewer eyeballs. Never written to the CMS."""
     style = _brand_style(brand)
@@ -167,17 +199,27 @@ def render_preview_html(
   .hdr {{ border-top:4px solid var(--brand); padding:16px 22px; display:flex;
           align-items:center; gap:12px; border-bottom:1px solid #eef2f7; }}
   .hdr img {{ max-height:34px; max-width:150px; }}
+  .hdr .hdr-fallback {{ font-size:18px; color:var(--brand); }}
   .body {{ padding:22px; }}
   .body h1 {{ font-size:28px; margin:0 0 12px; color:var(--brand); }}
   .body h2 {{ font-size:19px; margin:22px 0 6px; }}
   .body h3 {{ font-size:15px; margin:14px 0 4px; }}
   .body p {{ line-height:1.6; color:#334155; }}
+  .body ul {{ margin:8px 0 12px 20px; line-height:1.6; color:#334155; }}
+  .body img {{ max-width:100%; height:auto; border-radius:6px; margin:12px 0; }}
+  .body figure {{ margin:16px 0; }}
+  .body figcaption {{ font-size:12px; color:#64748b; margin-top:6px; }}
+  .body .draft-figure-placeholder {{
+    display:flex; align-items:center; justify-content:center; min-height:160px;
+    padding:16px; border-radius:8px; border:1px dashed #cbd5e1; background:#f8fafc;
+    color:#64748b; font-size:13px; text-align:center;
+  }}
   .body [data-placeholder] {{ color:#94a3b8; }}
   .sw {{ display:inline-block; width:16px; height:16px; border-radius:3px;
          border:1px solid rgba(0,0,0,.15); margin-right:3px; vertical-align:middle; }}
 </style></head>
 <body>
-<div class="bar"><span><strong>DRY-RUN PREVIEW</strong> — no CMS write has occurred</span>
+<div class="bar"><span><strong>{_esc(banner_label)}</strong> — {_esc(banner_subtitle)}</span>
 <span>{_esc(client_name)} {swatches}</span></div>
 {f'<div class="warn"><strong>Preview caveats</strong><ul>{notice_html}</ul></div>' if notices else ''}
 
@@ -189,7 +231,12 @@ def render_preview_html(
 
 <div class="page">
   <div class="hdr">
-    {f'<img src="{_esc(logo)}" alt="{_esc(client_name)} logo">' if logo else f'<strong>{_esc(client_name)}</strong>'}
+    {(
+        f'<img src="{_esc(logo)}" alt="" onerror="this.remove()">'
+        f'<strong class="hdr-fallback">{_esc(client_name)}</strong>'
+        if logo
+        else f'<strong>{_esc(client_name)}</strong>'
+    )}
   </div>
   <div class="body">{content_html}</div>
 </div>
@@ -205,9 +252,16 @@ def build_page_preview(
     layout: dict[str, Any] | None,
     target_status: str,
     slug: str,
+    content_html: str | None = None,
 ) -> dict[str, Any]:
-    """Preview + the exact CMS payload, so reviewer and publisher never diverge."""
-    content_html = build_content_html(page, brief)
+    """Preview + the exact CMS payload, so reviewer and publisher never diverge.
+
+    ``content_html`` lets the caller supply the real written draft. When omitted the
+    preview falls back to the outline skeleton, which is explicitly marked with
+    placeholders — reviewer and publisher still see the identical payload either way.
+    """
+    if content_html is None:
+        content_html = build_content_html(page, brief)
     schema = page.get("schema_json_ld")
     payload = {
         "title": _title_of(page),
@@ -235,4 +289,276 @@ def build_page_preview(
         ),
         "brand_applied": _brand_style(brand)["brand_applied"] == "yes",
         "has_written_copy": "data-placeholder" not in content_html,
+    }
+
+
+def _is_meta_heading(text: str) -> bool:
+    h = text.lower()
+    return any(m in h for m in _META_HEADINGS)
+
+
+def draft_body_markdown(markdown: str) -> str:
+    """Strip editorial/meta sections; keep publishable article body."""
+    text = str(markdown or "").replace("\r\n", "\n")
+    if "\n---\n" in text:
+        text = text.split("\n---\n", 1)[1].strip()
+    lines = text.split("\n")
+    out: list[str] = []
+    skip_section = False
+    seen_h1 = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            heading = stripped[3:].strip()
+            skip_section = _is_meta_heading(heading)
+            if skip_section:
+                continue
+            out.append(line)
+            continue
+        if stripped.startswith("# "):
+            if seen_h1:
+                continue
+            seen_h1 = True
+            out.append(line)
+            continue
+        if skip_section:
+            continue
+        if stripped.startswith("- [ ]") or stripped.startswith("- [x]"):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def markdown_to_content_html(
+    markdown: str,
+    *,
+    images: list[dict[str, Any]] | None = None,
+    media_base: str | None = None,
+) -> str:
+    """Convert a Phase 10 draft markdown body to safe HTML for site preview."""
+    body = draft_body_markdown(markdown)
+    if not body:
+        return '<p data-placeholder="true"><em>No publishable body found in this draft.</em></p>'
+
+    image_queue: list[dict[str, Any]] = [
+        i for i in (images or []) if isinstance(i, dict)
+    ]
+
+    def _abs_src(src: str | None) -> str:
+        s = str(src or "").strip()
+        if not s:
+            return ""
+        if s.startswith("http://") or s.startswith("https://") or s.startswith("data:"):
+            return s
+        base = str(media_base or "").rstrip("/")
+        if base and s.startswith("/"):
+            return f"{base}{s}"
+        return s
+
+    def _next_image(role_hint: str | None = None) -> dict[str, Any] | None:
+        if not image_queue:
+            return None
+        if role_hint:
+            for idx, img in enumerate(image_queue):
+                if str(img.get("role") or "").lower() == role_hint.lower():
+                    return image_queue.pop(idx)
+        return image_queue.pop(0)
+
+    def _figure_html(
+        *,
+        src: str | None,
+        alt: str,
+        caption: str,
+        role: str | None = None,
+        status: str | None = None,
+    ) -> str:
+        abs_src = _abs_src(src)
+        if abs_src:
+            fig = f'<figure class="draft-figure"><img src="{_esc(abs_src)}" alt="{_esc(alt)}">'
+            if caption:
+                fig += f"<figcaption>{_esc(caption)}</figcaption>"
+            return fig + "</figure>"
+        label = "Image generation failed" if status == "failed" else "Image placeholder"
+        if role:
+            label = f"{label} · {_esc(role)}"
+        fig = (
+            f'<figure class="draft-figure draft-figure--placeholder">'
+            f'<div class="draft-figure-placeholder">{label}</div>'
+        )
+        if caption:
+            fig += f"<figcaption>{_esc(caption)}</figcaption>"
+        return fig + "</figure>"
+
+    lines = body.split("\n")
+    parts: list[str] = []
+    para_buf: list[str] = []
+    list_buf: list[str] = []
+
+    def flush_para() -> None:
+        text = " ".join(para_buf).strip()
+        para_buf.clear()
+        if text:
+            parts.append(f"<p>{_esc(text)}</p>")
+
+    def flush_list() -> None:
+        if not list_buf:
+            return
+        items = "".join(f"<li>{_esc(item)}</li>" for item in list_buf)
+        list_buf.clear()
+        parts.append(f"<ul>{items}</ul>")
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped:
+            flush_para()
+            flush_list()
+            i += 1
+            continue
+        if stripped.startswith("# "):
+            flush_para()
+            flush_list()
+            parts.append(f"<h1>{_esc(stripped[2:].strip())}</h1>")
+            i += 1
+            continue
+        if stripped.startswith("## "):
+            flush_para()
+            flush_list()
+            parts.append(f"<h2>{_esc(stripped[3:].strip())}</h2>")
+            i += 1
+            continue
+        if stripped.startswith("### "):
+            flush_para()
+            flush_list()
+            parts.append(f"<h3>{_esc(stripped[4:].strip())}</h3>")
+            i += 1
+            continue
+        img = stripped
+        if img.startswith("![") and "](" in img and img.endswith(")"):
+            flush_para()
+            flush_list()
+            alt_end = img.index("](")
+            alt = img[2:alt_end]
+            src = img[alt_end + 2 : -1]
+            caption = ""
+            if i + 1 < len(lines) and lines[i + 1].strip().startswith("*") and lines[i + 1].strip().endswith("*"):
+                caption = lines[i + 1].strip().strip("*")
+                i += 1
+            parts.append(_figure_html(src=src, alt=alt, caption=caption))
+            i += 1
+            continue
+        fig_m = re.match(r"^\[FIGURE\s+([^\]]+)\]\s*(.*)$", stripped, flags=re.I)
+        if fig_m:
+            flush_para()
+            flush_list()
+            role = fig_m.group(1).strip()
+            caption = fig_m.group(2).strip()
+            matched = _next_image(role)
+            parts.append(
+                _figure_html(
+                    src=(matched or {}).get("src"),
+                    alt=str((matched or {}).get("alt") or role or "Figure"),
+                    caption=caption or str((matched or {}).get("caption") or (matched or {}).get("prompt") or ""),
+                    role=str((matched or {}).get("role") or role),
+                    status=str((matched or {}).get("status") or ("failed" if matched and not matched.get("src") else "")),
+                )
+            )
+            i += 1
+            continue
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            flush_para()
+            list_buf.append(stripped[2:].strip())
+            i += 1
+            continue
+        flush_list()
+        para_buf.append(stripped)
+        i += 1
+
+    flush_para()
+    flush_list()
+    # Leftover generated images (no FIGURE markers) — append after body.
+    while image_queue:
+        leftover = image_queue.pop(0)
+        parts.append(
+            _figure_html(
+                src=leftover.get("src"),
+                alt=str(leftover.get("alt") or leftover.get("role") or "Figure"),
+                caption=str(leftover.get("caption") or leftover.get("prompt") or ""),
+                role=str(leftover.get("role") or ""),
+                status=str(leftover.get("status") or ""),
+            )
+        )
+    return "\n".join(parts)
+
+
+def pick_reference_url(site_architecture: dict[str, Any] | None, primary_url: str) -> str:
+    """A live page to frame the preview against — prefer an existing hub, else the home."""
+    ia = site_architecture or {}
+    for node in ia.get("target_url_tree") or []:
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("type") or "").lower() in ("hub", "service") and node.get("url"):
+            url = str(node["url"])
+            if url.startswith("http"):
+                return url
+            return primary_url.rstrip("/") + (url if url.startswith("/") else f"/{url}")
+    return primary_url
+
+
+async def build_draft_site_preview(
+    *,
+    client_name: str,
+    primary_url: str,
+    draft: dict[str, Any],
+    site_architecture: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Render a Phase 10 draft inside the client's brand frame (Brandfetch + Firecrawl)."""
+    from app.integrations import brandfetch, firecrawl
+
+    brand = await brandfetch.fetch_brand(primary_url)
+
+    page_url = str(draft.get("url") or "")
+    if page_url and not page_url.startswith("http"):
+        page_url = primary_url.rstrip("/") + (page_url if page_url.startswith("/") else f"/{page_url}")
+
+    ref_url = pick_reference_url(site_architecture, primary_url)
+    scrape: dict[str, Any] = {"available": False}
+    for candidate in [page_url, ref_url, primary_url]:
+        if not candidate:
+            continue
+        scrape = await firecrawl.scrape_page(candidate)
+        if scrape.get("available"):
+            ref_url = candidate
+            break
+    layout = firecrawl.layout_hints(scrape)
+
+    page = {
+        "url": page_url,
+        "title": draft.get("title"),
+        "meta_description": sanitize_meta_description(draft.get("meta_description")),
+        "keyword": draft.get("keyword"),
+    }
+    content_html = markdown_to_content_html(
+        str(draft.get("markdown") or ""),
+        images=draft.get("images") if isinstance(draft.get("images"), list) else None,
+        media_base=str(draft.get("media_base") or "") or None,
+    )
+    preview_html = render_preview_html(
+        client_name=client_name,
+        page=page,
+        content_html=content_html,
+        brand=brand,
+        layout=layout,
+        target_status="draft",
+        banner_label="SITE PREVIEW",
+        banner_subtitle="Content Production — styled with the client's brand (no CMS write)",
+    )
+    return {
+        "url": page_url,
+        "reference_url": layout.get("reference_url") or ref_url,
+        "preview_html": preview_html,
+        "brand_applied": _brand_style(brand)["brand_applied"] == "yes",
+        "layout_available": bool(layout.get("available")),
+        "has_written_copy": bool(content_html and "data-placeholder" not in content_html),
     }

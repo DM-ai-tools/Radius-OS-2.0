@@ -229,20 +229,33 @@ HOMEPAGE_HTML_NO_SIGNAL = "<html><head></head><body>Hello</body></html>"
 
 @pytest.mark.asyncio
 async def test_live_technical_audit_never_fabricates_scores_when_signal_present(monkeypatch):
-    import httpx
-
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
 
-    class Client(_FakeAsyncClient):
-        async def get(self, url, *args, **kwargs):
-            if "robots.txt" in url:
-                return _FakeResponse(200, text="User-agent: *\nSitemap: https://acme.example/sitemap.xml")
-            if "sitemap.xml" in url:
-                return _FakeResponse(200, text="")
-            return _FakeResponse(200, text=HOMEPAGE_HTML_FULL_SIGNAL)
+    async def _fake_fetch(url: str, **kwargs):
+        if "robots.txt" in url:
+            return {
+                "status_code": 200,
+                "text": "User-agent: *\nSitemap: https://acme.example/sitemap.xml",
+                "url": url,
+                "headers": {},
+            }
+        if "sitemap" in url:
+            return {"status_code": 200, "text": "<urlset></urlset>", "url": url, "headers": {}}
+        if url.startswith("http://"):
+            return {
+                "status_code": 301,
+                "text": "",
+                "url": url,
+                "headers": {"location": "https://acme.example/"},
+            }
+        return {"status_code": 200, "text": HOMEPAGE_HTML_FULL_SIGNAL, "url": url, "headers": {}}
 
-    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    async def _fake_scrape(url: str, **kwargs):
+        return {"available": False, "url": url}
+
+    monkeypatch.setattr("app.integrations.web_fetch.fetch_url", _fake_fetch)
+    monkeypatch.setattr("app.integrations.firecrawl.scrape_page", _fake_scrape)
     result = await run_technical_seo_audit("https://acme.example", display_name="Acme")
     sections = result["sections"]
     # Performance is never measurable from an HTML fetch alone — must stay unscored.
@@ -257,18 +270,26 @@ async def test_live_technical_audit_never_fabricates_scores_when_signal_present(
 
 @pytest.mark.asyncio
 async def test_live_technical_audit_no_signal_scores_low_not_fifty(monkeypatch):
-    import httpx
-
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
 
-    class Client(_FakeAsyncClient):
-        async def get(self, url, *args, **kwargs):
-            if "robots.txt" in url or "sitemap.xml" in url:
-                return _FakeResponse(200, text="")
-            return _FakeResponse(200, text=HOMEPAGE_HTML_NO_SIGNAL)
+    async def _fake_fetch(url: str, **kwargs):
+        if "robots.txt" in url or "sitemap" in url:
+            return {"status_code": 200, "text": "", "url": url, "headers": {}}
+        if url.startswith("http://"):
+            return {
+                "status_code": 301,
+                "text": "",
+                "url": url,
+                "headers": {"location": "https://acme.example/"},
+            }
+        return {"status_code": 200, "text": HOMEPAGE_HTML_NO_SIGNAL, "url": url, "headers": {}}
 
-    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    async def _fake_scrape(url: str, **kwargs):
+        return {"available": False, "url": url}
+
+    monkeypatch.setattr("app.integrations.web_fetch.fetch_url", _fake_fetch)
+    monkeypatch.setattr("app.integrations.firecrawl.scrape_page", _fake_scrape)
     result = await run_technical_seo_audit("https://acme.example", display_name="Acme")
     sections = result["sections"]
     assert sections["mobile"]["score"] == 35
@@ -281,18 +302,26 @@ async def test_live_technical_audit_no_signal_scores_low_not_fifty(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_live_technical_audit_homepage_fetch_failure_leaves_mobile_schema_unscored(monkeypatch):
-    import httpx
-
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
 
-    class Client(_FakeAsyncClient):
-        async def get(self, url, *args, **kwargs):
-            if "robots.txt" in url or "sitemap.xml" in url:
-                return _FakeResponse(200, text="")
-            raise httpx.ConnectError("refused")
+    async def _fake_fetch(url: str, **kwargs):
+        if "robots.txt" in url or "sitemap" in url:
+            return {"status_code": 200, "text": "", "url": url, "headers": {}}
+        if url.startswith("http://"):
+            return {
+                "status_code": 301,
+                "text": "",
+                "url": url,
+                "headers": {"location": "https://acme.example/"},
+            }
+        return {"status_code": 0, "text": "", "url": url, "headers": {}, "error": "dns_resolution_failed"}
 
-    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    async def _fake_scrape(url: str, **kwargs):
+        return {"available": False, "url": url}
+
+    monkeypatch.setattr("app.integrations.web_fetch.fetch_url", _fake_fetch)
+    monkeypatch.setattr("app.integrations.firecrawl.scrape_page", _fake_scrape)
     result = await run_technical_seo_audit("https://acme.example", display_name="Acme")
     sections = result["sections"]
     assert sections["mobile"]["score"] is None

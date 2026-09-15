@@ -98,6 +98,8 @@ Rules:
 
 Attach `final_url_map` to the blueprint; Phase 9 Content Planning consumes it for refresh-vs-create decisions.
 
+Honor Phase 5 `topic_disposition` on each cluster (`existing_topic` → OPTIMIZE, `existing_review` → REVIEW, `new_topic` → CREATE). Stamp URL-map actions onto the existing topic plan — do not re-run create_topic here.
+
 ### Step 4 — Design navigation and depth
 
 Primary nav: hubs + commercial only, 5–7 items, crawlable `<a href>`. Money pages ≤3 clicks. Breadcrumbs mirror URL hierarchy.

@@ -1,3 +1,6 @@
+import { Fragment, useState } from "react";
+import { api } from "../../api";
+
 type Fix = { priority?: string; issue?: string; fix?: string; source?: string };
 
 type Section = { score?: number; findings?: string[] };
@@ -6,6 +9,8 @@ type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
   onAction: (action: string) => void;
+  clientId?: string;
+  token?: string | null;
 };
 
 function asRows(raw: unknown): Array<Record<string, unknown>> {
@@ -22,7 +27,7 @@ const SECTION_LABELS: Record<string, string> = {
   structured_data: "Structured data",
 };
 
-export default function TechnicalSeoCard({ payload, canAct, onAction }: Props) {
+export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, token }: Props) {
   const sections = (payload.sections || payload.technical_sections || {}) as Record<
     string,
     Section
@@ -49,6 +54,12 @@ export default function TechnicalSeoCard({ payload, canAct, onAction }: Props) {
   const routing = asRows(payload.specialist_routing);
   const site = String(payload.site || payload.primary_url || payload.client_name || "—");
   const phase6Connected = Boolean(payload.phase6_connected);
+  const phase6Fallback = payload.phase6_fallback_ia === true;
+  const ahrefsAudit =
+    payload.ahrefs_site_audit && typeof payload.ahrefs_site_audit === "object"
+      ? (payload.ahrefs_site_audit as Record<string, unknown>)
+      : null;
+  const ahrefsUnavailable = ahrefsAudit && ahrefsAudit.available === false;
   const categoryScores =
     payload.category_scores && typeof payload.category_scores === "object"
       ? (payload.category_scores as Record<string, Record<string, unknown>>)
@@ -83,6 +94,45 @@ export default function TechnicalSeoCard({ payload, canAct, onAction }: Props) {
       ? (payload.gsc_indexation as Record<string, unknown>)
       : null;
   const suggestionItems = asRows(payload.suggestion_items);
+  const [expandedRuleId, setExpandedRuleId] = useState<string | null>(null);
+  const [issueUrls, setIssueUrls] = useState<string[]>([]);
+  const [issueUrlsLoading, setIssueUrlsLoading] = useState(false);
+  const [issueUrlsError, setIssueUrlsError] = useState<string | null>(null);
+
+  async function toggleIssueUrls(ruleId: string) {
+    if (expandedRuleId === ruleId) {
+      setExpandedRuleId(null);
+      setIssueUrls([]);
+      setIssueUrlsError(null);
+      return;
+    }
+    setExpandedRuleId(ruleId);
+    setIssueUrls([]);
+    setIssueUrlsError(null);
+    const inline = issues.find((row) => String(row.rule_id || "") === ruleId);
+    const inlineUrls = Array.isArray(inline?.affected_urls)
+      ? (inline!.affected_urls as unknown[]).map(String).filter(Boolean)
+      : Array.isArray(inline?.sample_urls)
+        ? (inline!.sample_urls as unknown[]).map(String).filter(Boolean)
+        : [];
+    if (inlineUrls.length) {
+      setIssueUrls(inlineUrls);
+      return;
+    }
+    if (!token || !clientId) {
+      setIssueUrlsError("Sign in to load affected URLs.");
+      return;
+    }
+    setIssueUrlsLoading(true);
+    try {
+      const res = await api.technicalSeoIssueUrls(token, clientId, ruleId);
+      setIssueUrls(res.urls || []);
+    } catch (e) {
+      setIssueUrlsError(e instanceof Error ? e.message : "Failed to load URLs");
+    } finally {
+      setIssueUrlsLoading(false);
+    }
+  }
   const severitySummary =
     payload.severity_summary && typeof payload.severity_summary === "object"
       ? (payload.severity_summary as Record<string, number>)
@@ -106,7 +156,7 @@ export default function TechnicalSeoCard({ payload, canAct, onAction }: Props) {
       <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
         Site: <strong>{site}</strong>
         {payload.severity ? ` · ${String(payload.severity)}` : ""}
-        {phase6Connected ? " · Phase 6 IA connected" : " · Phase 6 IA not in memory"}
+        {phase6Connected ? " · Phase 6 IA connected" : phase6Fallback ? " · Phase 6 fallback IA" : " · Phase 6 IA not in memory"}
         {payload.js_rendering_risk ? " · JS rendering risk" : ""}
         {payload.audit_state ? ` · ${String(payload.audit_state)}` : ""}
       </p>
@@ -116,6 +166,12 @@ export default function TechnicalSeoCard({ payload, canAct, onAction }: Props) {
       </div>
       {scoreLabel ? (
         <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>{scoreLabel}</p>
+      ) : null}
+      {ahrefsUnavailable ? (
+        <p style={{ fontSize: 12, color: "var(--coral, #b42318)", marginTop: 0 }}>
+          Ahrefs Site Audit unavailable — {String(ahrefsAudit?.reason || "not configured")}. Crawl-based
+          audit used instead; issue URL counts may be limited.
+        </p>
       ) : null}
 
       {severitySummary ? (
@@ -270,20 +326,72 @@ export default function TechnicalSeoCard({ payload, canAct, onAction }: Props) {
                   <th style={{ padding: "6px 8px" }}>Issue</th>
                   <th style={{ padding: "6px 8px" }}>Category</th>
                   <th style={{ padding: "6px 8px" }}>Confidence</th>
+                  <th style={{ padding: "6px 8px" }}>Fix</th>
                   <th style={{ padding: "6px 8px" }}>URLs</th>
                 </tr>
               </thead>
               <tbody>
-                {issues.slice(0, 25).map((row, i) => (
-                  <tr key={String(row.rule_id || i)} style={{ borderBottom: "1px solid var(--line)" }}>
-                    <td style={{ padding: "6px 8px" }}>{String(row.priority ?? "—")}</td>
-                    <td style={{ padding: "6px 8px" }}>{String(row.severity ?? "—")}</td>
-                    <td style={{ padding: "6px 8px" }}>{String(row.title ?? "—")}</td>
-                    <td style={{ padding: "6px 8px" }}>{String(row.category ?? "—")}</td>
-                    <td style={{ padding: "6px 8px" }}>{String(row.confidence ?? "—")}</td>
-                    <td style={{ padding: "6px 8px" }}>{String(row.affected_url_count ?? 0)}</td>
-                  </tr>
-                ))}
+                {issues.slice(0, 25).map((row, i) => {
+                  const ruleId = String(row.rule_id || i);
+                  const expanded = expandedRuleId === ruleId;
+                  const urlCount = Number(row.affected_url_count ?? 0);
+                  const fixText = String(
+                    row.recommended_action || row.fix || row.recommendation || "—",
+                  );
+                  return (
+                    <Fragment key={ruleId}>
+                      <tr key={ruleId} style={{ borderBottom: "1px solid var(--line)" }}>
+                        <td style={{ padding: "6px 8px" }}>{String(row.priority ?? "—")}</td>
+                        <td style={{ padding: "6px 8px" }}>{String(row.severity ?? "—")}</td>
+                        <td style={{ padding: "6px 8px" }}>{String(row.title ?? "—")}</td>
+                        <td style={{ padding: "6px 8px" }}>{String(row.category ?? "—")}</td>
+                        <td style={{ padding: "6px 8px" }}>{String(row.confidence ?? "—")}</td>
+                        <td style={{ padding: "6px 8px", fontSize: 11, maxWidth: 220 }}>
+                          {fixText}
+                        </td>
+                        <td style={{ padding: "6px 8px" }}>
+                          {urlCount > 0 || row.rule_id ? (
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              style={{ fontSize: 11, padding: "2px 6px" }}
+                              onClick={() => void toggleIssueUrls(ruleId)}
+                            >
+                              {expanded ? "Hide" : "View"} ({urlCount || "?"})
+                            </button>
+                          ) : (
+                            "0"
+                          )}
+                        </td>
+                      </tr>
+                      {expanded ? (
+                        <tr key={`${ruleId}-urls`}>
+                          <td colSpan={7} style={{ padding: "8px 12px", background: "var(--surface-2, #fafafa)" }}>
+                            {issueUrlsLoading ? (
+                              <span style={{ fontSize: 12, color: "var(--muted)" }}>Loading URLs…</span>
+                            ) : issueUrlsError ? (
+                              <span style={{ fontSize: 12, color: "var(--coral, #b42318)" }}>{issueUrlsError}</span>
+                            ) : issueUrls.length ? (
+                              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+                                {issueUrls.slice(0, 50).map((url) => (
+                                  <li key={url}>
+                                    <a href={url} target="_blank" rel="noreferrer">
+                                      {url}
+                                    </a>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                                No sampled URLs stored for this issue — re-run Technical SEO with issue sampling enabled.
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

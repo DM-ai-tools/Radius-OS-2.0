@@ -9,9 +9,10 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db import get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, require_permission
 from app.integrations.google_oauth import (
     OAUTH_PROVIDERS,
     PROVIDER_LABELS,
@@ -106,6 +107,7 @@ async def authorize_url(
     user: User = Depends(get_current_user),
 ):
     """Return a Google consent URL, or signal mock mode when OAuth is not configured."""
+    await require_permission(user, db, "tracking_access_agent", need_trigger=True)
     if body.provider not in OAUTH_PROVIDERS:
         raise HTTPException(400, f"Invalid provider. Allowed: {', '.join(OAUTH_PROVIDERS)}")
 
@@ -131,6 +133,9 @@ async def authorize_url(
             "provider": body.provider,
             "uid": str(user.id),
         },
+        # Single-purpose CSRF token for one consent round trip — not a session
+        # credential, so it shouldn't inherit the full session-token lifetime.
+        expires_minutes=10,
     )
     url = build_authorize_url(state=state, provider=body.provider)
     return {
@@ -189,6 +194,23 @@ async def oauth_callback(
     if not client:
         return fail("Client not found")
 
+    oauth_user = (
+        await db.execute(
+            select(User).options(selectinload(User.role)).where(User.id == user_id)
+        )
+    ).scalar_one_or_none()
+    if not oauth_user:
+        return fail("User not found", client_id_str)
+    try:
+        await require_permission(
+            oauth_user,
+            db,
+            "tracking_access_agent",
+            need_trigger=True,
+        )
+    except HTTPException as exc:
+        return fail(str(exc.detail), client_id_str)
+
     try:
         token_payload = await exchange_code(code)
     except Exception as exc:  # noqa: BLE001
@@ -230,6 +252,7 @@ async def mock_grant(
     Still available when Google OAuth is configured (useful for demos).
     Prefer /authorize-url → Google consent for real connections.
     """
+    await require_permission(user, db, "tracking_access_agent", need_trigger=True)
     if body.provider not in OAUTH_PROVIDERS:
         raise HTTPException(400, f"Invalid provider. Allowed: {', '.join(OAUTH_PROVIDERS)}")
     client = (

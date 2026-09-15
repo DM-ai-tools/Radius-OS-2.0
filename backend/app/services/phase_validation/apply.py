@@ -149,15 +149,18 @@ async def run_phase_with_validation(
     result: ValidationResult | None = None
 
     for attempt in range(1, max_attempts + 1):
-        events = await runner(
-            db,
-            client=client,
-            session_id=session_id,
-            user_id=user_id,
-            message=current_message,
-        )
-        # Persist agent writes then reload so validation sees CDP summaries
-        await db.flush()
+        try:
+            events = await runner(
+                db,
+                client=client,
+                session_id=session_id,
+                user_id=user_id,
+                message=current_message,
+            )
+            await db.flush()
+        except Exception:
+            await db.rollback()
+            raise
         await db.refresh(profile)
 
         result = await validate_phase_output(
@@ -310,7 +313,7 @@ async def latest_validation_blocks_approve(
     ):
         from app.services.cache import cache_get, competitor_cache_key
 
-        cached = cache_get(competitor_cache_key(str(client_id)))
+        cached = await cache_get(competitor_cache_key(str(client_id)))
         if isinstance(cached, dict):
             output = compact_phase_output(agent_key, cached)
 

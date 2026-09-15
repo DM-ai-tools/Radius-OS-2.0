@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import date
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
@@ -29,6 +28,17 @@ def _headers() -> dict[str, str]:
 
 
 async def _get(path: str, params: dict[str, Any], *, max_attempts: int = 3) -> dict[str, Any] | None:
+    data, _err = await _get_with_error(path, params, max_attempts=max_attempts)
+    return data
+
+
+async def _get_with_error(
+    path: str,
+    params: dict[str, Any],
+    *,
+    max_attempts: int = 3,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """GET Ahrefs v3; return (json, error_code). error_code is set on failure."""
     import asyncio
     import time
 
@@ -36,9 +46,9 @@ async def _get(path: str, params: dict[str, Any], *, max_attempts: int = 3) -> d
 
     settings = get_settings()
     if not settings.ahrefs_api_key:
-        return None
+        return None, "ahrefs_unavailable"
     if settings.use_mock_providers:
-        return None
+        return None, "ahrefs_unavailable"
     clean = {k: v for k, v in params.items() if v is not None}
 
     for attempt in range(max_attempts):
@@ -63,7 +73,7 @@ async def _get(path: str, params: dict[str, Any], *, max_attempts: int = 3) -> d
             if attempt < max_attempts - 1:
                 await asyncio.sleep(2**attempt)
                 continue
-            return None
+            return None, "ahrefs_request_failed"
 
         if resp.status_code == 429 or resp.status_code >= 500:
             log.warning(
@@ -82,23 +92,29 @@ async def _get(path: str, params: dict[str, Any], *, max_attempts: int = 3) -> d
             if attempt < max_attempts - 1:
                 await asyncio.sleep(2**attempt)
                 continue
-            return None
+            return None, "ahrefs_http_retry_exhausted"
 
         if resp.status_code >= 400:
+            body = resp.text[:500]
             log.warning(
                 "ahrefs_http_error",
                 path=path,
                 status=resp.status_code,
-                body=resp.text[:240],
+                body=body[:240],
             )
             await record_api_call(
                 provider="ahrefs",
                 operation=path,
                 latency_ms=int((time.perf_counter() - t0) * 1000),
                 status="error",
-                error_detail=resp.text[:500],
+                error_detail=body,
             )
-            return None
+            lowered = body.lower()
+            if resp.status_code == 403 and "insufficient plan" in lowered:
+                return None, "ahrefs_insufficient_plan"
+            if resp.status_code in (401, 403):
+                return None, "ahrefs_forbidden"
+            return None, "ahrefs_http_error"
 
         await record_api_call(
             provider="ahrefs",
@@ -106,9 +122,9 @@ async def _get(path: str, params: dict[str, Any], *, max_attempts: int = 3) -> d
             latency_ms=int((time.perf_counter() - t0) * 1000),
             status="success",
         )
-        return resp.json()
+        return resp.json(), None
 
-    return None
+    return None, "ahrefs_request_failed"
 
 
 async def keyword_overview(
@@ -381,9 +397,9 @@ async def site_audit_projects(
         params["project_id"] = project_id
     if project_url:
         params["project_url"] = project_url
-    data = await _get("/site-audit/projects", params)
+    data, err = await _get_with_error("/site-audit/projects", params)
     if data is None:
-        errors.append("ahrefs_site_audit_projects_failed")
+        errors.append(err or "ahrefs_site_audit_projects_failed")
         return [], errors
     rows = data.get("healthscores") or data.get("projects") or []
     log.info("ahrefs_site_audit_projects_ok", count=len(rows))

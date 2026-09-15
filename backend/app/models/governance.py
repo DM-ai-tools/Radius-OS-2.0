@@ -48,7 +48,9 @@ class ReadinessScore(Base):
     __tablename__ = "readiness_scores"
 
     id: Mapped[uuid.UUID] = mapped_column(GUID(), primary_key=True, default=uuid.uuid4)
-    client_id: Mapped[uuid.UUID] = mapped_column(GUID(), ForeignKey("clients.id"), nullable=False)
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        GUID(), ForeignKey("clients.id"), nullable=False, index=True
+    )
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     missing_fields: Mapped[dict | None] = mapped_column(JSONType)

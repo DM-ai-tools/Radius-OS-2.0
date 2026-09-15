@@ -242,6 +242,34 @@ def test_validate_report_check_roundtrip(tmp_path: Path):
     assert checked["locked"] is True
 
 
+def test_tool_page_type_locks_and_reaches_calendar_roadmap():
+    report = build_roadmap(
+        _strategy(
+            {
+                "url": "/tools/roi-calculator",
+                "title": "ROI Calculator",
+                "keyword": "roi calculator",
+                "content_type": "tool",
+                "priority_tier": "quick_win",
+            }
+        ),
+        _arch(
+            [
+                {
+                    "url": "/tools/roi-calculator",
+                    "parent": "/tools",
+                    "depth": 2,
+                    "page_type": "tool",
+                }
+            ]
+        ),
+        {},
+    )
+    assert report["locked"] is True
+    assert report["pages"][0]["page_type"] == "tool"
+    assert report["pages"][0]["content_type_label"] == "tool"
+
+
 def test_architecture_tree_uses_strategy_queue_urls():
     from app.services.site_architecture import build_blueprint
 
@@ -268,6 +296,225 @@ def test_architecture_tree_uses_strategy_queue_urls():
     assert "/blog/share-of-search" in urls
     owners = bp.get("cluster_owners") or bp.get("cluster_ownership") or []
     assert any(str(o.get("cluster") or "").lower() == "measurement" for o in owners)
+
+
+def test_blueprint_builds_service_subservice_blog_chain():
+    from app.services.site_architecture import build_blueprint
+
+    catalog = [
+        {
+            "id": "meta ads",
+            "name": "Meta Ads",
+            "source": "cdd",
+            "subservices": [
+                {
+                    "id": "instagram ads",
+                    "name": "Instagram Ads",
+                    "source": "competitor",
+                }
+            ],
+        }
+    ]
+    bp = build_blueprint(
+        client_name="Acme",
+        domain="acme.example",
+        current_state={"urls_crawled": 0, "issues": []},
+        demand={
+            "services": ["Meta Ads"],
+            "service_catalog": catalog,
+            "service_prioritization": {
+                "selected_service_ids": ["meta ads"],
+                "selected_subservice_ids": ["instagram ads"],
+                "service_catalog": catalog,
+            },
+        },
+        seo_strategy={
+            "priority_queue": [
+                {
+                    "keyword": "instagram ads guide",
+                    "title": "Instagram Ads guide",
+                    "suggested_url": "/blog/instagram-ads-guide/",
+                    "content_type": "blog",
+                }
+            ]
+        },
+        commercial={},
+        website={},
+    )
+    by_url = {_pathish(node): node for node in bp["target_url_tree"]}
+    assert by_url["/meta-ads"]["page_type"] == "service"
+    assert by_url["/meta-ads"]["parent"] == "/"
+    assert by_url["/meta-ads/instagram-ads"]["page_type"] == "subservice"
+    assert by_url["/meta-ads/instagram-ads"]["parent"] == "/meta-ads/"
+    assert by_url["/blog/instagram-ads-guide"]["page_type"] == "blog"
+    assert by_url["/blog/instagram-ads-guide"]["parent"] == "/meta-ads/instagram-ads"
+
+
+def test_roadmap_routes_commercial_service_and_parents_supporting_blog():
+    report = build_roadmap(
+        _strategy(
+            {
+                "url": "/blog/social-media-marketing",
+                "title": "Social media marketing",
+                "keyword": "social media marketing",
+                "intent": "commercial",
+                "volume": 90,
+                "priority_tier": "quick_win",
+            },
+            {
+                "url": "/blog/instagram-ads-guide",
+                "title": "Instagram Ads guide",
+                "keyword": "instagram ads guide",
+                "intent": "informational",
+                "priority_tier": "fill_in",
+            },
+        ),
+        _arch(
+            [
+                {
+                    "url": "/social-media-marketing",
+                    "title": "Social Media Marketing",
+                    "keyword": "social media marketing",
+                    "service_id": "social media marketing",
+                    "parent": "/",
+                    "depth": 1,
+                    "page_type": "service",
+                },
+                {
+                    "url": "/meta-ads",
+                    "title": "Meta Ads",
+                    "service_id": "meta ads",
+                    "parent": "/",
+                    "depth": 1,
+                    "page_type": "service",
+                },
+                {
+                    "url": "/meta-ads/instagram-ads",
+                    "title": "Instagram Ads",
+                    "service_id": "meta ads",
+                    "subservice_id": "instagram ads",
+                    "parent": "/meta-ads",
+                    "depth": 2,
+                    "page_type": "subservice",
+                },
+                {
+                    "url": "/blog/social-media-marketing",
+                    "parent": "/blog",
+                    "depth": 2,
+                    "page_type": "blog",
+                },
+                {
+                    "url": "/blog/instagram-ads-guide",
+                    "parent": "/blog",
+                    "depth": 2,
+                    "page_type": "blog",
+                },
+            ]
+        ),
+        {},
+    )
+    by_keyword = {row["primary_keyword"]: row for row in report["pages"]}
+    commercial = by_keyword["social media marketing"]
+    assert commercial["url_n"] == "/social-media-marketing"
+    assert commercial["page_type"] == "service"
+    assert commercial["parent"] == "/"
+
+    blog = by_keyword["instagram ads guide"]
+    assert blog["page_type"] == "blog"
+    assert blog["parent_url_n"] == "/meta-ads/instagram-ads"
+    assert blog["supports_subservice_id"] == "instagram ads"
+
+
+def test_geo_commercial_variants_do_not_collapse_onto_service_url():
+    """Geo variants keep distinct URLs; only the head service term collapses."""
+    report = build_roadmap(
+        _strategy(
+            {
+                "url": "/guides/google-ads-management-sydney",
+                "title": "Google Ads Management Sydney",
+                "keyword": "google ads management sydney",
+                "intent": "commercial",
+                "volume": 210,
+                "priority_tier": "quick_win",
+            },
+            {
+                "url": "/guides/google-ads-management-near-me",
+                "title": "Google Ads Management Near Me",
+                "keyword": "google ads management near me",
+                "intent": "commercial",
+                "volume": 30,
+                "priority_tier": "quick_win",
+            },
+            {
+                "url": "/google-ads-management",
+                "title": "Google Ads Management",
+                "keyword": "google ads management",
+                "intent": "commercial",
+                "volume": 400,
+                "priority_tier": "big_bet",
+            },
+        ),
+        _arch(
+            [
+                {
+                    "url": "/google-ads-management",
+                    "title": "Google Ads Management",
+                    "keyword": "google ads management",
+                    "parent": "/",
+                    "depth": 1,
+                    "page_type": "service",
+                },
+                {
+                    "url": "/blog/google-ads-management-sydney",
+                    "keyword": "google ads management sydney",
+                    "parent": "/blog",
+                    "depth": 2,
+                    "page_type": "article",
+                },
+                {
+                    "url": "/blog/google-ads-management-near-me",
+                    "keyword": "google ads management near me",
+                    "parent": "/blog",
+                    "depth": 2,
+                    "page_type": "article",
+                },
+            ]
+        ),
+        {},
+    )
+    assert report["locked"] is True
+    urls = [r["url_n"] for r in report["pages"]]
+    assert urls.count("/google-ads-management") == 1
+    assert "/blog/google-ads-management-sydney" in urls
+    assert "/blog/google-ads-management-near-me" in urls
+    by_kw = {r["primary_keyword"]: r for r in report["pages"]}
+    assert by_kw["google ads management sydney"]["supports_service_id"] or by_kw[
+        "google ads management sydney"
+    ].get("parent_url_n") == "/google-ads-management"
+
+
+def test_strategy_queue_mirrors_are_deduped():
+    strategy = {
+        "priority_queue": [
+            {
+                "url": "/blog/a",
+                "title": "A",
+                "keyword": "topic a",
+                "intent": "informational",
+                "volume": 100,
+                "priority_tier": "quick_win",
+            }
+        ],
+        "combined_priority_queue": [{"title": "A", "keyword": "topic a"}],
+        "priority_pages": [{"url": "/blog/a", "keyword": "topic a", "title": "A"}],
+    }
+    report = build_roadmap(
+        strategy,
+        _arch([{"url": "/blog/a", "parent": "/blog", "depth": 2, "page_type": "article"}]),
+        {},
+    )
+    assert len(report["pages"]) == 1
+    assert report["locked"] is True
 
 
 def _pathish(n: dict) -> str:

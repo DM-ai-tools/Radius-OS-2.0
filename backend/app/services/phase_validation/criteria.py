@@ -7,7 +7,7 @@ The validator selects criteria by agent_key; it does not invent a one-size-fits-
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -180,12 +180,13 @@ PHASE_CRITERIA: dict[str, PhaseCriteria] = {
         agent_key="search_demand",
         phase_label="Search Demand & Keywords",
         purpose=(
-            "Expand CDD/discovery seeds into topics and opportunities with real provider "
-            "volumes — filter to company-relevant demand."
+            "Expand CDD/discovery seeds into keyword clusters with intent/funnel, "
+            "classify against the Phase 3 sitemap (existing vs new), and draft topics "
+            "only for new clusters — URL mapping follows in Phase 6."
         ),
         summary_attr="search_demand_summary",
         status_attr="search_demand_status",
-        required_keys=("topic_plan",),
+        required_keys=("cluster_report", "sitemap_classification"),
         honesty_keys=("best_opportunities", "keyword_dataset"),
         semantic_parameters=_COMMERCIAL_SEMANTIC,
         prior_phase_attrs=(
@@ -204,10 +205,10 @@ PHASE_CRITERIA: dict[str, PhaseCriteria] = {
             "keywords for services the company does not offer."
         ),
         success_looks_like=(
-            "Topics/clusters tied to products/geo; provider usage or explicit seed-only note; "
-            "irrelevant expansions cleaned."
+            "Clusters with intent/funnel; sitemap classification present; "
+            "new-topic drafts only where the site has no match."
         ),
-        downstream_risk="Irrelevant topics lock into strategy, IA, and production.",
+        downstream_risk="Wrong existing/new split locks URL mapping and production.",
     ),
     "content_strategy": PhaseCriteria(
         agent_key="content_strategy",
@@ -235,7 +236,7 @@ PHASE_CRITERIA: dict[str, PhaseCriteria] = {
     "site_architecture": PhaseCriteria(
         agent_key="site_architecture",
         phase_label="Site Architecture & IA",
-        purpose="URL/parent/depth tree and cluster ownership — structural skeleton for planning.",
+        purpose="URL/parent/depth tree and cluster ownership from sitemap-classified clusters.",
         summary_attr="site_architecture_summary",
         status_attr="site_architecture_status",
         required_keys=("target_url_tree",),
@@ -248,7 +249,10 @@ PHASE_CRITERIA: dict[str, PhaseCriteria] = {
             "ia_tree_nodes",
         ),
         never_present_notes="Missing url/parent/depth; tree unrelated to strategy keywords.",
-        success_looks_like="Every tree node has url+parent+depth; money pages reachable.",
+        success_looks_like=(
+            "Every tree node has url+parent+depth; money pages reachable; "
+            "URL map honors existing vs new dispositions."
+        ),
         downstream_risk="Broken tree blocks technical SEO and content planning gates.",
     ),
     "technical_seo": PhaseCriteria(

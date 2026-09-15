@@ -41,8 +41,8 @@ export default function ReportCardShell({ card, clientId, token, onError, childr
 
 /** Primary report card_type per phase in team memory. */
 export const PHASE_REPORT_CARD_TYPE: Record<string, string> = {
-  discovery: "discovery_profile",
-  tracking: "tracking_t6_signoff",
+  discovery: "discovery_report",
+  tracking: "tracking_report",
   website: "website_audit",
   competitor: "competitor_landscape",
   search_demand: "search_demand_report",

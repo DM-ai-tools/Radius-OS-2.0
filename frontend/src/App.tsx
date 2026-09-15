@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import LandingPage from "./pages/LandingPage";
 import ClientsPage from "./pages/ClientsPage";
 import ChatPage from "./pages/ChatPage";
+import SeoManager from "./components/SeoManager";
 import { useAuth } from "./auth";
 import "./landing.css";
 
@@ -24,6 +25,7 @@ function RequireAuth({ children }: { children: ReactNode }) {
 export default function App() {
   return (
     <div className="app-shell">
+      <SeoManager />
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route

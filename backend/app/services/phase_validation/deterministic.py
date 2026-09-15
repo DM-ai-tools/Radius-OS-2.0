@@ -505,22 +505,36 @@ def _check_search_demand_relevance_shell(
     _ = criteria, prior
     results: list[CheckResult] = []
     products = company_ctx.get("products_services")
+    classification = output.get("sitemap_classification") or (
+        (output.get("cluster_report") or {}).get("sitemap_classification")
+    )
     topic_plan = output.get("topic_plan") or output.get("topics") or []
-    if not topic_plan:
-        results.append(
-            _fail(
-                "search_demand_topics",
-                "completeness",
-                "Search demand missing topic_plan/topics.",
-                severity=CheckSeverity.MAJOR.value,
-            )
-        )
-    else:
+    has_clusters = bool(
+        (output.get("cluster_report") or {}).get("clusters") or output.get("clusters")
+    )
+    if classification:
         results.append(
             _pass(
                 "search_demand_topics",
                 "completeness",
-                "topic_plan/topics present.",
+                "sitemap cluster classification present (existing vs new topics).",
+            )
+        )
+    elif topic_plan or has_clusters:
+        results.append(
+            _pass(
+                "search_demand_topics",
+                "completeness",
+                "topic_plan/topics or clusters present.",
+            )
+        )
+    else:
+        results.append(
+            _fail(
+                "search_demand_topics",
+                "completeness",
+                "Search demand missing sitemap classification / topic_plan / clusters.",
+                severity=CheckSeverity.MAJOR.value,
             )
         )
 

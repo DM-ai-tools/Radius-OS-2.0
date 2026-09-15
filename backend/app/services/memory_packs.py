@@ -404,7 +404,7 @@ def slim_seo_strategy_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                 "suggested_url": p.get("suggested_url"),
                 "action": p.get("action"),
                 "beat_competitors": list(p.get("beat_competitors") or [])[:3] or None,
-                "image_suggestions": list(p.get("image_suggestions") or [])[:2] or None,
+                "image_suggestions": list(p.get("image_suggestions") or [])[:12] or None,
             }
             for p in (full.get("priority_queue") or full.get("priority_pages") or [])[:12]
             if isinstance(p, dict)

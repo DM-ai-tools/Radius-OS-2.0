@@ -92,11 +92,11 @@ async def run_tracking(
         {
             "type": "system_notice",
             "content": (
-                "Phase 2 — Access, Tracking & Data Collection (T1–T6). "
+                "Phase 2 — Access, Tracking & Data Collection. "
                 + (
                     "Scoped re-check for " + ", ".join(scope) + "…"
                     if scope
-                    else "Running automated T1–T4, then known-changes (T5)…"
+                    else "Running the consolidated tracking report…"
                 )
             ),
         }
@@ -116,7 +116,7 @@ async def run_tracking(
         p: ("Granted" if has.get(p) else "Not granted") for p in oauth_providers
     }
 
-    # ── T1 — Access collection & connection verification ──
+    # Access, tracking, conversion, and baseline checks are kept as one report.
     cdd_access = {}
     if profile:
         cdd_access = dict((profile.tracking_baseline or {}).get("cdd_access") or {})
@@ -128,32 +128,6 @@ async def run_tracking(
     missing_oauth = [p for p in oauth_providers if not has.get(p)]
     if scope:
         missing_oauth = [p for p in missing_oauth if p in scope]
-
-    events.append(
-        {
-            "type": "agent_message",
-            "agent_key": "tracking_access_agent",
-            "content": (
-                "T1 — Access collection & connection verification (automated). "
-                "Checking CMS, hosting, GSC, GA4, GTM, Google Business, CRM, and call-tracking."
-            ),
-        }
-    )
-    events.append(
-        {
-            "type": "structured_card",
-            "payload": {
-                "card_type": "tracking_t1_access",
-                "title": "T1 — Access collection & connection verification",
-                "subtitle": "Connection test per platform",
-                "mode": "AUTOMATED",
-                "step": "T1",
-                "platforms": t1_platforms,
-                "provider_status": provider_status,
-                "agent_key": "tracking_access_agent",
-            },
-        }
-    )
 
     if missing_oauth:
         events.append(
@@ -251,55 +225,13 @@ async def run_tracking(
                 }
             )
 
-    # ── T2 — Automated tracking audit ──
+    # Automated tracking audit
     t2 = build_t2_audit(checks, snippets)
-    events.append(
-        {
-            "type": "agent_message",
-            "agent_key": "tracking_access_agent",
-            "content": (
-                "T2 — Automated tracking audit: tag presence, duplicates, cross-domain, "
-                "referral exclusions, and cookie-consent notes (analytics layer, not page crawl)."
-            ),
-        }
-    )
-    events.append(
-        {
-            "type": "structured_card",
-            "payload": {
-                "card_type": "tracking_t2_audit",
-                "step": "T2",
-                "agent_key": "tracking_access_agent",
-                **t2,
-            },
-        }
-    )
 
-    # ── T3 — Conversion validation ──
+    # Conversion validation
     t3 = build_t3_conversions(checks)
-    events.append(
-        {
-            "type": "agent_message",
-            "agent_key": "tracking_access_agent",
-            "content": (
-                "T3 — Conversion tracking validation: primary/secondary conversions must be "
-                "verified as firing — configured-but-unverified counts as not working."
-            ),
-        }
-    )
-    events.append(
-        {
-            "type": "structured_card",
-            "payload": {
-                "card_type": "tracking_t3_conversions",
-                "step": "T3",
-                "agent_key": "tracking_access_agent",
-                **t3,
-            },
-        }
-    )
 
-    # ── T4 — Historical baseline ──
+    # Historical baseline
     t4 = build_t4_baseline(
         has_ga4=bool(has.get("ga4")),
         has_gsc=bool(has.get("search_console")),
@@ -311,28 +243,35 @@ async def run_tracking(
     baseline["t1_platforms"] = t1_platforms
     profile.tracking_baseline = baseline
 
+    tracking_report = {
+        "card_type": "tracking_report",
+        "title": "Phase 2 — Tracking & access report",
+        "subtitle": "Access, analytics, conversions, and historical baseline",
+        "mode": "AUTOMATED REPORT",
+        "step": "Phase 2",
+        "platforms": t1_platforms,
+        "provider_status": provider_status,
+        "audit": t2,
+        "conversions": t3,
+        "baseline": t4,
+        "rows": rows_out,
+        "known_change_fields": KNOWN_CHANGE_FIELDS,
+        "agent_key": "tracking_access_agent",
+        "actions": ["submit_known_changes"],
+        "required_role": required_role_for("tracking_access_agent"),
+    }
     events.append(
         {
             "type": "agent_message",
             "agent_key": "tracking_access_agent",
             "content": (
-                "T4 — Historical baseline extraction: 6–12 months of organic users, sessions, "
-                "conversions, revenue, impressions, clicks, CTR, position, queries, landings, "
-                "index coverage, branded vs non-branded (via GSC + GA4 when connected)."
+                "Phase 2 Tracking & Access report ready. It combines platform access, "
+                "analytics checks, conversion validation, and the historical baseline. "
+                "Add known changes once, then review the single confirmation gate."
             ),
         }
     )
-    events.append(
-        {
-            "type": "structured_card",
-            "payload": {
-                "card_type": "tracking_t4_baseline",
-                "step": "T4",
-                "agent_key": "tracking_access_agent",
-                **t4,
-            },
-        }
-    )
+    events.append({"type": "structured_card", "payload": tracking_report})
 
     await log_event(
         db,
@@ -347,33 +286,6 @@ async def run_tracking(
     )
     await recompute_readiness(db, client.id)
 
-    # ── T5 — Known-changes log (human input) ──
-    events.append(
-        {
-            "type": "agent_message",
-            "agent_key": "tracking_access_agent",
-            "content": (
-                "T5 — Known-changes log needs a person. APIs cannot see redesigns, domain moves, "
-                "past SEO work, manual actions, security incidents, or algorithm timing — "
-                "Client Success + client capture that institutional memory."
-            ),
-        }
-    )
-    events.append(
-        {
-            "type": "structured_card",
-            "payload": {
-                "card_type": "tracking_t5_known_changes",
-                "title": "T5 — Known-changes log",
-                "subtitle": "Client Success Manager + client",
-                "mode": "HUMAN INPUT",
-                "step": "T5",
-                "fields": KNOWN_CHANGE_FIELDS,
-                "agent_key": "tracking_access_agent",
-                "actions": ["submit_known_changes"],
-            },
-        }
-    )
     events.append(
         {
             "type": "phase_status",
@@ -386,7 +298,7 @@ async def run_tracking(
     events.append(
         {
             "type": "system_notice",
-            "content": "Next: submit T5 known-changes, then T6 Technical SEO sign-off.",
+                "content": "Next: submit known changes, then approve the single Tracking confirmation gate.",
         }
     )
     return events
@@ -398,7 +310,7 @@ async def build_tracking_signoff_events(
     client_id: UUID,
     known_changes: dict | None = None,
 ) -> list[dict]:
-    """T6 — Readiness scoring & sign-off after known-changes submitted."""
+    """Build the single Tracking confirmation gate after report submission."""
     events: list[dict] = []
     profile = await get_profile(db, client_id)
     client = (await db.execute(select(Client).where(Client.id == client_id))).scalar_one()
@@ -437,11 +349,11 @@ async def build_tracking_signoff_events(
 
     automation_level = 0 if blockers else 1
     card = {
-        "card_type": "tracking_t6_signoff",
-        "title": "T6 — Readiness scoring & sign-off",
-        "subtitle": "Technical SEO Specialist",
+        "card_type": "tracking_confirmation",
+        "title": "Tracking confirmation gate",
+        "subtitle": "Technical SEO Specialist approval",
         "mode": "HUMAN GATE",
-        "step": "T6",
+        "step": "Confirmation gate",
         "client_name": client.display_name,
         "tracking_score": float(score),
         "missing": missing,
@@ -465,7 +377,7 @@ async def build_tracking_signoff_events(
             "type": "agent_message",
             "agent_key": "tracking_access_agent",
             "content": (
-                f"T6 — weighted tracking readiness is {float(score):.0f}%. "
+                f"Tracking report is {float(score):.0f}% ready. "
                 + (
                     f"{len(blockers)} blocker(s) keep automation at Level 0. "
                     if blockers
@@ -490,7 +402,7 @@ async def build_tracking_signoff_events(
     events.append(
         {
             "type": "system_notice",
-            "content": "Next: Tech SEO Approve baseline (or flag), then run website situation analysis.",
+            "content": "Next: approve or flag the Tracking confirmation gate, then run website situation analysis.",
         }
     )
     return events

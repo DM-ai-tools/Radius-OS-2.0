@@ -3,22 +3,74 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.agents import AGENT_RUNNERS
 from app.config import get_settings
-from app.deps import agent_feature_enabled
+from app.deps import agent_feature_enabled, require_permission
 from app.integrations.llm import route_agent
-from app.models import ChatMessage, ChatSession, Client, ClientDigitalProfile, RolePermission, User
+from app.models import ChatMessage, ChatSession, Client, ClientDigitalProfile, User
 from app.services.audit import log_event
+from app.services.json_safe import json_safe
 from app.services.role_skills import required_role_for
 
 # Competitor scoring fans out several LLM calls; keep headroom above 5 minutes.
 AGENT_TIMEOUT_SECONDS = 480
+
+_STATUS_AGENT_PAIRS = (
+    ("discovery_status", "discovery_agent"),
+    ("tracking_status", "tracking_access_agent"),
+    ("website_status", "website_situation_agent"),
+    ("competitor_status", "competitor_market_agent"),
+    ("search_demand_status", "search_demand"),
+    ("seo_strategy_status", "content_strategy"),
+    ("site_architecture_status", "site_architecture"),
+    ("technical_seo_status", "technical_seo"),
+    ("content_audit_status", "content_audit"),
+    ("content_planning_status", "content_planning"),
+    ("content_production_status", "content_production"),
+    ("on_page_seo_status", "on_page_seo"),
+    ("publishing_status", "publishing"),
+)
+
+
+def _chat_review_action(content: str) -> str | None:
+    """Recognize explicit review commands without treating questions as actions."""
+    text = " ".join(content.lower().strip().split())
+    if not text or "?" in text:
+        return None
+    if re.match(r"^(approve|accept|sign[\s-]?off)\b", text):
+        return "approve"
+    if re.match(r"^(reject|send back|request (?:a )?revision|request changes)\b", text):
+        return "reject"
+    return None
+
+
+async def _chat_review_agent(
+    content: str,
+    *,
+    statuses: dict[str, str],
+    active_agent_key: str | None,
+) -> str:
+    """Resolve an explicit phase hint, then active/pending phase as fallback."""
+    target_hint = re.sub(
+        r"^(approve|accept|sign[\s-]?off|reject|send back|request (?:a )?revision|request changes)\b",
+        "",
+        content.lower().strip(),
+    ).strip(" .:!-")
+    if target_hint and target_hint not in {"this", "it", "this phase", "the phase"}:
+        return await route_agent(content, statuses)
+    valid_agents = {agent for _, agent in _STATUS_AGENT_PAIRS}
+    if active_agent_key in valid_agents:
+        return str(active_agent_key)
+    for status_attr, agent_key in _STATUS_AGENT_PAIRS:
+        if statuses.get(status_attr) == "pending_signoff":
+            return agent_key
+    return await route_agent(content, statuses)
 
 
 def agent_timeout_seconds(agent_key: str) -> int:
@@ -78,6 +130,41 @@ async def process_chat_turn(
         "publishing_status": profile.publishing_status,
     }
 
+    review_action = _chat_review_action(content)
+    if review_action:
+        agent_key = await _chat_review_agent(
+            content,
+            statuses=statuses,
+            active_agent_key=session.active_agent_key,
+        )
+        await require_permission(user, db, agent_key, need_approve=True)
+        from app.services.review import approve_phase_batch
+
+        result = await approve_phase_batch(
+            db,
+            user=user,
+            client_id=client.id,
+            agent_key=agent_key,
+            action=review_action,
+            permission_checked=True,
+        )
+        events = [
+            {
+                "type": "system_notice",
+                "content": (
+                    f"{agent_key} approved and advanced."
+                    if review_action == "approve"
+                    else f"{agent_key} rejected and returned for revision."
+                ),
+            },
+            {
+                "type": "phase_status",
+                "payload": result.get("phase_statuses", {}),
+            },
+        ]
+        await _persist_agent_events(db, session, client.id, events)
+        return events
+
     # Chat-box edits to an existing report (add/remove keyword, topic, competitor…)
     from app.services.chat_revisions import maybe_revise_from_chat
 
@@ -85,6 +172,7 @@ async def process_chat_turn(
         db,
         client=client,
         profile=profile,
+        user=user,
         active_agent_key=session.active_agent_key,
         message=content,
     )
@@ -103,6 +191,18 @@ async def process_chat_turn(
 
     # Step 05 — router
     agent_key = await route_agent(content, statuses)
+
+    if not agent_feature_enabled(agent_key):
+        events = [
+            {
+                "type": "system_notice",
+                "content": f"Agent {agent_key} is disabled by feature flag.",
+            }
+        ]
+        await _persist_agent_events(db, session, client.id, events)
+        return events
+
+    await require_permission(user, db, agent_key, need_trigger=True)
 
     if agent_key == "readiness_gate":
         from app.services.readiness import (
@@ -159,47 +259,6 @@ async def process_chat_turn(
         await _persist_agent_events(db, session, client.id, events)
         return events
 
-    if not agent_feature_enabled(agent_key):
-        events = [
-            {
-                "type": "system_notice",
-                "content": f"Agent {agent_key} is disabled by feature flag.",
-            }
-        ]
-        await _persist_agent_events(db, session, client.id, events)
-        return events
-
-    # Step 02 — role permission for trigger
-    # Strategist can view all but only trigger competitor; allow CSM/Tech for their lanes
-    user_loaded = (
-        await db.execute(
-            select(User).options(selectinload(User.role)).where(User.id == user.id)
-        )
-    ).scalar_one()
-    perm = (
-        await db.execute(
-            select(RolePermission).where(
-                RolePermission.role_id == user_loaded.role_id,
-                RolePermission.agent_key == agent_key,
-            )
-        )
-    ).scalar_one_or_none()
-
-    role_name = user_loaded.role.name if user_loaded.role else ""
-    can_run = settings.auth_disabled or bool(perm and perm.can_trigger)
-    if not can_run:
-        events = [
-            {
-                "type": "system_notice",
-                "content": (
-                    f"Your role ({role_name}) cannot trigger {agent_key}. "
-                    "Switch to the accountable specialist or ask them to run this phase."
-                ),
-            }
-        ]
-        await _persist_agent_events(db, session, client.id, events)
-        return events
-
     session.active_agent_key = agent_key
     runner = AGENT_RUNNERS[agent_key]
     try:
@@ -249,15 +308,19 @@ async def _persist_agent_events(
     for ev in events:
         role = "system" if ev["type"] in ("system_notice", "job_progress", "phase_status", "error") else "agent"
         content = ev.get("content") or ""
+        payload = ev.get("payload")
         if ev["type"] in ("structured_card", "checkpoint"):
-            content = ev.get("payload", {}).get("title", ev["type"])
+            content = (payload or {}).get("title", ev["type"])
             role = "agent"
+        structured_payload = payload or ({"type": ev["type"]} if ev["type"] != "agent_message" else None)
+        if structured_payload is not None:
+            structured_payload = json_safe(structured_payload)
         msg = ChatMessage(
             session_id=session.id,
             role=role if ev["type"] != "agent_message" else "agent",
             content=content or ev["type"],
-            structured_payload=ev.get("payload") or ({"type": ev["type"]} if ev["type"] != "agent_message" else None),
-            agent_key=ev.get("agent_key") or (ev.get("payload") or {}).get("agent_key"),
+            structured_payload=structured_payload,
+            agent_key=ev.get("agent_key") or (payload or {}).get("agent_key"),
         )
         # Attach event type for UI reconstruction
         if msg.structured_payload is None and ev["type"] != "agent_message":
@@ -272,5 +335,6 @@ async def _persist_agent_events(
             actor_type="agent" if role == "agent" else "system",
             event_type="chat_message" if ev["type"] == "agent_message" else ev["type"],
             event_detail={"type": ev["type"]},
+            flush=False,
         )
     await db.flush()

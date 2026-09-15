@@ -20,11 +20,18 @@ PAGE_TYPES = frozenset(
         "article",
         "blog",
         "service",
+        "subservice",
         "product",
         "location",
         "commercial",
         "supporting",
         "utility",
+        "landing",
+        "faq",
+        "comparison",
+        "guide",
+        "listicle",
+        "tool",
     }
 )
 TIER_ALIASES = {
@@ -42,7 +49,10 @@ PAGE_TYPE_ALIASES = {
     "planned": "article",
     "page": "article",
     "post": "article",
-    "guide": "article",
+    "guide": "guide",
+    "landing_page": "landing",
+    "faq_page": "faq",
+    "sub_service": "subservice",
 }
 DISPOSITION_ALIASES = {
     "keep": "KEEP",
@@ -92,6 +102,40 @@ def _page_type(row: dict[str, Any]) -> str | None:
     if key in PAGE_TYPES:
         return key
     return PAGE_TYPE_ALIASES.get(key, key)
+
+
+def _planning_content_type(row: dict[str, Any], *, page_type: str | None, primary: str | None) -> str:
+    """Human-facing content type for Phase 9 roadmap rows."""
+    raw = row.get("content_type") or row.get("type")
+    if raw:
+        key = str(raw).strip().lower()
+        if key in {"blog", "article", "post"}:
+            return "blog"
+        if key in {"service", "services", "subservice", "sub_service", "commercial"}:
+            return "service page"
+        if key in {"landing", "landing_page"}:
+            return "landing page"
+        if key in {"faq", "faq_page"}:
+            return "faq"
+        return key
+    ptype = (page_type or "").lower()
+    if ptype in {"service", "subservice", "product", "commercial", "location"}:
+        return "service page"
+    if ptype == "landing":
+        return "landing page"
+    if ptype == "faq":
+        return "faq"
+    kw = str(primary or row.get("keyword") or row.get("title") or "").lower()
+    intent = str(row.get("intent") or "").lower()
+    if "faq" in kw or kw.startswith("what is ") and "?" in kw:
+        return "faq"
+    if intent == "transactional" or any(x in kw for x in ("pricing", "hire", "quote")):
+        return "landing page"
+    if intent == "commercial" or ptype in {"comparison", "listicle"}:
+        return "service page"
+    if ptype in {"article", "blog", "guide"} or kw.startswith(("how to", "what is", "best ")):
+        return "blog"
+    return "blog"
 
 
 def _disposition(row: dict[str, Any] | None) -> str | None:
@@ -167,6 +211,140 @@ def _keyword_overlap(a: str, b: str) -> bool:
     return len(at & bt) / max(1, min(len(at), len(bt))) >= 0.7
 
 
+def _service_targets(architecture_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Canonical service targets, most-specific (sub-service) first."""
+    targets = [
+        row
+        for row in architecture_rows
+        if _page_type(row) in {"service", "subservice"}
+        and url_n(str(row.get("url") or row.get("path") or ""))
+    ]
+    return sorted(
+        targets,
+        key=lambda row: (
+            0 if _page_type(row) == "subservice" else 1,
+            -len(_token_set(str(row.get("title") or row.get("keyword") or ""))),
+        ),
+    )
+
+
+def _matching_service_target(
+    row: dict[str, Any],
+    *,
+    keyword: str,
+    targets: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Resolve explicit service IDs first, then defensible topical overlap."""
+    explicit_sub = _norm_kw(
+        row.get("supports_subservice_id")
+        or row.get("subservice_id")
+        or row.get("subservice")
+        or (
+            row.get("target")
+            if str(row.get("target_type") or "").lower() in {"subservice", "sub_service"}
+            else None
+        )
+    )
+    explicit_service = _norm_kw(
+        row.get("supports_service_id")
+        or row.get("service_id")
+        or row.get("service")
+        or row.get("parent_service_id")
+        or row.get("parent_segment")
+    )
+    for target in targets:
+        target_type = _page_type(target)
+        target_ids = {
+            _norm_kw(target.get("subservice_id")),
+            _norm_kw(target.get("service_id")),
+            _norm_kw(target.get("title")),
+            _norm_kw(target.get("keyword")),
+        }
+        target_ids.discard("")
+        if explicit_sub and target_type == "subservice" and explicit_sub in target_ids:
+            return target
+        if explicit_service and explicit_service in target_ids:
+            return target
+
+    keyword_tokens = _token_set(keyword)
+    if not keyword_tokens:
+        return None
+    best: tuple[float, dict[str, Any]] | None = None
+    for target in targets:
+        label = str(
+            target.get("title")
+            or target.get("primary_keyword")
+            or target.get("keyword")
+            or ""
+        )
+        label_tokens = _token_set(label)
+        if not label_tokens:
+            continue
+        overlap = len(keyword_tokens & label_tokens)
+        if not overlap:
+            continue
+        coverage = overlap / len(label_tokens)
+        precision = overlap / len(keyword_tokens)
+        # A complete service-name match is strong; partial matches require at
+        # least two shared tokens to avoid assigning every "... ads" article
+        # to an arbitrary paid-media service.
+        if coverage < 1.0 and overlap < 2:
+            continue
+        score = coverage * 2 + precision
+        if _page_type(target) == "subservice":
+            score += 0.25
+        if best is None or score > best[0]:
+            best = (score, target)
+    return best[1] if best else None
+
+
+def _low_volume_commercial_service_match(row: dict[str, Any], keyword: str) -> bool:
+    intent = str(row.get("intent") or "").strip().lower()
+    if intent not in {"commercial", "transactional"}:
+        return False
+    try:
+        volume = float(row.get("volume") or row.get("search_volume") or 0)
+    except (TypeError, ValueError):
+        volume = 0
+    return volume <= 1000 and bool(keyword.strip())
+
+
+def _keyword_is_service_head_term(keyword: str, service: dict[str, Any]) -> bool:
+    """True when keyword is the service name itself, not a geo/modifier variant.
+
+    Commercial routing may collapse a blog/guide URL onto the canonical service
+    page only for head terms (e.g. \"social media marketing\" → /social-media-marketing).
+    Geo or modifier variants (\"google ads management sydney\") keep their own URL and
+    become supporting children of the service instead — otherwise multiple variants
+    overwrite the same service url_n and unlock the Phase 9 roadmap.
+    """
+    label = str(
+        service.get("title")
+        or service.get("primary_keyword")
+        or service.get("keyword")
+        or ""
+    )
+    kt, lt = _token_set(keyword), _token_set(label)
+    if not kt or not lt:
+        return False
+    if kt == lt:
+        return True
+    if not lt <= kt:
+        return False
+    filler = {
+        "services",
+        "service",
+        "agency",
+        "company",
+        "companies",
+        "best",
+        "top",
+        "online",
+        "digital",
+    }
+    return len(kt - lt - filler) == 0
+
+
 def _audit_keyword_matches(
     audit: dict[str, Any] | None,
     *,
@@ -220,13 +398,36 @@ def ia_gate_ok(site_architecture_status: str | None, site_architecture: dict[str
     return any(isinstance(n, dict) and (n.get("url") or n.get("path")) for n in tree)
 
 
+def _strategy_row_richness(row: dict[str, Any]) -> tuple[int, ...]:
+    """Prefer rows that carry URL + demand signals when deduping queue copies."""
+    return (
+        1 if _strategy_url(row) else 0,
+        1 if row.get("intent") else 0,
+        1 if (row.get("volume") or row.get("search_volume")) else 0,
+        1 if (row.get("title") or row.get("topic")) else 0,
+        1 if (row.get("priority_tier") or row.get("priority")) else 0,
+    )
+
+
 def _strategy_rows(strategy: dict[str, Any]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+    """Flatten strategy queues once — packs often mirror the same topics 2–3 times."""
+    collected: list[dict[str, Any]] = []
     for key in ("priority_queue", "combined_priority_queue", "priority_pages"):
         for row in strategy.get(key) or []:
             if isinstance(row, dict):
-                out.append(row)
-    return out
+                collected.append(row)
+
+    by_key: dict[str, dict[str, Any]] = {}
+    no_key: list[dict[str, Any]] = []
+    for row in collected:
+        nk = _row_keyword(row) or _strategy_url(row)
+        if not nk:
+            no_key.append(row)
+            continue
+        prev = by_key.get(nk)
+        if prev is None or _strategy_row_richness(row) > _strategy_row_richness(prev):
+            by_key[nk] = row
+    return list(by_key.values()) + no_key
 
 
 def _arch_rows(architecture: dict[str, Any]) -> list[dict[str, Any]]:
@@ -298,12 +499,18 @@ def build_roadmap(
         key = url_n(str(row.get("url") or row.get("path") or ""))
         if key:
             arch_by.setdefault(key, row)
+    service_targets = _service_targets(arch_rows)
 
     # URL map from site architecture — attach crawled URLs to clusters before join.
     from app.services.url_mapping import lookup_url_map_entry
 
     for entry in architecture.get("final_url_map") or []:
         if not isinstance(entry, dict) or entry.get("action") == "CREATE":
+            continue
+        # Supporting / out-of-scope / held-for-review clusters deliberately own
+        # no URL of their own — they must not seed a planning row for a page
+        # that will never exist.
+        if entry.get("dedicated_url") is False:
             continue
         mapped = url_n(str(entry.get("selected_url") or ""))
         if not mapped or mapped == "/":
@@ -425,6 +632,39 @@ def build_roadmap(
 
     pages: list[dict[str, Any]] = []
     for key, s, a, reconcile_note in pairs:
+        primary_probe = str(
+            s.get("keyword")
+            or s.get("primary_keyword")
+            or a.get("keyword")
+            or a.get("primary_keyword")
+            or ""
+        ).strip()
+        service_target = _matching_service_target(
+            {**a, **s},
+            keyword=primary_probe,
+            targets=service_targets,
+        )
+        original_page_type = _page_type(a)
+        route_to_service = bool(
+            service_target
+            and _low_volume_commercial_service_match({**a, **s}, primary_probe)
+            and _keyword_is_service_head_term(primary_probe, service_target)
+        )
+        supporting_parent = bool(
+            service_target
+            and not route_to_service
+            and original_page_type
+            in {"article", "blog", "guide", "spoke", "cluster", "supporting", "hub"}
+        )
+        if route_to_service and service_target:
+            key = url_n(
+                str(service_target.get("url") or service_target.get("path") or "")
+            )
+            a = {**a, **service_target}
+            reconcile_note = (
+                f"{reconcile_note}; " if reconcile_note else ""
+            ) + "commercial_keyword_routed_to_service"
+
         au = audit_by.get(key)
         disp = _disposition(au)
         inferred_existing = None
@@ -443,10 +683,14 @@ def build_roadmap(
         action = _action_from_disposition(disp)
         cluster = str(s.get("cluster") or s.get("pillar") or a.get("cluster") or "").strip()
         primary = s.get("keyword") or s.get("primary_keyword") or a.get("keyword") or a.get("primary_keyword")
-        url_map_entry = lookup_url_map_entry(
-            {"final_url_map": architecture.get("final_url_map") or []},
-            cluster=cluster,
-            keyword=str(primary or ""),
+        url_map_entry = (
+            None
+            if route_to_service
+            else lookup_url_map_entry(
+                {"final_url_map": architecture.get("final_url_map") or []},
+                cluster=cluster,
+                keyword=str(primary or ""),
+            )
         )
         if url_map_entry:
             map_action = url_map_entry.get("action")
@@ -466,14 +710,24 @@ def build_roadmap(
         except (TypeError, ValueError):
             depth_i = key.count("/") or 1
         parent = a.get("parent") or a.get("parent_url")
-        raw_crumbs = a.get("breadcrumb")
+        if supporting_parent and service_target:
+            parent = service_target.get("url") or service_target.get("path")
+            depth = service_target.get("depth")
+            try:
+                depth_i = int(depth) + 1
+            except (TypeError, ValueError):
+                depth_i = max(1, url_n(str(parent)).count("/")) + 1
+        raw_crumbs = None if supporting_parent else a.get("breadcrumb")
         crumbs = _breadcrumb_list(raw_crumbs, str(parent) if parent else None, key)
         indexable = _indexable(a)
         tier = _tier(s)
-        ptype = _page_type(a)
         flags: list[str] = []
         if reconcile_note:
             flags.append("url_reconciled")
+        if route_to_service:
+            flags.append("commercial_service_route")
+        elif supporting_parent:
+            flags.append("supports_service")
         if cannibal:
             flags.append("cannibal_conflict")
         if inferred_existing:
@@ -498,6 +752,8 @@ def build_roadmap(
             kws = [kws]
         primary = s.get("keyword") or s.get("primary_keyword") or a.get("keyword") or a.get("primary_keyword")
         title = s.get("title") or a.get("title") or primary
+        ptype = _page_type(a)
+        ctype = _planning_content_type({**s, **a}, page_type=ptype, primary=str(primary or "") or None)
         score = s.get("opportunity_score") or s.get("priority_score") or 0
         try:
             score_n = float(score)
@@ -560,13 +816,25 @@ def build_roadmap(
                 "funnel": s.get("funnel") or a.get("funnel"),
                 "angle": s.get("angle") or a.get("angle"),
                 "business_fit": s.get("business_fit") or a.get("business_fit"),
+                "service": s.get("service") or a.get("service"),
+                "subservice": s.get("subservice") or a.get("subservice"),
+                "target": s.get("target") or a.get("target"),
+                "target_type": s.get("target_type") or a.get("target_type"),
+                "seed": s.get("seed") or a.get("seed"),
                 "from_phase5_topic": bool(s.get("from_phase5_topic")),
                 "competitor_domains": list(s.get("beat_competitors") or s.get("competitor_domains") or []),
-                "content_type": s.get("content_type") or a.get("content_type"),
+                "content_type": s.get("content_type") or a.get("content_type") or ctype,
+                "content_type_label": ctype,
                 "image_suggestions": s.get("image_suggestions") or [],
                 "cluster": cluster or None,
                 "parent": parent,
                 "parent_url_n": url_n(str(parent)) if parent else None,
+                "supports_service_id": (
+                    service_target.get("service_id") if service_target else None
+                ),
+                "supports_subservice_id": (
+                    service_target.get("subservice_id") if service_target else None
+                ),
                 "depth": depth_i,
                 "breadcrumb": crumbs,
                 "page_type": ptype,

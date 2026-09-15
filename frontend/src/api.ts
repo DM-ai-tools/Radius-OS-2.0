@@ -23,7 +23,7 @@ type RequestOpts = RequestInit & { token?: string | null; timeoutMs?: number };
 /** Shared transport: headers, auth, timeout, and error shape. Returns the raw Response
  *  so streaming and blob callers can use the same path as JSON ones. */
 async function requestRaw(path: string, opts: RequestOpts = {}): Promise<Response> {
-  const { token, timeoutMs, ...fetchOpts } = opts;
+  const { token, timeoutMs, signal: externalSignal, ...fetchOpts } = opts;
   // FormData must set its own multipart boundary — forcing JSON here breaks uploads.
   const isFormData =
     typeof FormData !== "undefined" && fetchOpts.body instanceof FormData;
@@ -39,6 +39,13 @@ async function requestRaw(path: string, opts: RequestOpts = {}): Promise<Respons
   const ms = timeoutMs === undefined ? 20_000 : timeoutMs;
   const timer =
     ms > 0 ? setTimeout(() => controller.abort(), ms) : null;
+  // A caller-supplied signal (e.g. aborted from a component's unmount cleanup)
+  // cancels the same underlying fetch as the timeout does.
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort);
+  }
   let res: Response;
   try {
     res = await fetch(`${API}${path}`, {
@@ -48,6 +55,9 @@ async function requestRaw(path: string, opts: RequestOpts = {}): Promise<Respons
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
+      // Deliberate cancel (unmount/navigation), not a timeout — let the
+      // caller tell the two apart instead of surfacing a scary error.
+      if (externalSignal?.aborted) throw err;
       throw new Error(
         "The API took too long to respond. Check that the backend on port 8000 is healthy, then try again."
       );
@@ -57,6 +67,7 @@ async function requestRaw(path: string, opts: RequestOpts = {}): Promise<Respons
     );
   } finally {
     if (timer) clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
@@ -366,6 +377,30 @@ export const api = {
     }),
   deleteClient: (token: string | null, id: string) =>
     request<void>(`/api/v1/clients/${id}`, { method: "DELETE", token }),
+  contentProductionSitePreview: (
+    token: string,
+    clientId: string,
+    body: {
+      title?: string;
+      url?: string;
+      meta_description?: string;
+      keyword?: string;
+      markdown: string;
+      images?: Array<Record<string, unknown>>;
+      media_base?: string;
+    },
+  ) =>
+    request<{
+      preview_html: string;
+      brand_applied: boolean;
+      layout_available: boolean;
+      reference_url?: string;
+    }>(`/api/v1/clients/${clientId}/content-production/site-preview`, {
+      method: "POST",
+      token,
+      body: JSON.stringify(body),
+      timeoutMs: 90_000,
+    }),
   createSession: (token: string, client_id: string) =>
     request<{ id: string }>("/api/v1/sessions", {
       method: "POST",
@@ -405,7 +440,8 @@ export const api = {
     token: string | null,
     session_id: string,
     content: string,
-    onEvent: (ev: ChatEvent) => void | Promise<void>
+    onEvent: (ev: ChatEvent) => void | Promise<void>,
+    signal?: AbortSignal
   ) => {
     const res = await requestRaw(`/api/v1/sessions/${session_id}/messages/stream`, {
       method: "POST",
@@ -413,6 +449,7 @@ export const api = {
       headers: { Accept: "text/event-stream" },
       body: JSON.stringify({ content }),
       timeoutMs: 0,
+      signal,
     });
     if (!res.body) {
       throw new Error("No stream body");
@@ -467,6 +504,19 @@ export const api = {
       token,
       body: JSON.stringify({ action, edits, note }),
     }),
+  saveServicePrioritization: (
+    token: string,
+    client_id: string,
+    body: Record<string, unknown>,
+  ) =>
+    request<{ ok: boolean; service_prioritization: Record<string, unknown> }>(
+      `/api/v1/clients/${client_id}/service-prioritization`,
+      {
+        method: "PUT",
+        token,
+        body: JSON.stringify(body),
+      },
+    ),
   readiness: (token: string, client_id: string) =>
     request<{
       overall: number;
@@ -511,6 +561,25 @@ export const api = {
   /** Each client connects their own WordPress site — no shared/global site. */
   wordpressStatus: (token: string, client_id: string) =>
     request<WordPressStatus>(`/api/v1/clients/${client_id}/integrations/wordpress`, { token }),
+  technicalSeoIssueUrls: (
+    token: string,
+    client_id: string,
+    rule_id: string,
+    offset = 0,
+    limit = 50,
+  ) =>
+    request<{
+      client_id: string;
+      rule_id: string;
+      total: number;
+      offset: number;
+      limit: number;
+      urls: string[];
+      issue?: Record<string, unknown>;
+    }>(
+      `/api/v1/clients/${client_id}/technical-seo/issues/${encodeURIComponent(rule_id)}/urls?offset=${offset}&limit=${limit}`,
+      { token },
+    ),
   wordpressConnect: (
     token: string,
     client_id: string,
@@ -526,22 +595,32 @@ export const api = {
       method: "DELETE",
       token,
     }),
-  submitQuestionnaire: (token: string, client_id: string, fields: Record<string, unknown>) =>
+  submitQuestionnaire: (
+    token: string,
+    client_id: string,
+    fields: Record<string, unknown>,
+    session_id?: string | null
+  ) =>
     request<{ ok: boolean; fields: string[]; events: ChatEvent[] }>(
       `/api/v1/clients/${client_id}/questionnaire`,
       {
         method: "POST",
         token,
-        body: JSON.stringify({ fields }),
+        body: JSON.stringify({ fields, session_id: session_id || undefined }),
       }
     ),
-  submitKnownChanges: (token: string, client_id: string, fields: Record<string, unknown>) =>
+  submitKnownChanges: (
+    token: string,
+    client_id: string,
+    fields: Record<string, unknown>,
+    session_id?: string | null
+  ) =>
     request<{ ok: boolean; fields: string[]; events: ChatEvent[] }>(
       `/api/v1/clients/${client_id}/tracking/known-changes`,
       {
         method: "POST",
         token,
-        body: JSON.stringify({ fields }),
+        body: JSON.stringify({ fields, session_id: session_id || undefined }),
       }
     ),
   importDiscoveryDocument: (token: string, client_id: string, file: File) => {

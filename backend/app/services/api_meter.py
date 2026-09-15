@@ -7,7 +7,6 @@ every helper.
 
 from __future__ import annotations
 
-import time
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from decimal import Decimal

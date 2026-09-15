@@ -126,6 +126,18 @@ def test_ymyl_still_blocks_without_credentials():
     assert standing["standing"] == "unverified"
 
 
+def test_ymyl_ignores_substring_false_positives():
+    from app.services.content_brief import is_ymyl_topic
+
+    assert is_ymyl_topic("taxonomy structure", "marketing") is False
+    assert is_ymyl_topic("html syntax guide", "seo") is False
+    assert is_ymyl_topic("accreditation checklist", "agency") is False
+    assert is_ymyl_topic("invest in seo", "marketing") is False
+    assert is_ymyl_topic("meta ads credit", "advertising") is False
+    assert is_ymyl_topic("best mortgage rates", "finance") is True
+    assert is_ymyl_topic("personal injury lawyer", "legal") is True
+
+
 def test_differentiation_passes_create_content_gate():
     angle = differentiation_angle(
         client_name="Click Trends",
@@ -414,3 +426,81 @@ async def test_production_blocked_when_roadmap_unlocked():
     )
     assert out.get("blocked") is True
     assert "unlocked" in str(out.get("reason") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_ui_topic_selection_reaches_each_existing_page_type_draft():
+    page_types = ("service", "landing", "guide", "comparison", "tool")
+    briefs = []
+    pages = []
+    for rank, page_type in enumerate(page_types, 1):
+        keyword = f"{page_type} seo"
+        url = f"/{page_type}/seo"
+        pages.append(
+            {
+                "url": url,
+                "path": url,
+                "keyword": keyword,
+                "title": keyword.title(),
+                "page_type": page_type,
+                "action": "create",
+                "priority_rank": rank,
+            }
+        )
+        briefs.append(
+            {
+                "keyword": keyword,
+                "url": url,
+                "writer_ready": True,
+                "action": "create",
+                "title": keyword.title(),
+                "differentiation": "A distinct, client-owned method with named steps.",
+                "preflight": {
+                    "url": url,
+                    "parent": "/",
+                    "page_type": page_type,
+                    "author": "Pat Writer",
+                    "author_standing": "Senior SEO strategist",
+                    "blockers": [],
+                },
+                "required_coverage": {
+                    "outcomes": ["Make a decision"],
+                    "must_address": ["Scope"],
+                    "must_name": ["Acme"],
+                    "out_of_scope": [],
+                },
+                "outline": [],
+                "faq": [],
+            }
+        )
+
+    planning = {"locked": True, "pages": pages}
+    with patch(
+        "app.services.content_brief.generate_briefs",
+        new=AsyncMock(return_value={"briefs": briefs, "skipped_new_urls": []}),
+    ):
+        listed = await run_content_production_plan(
+            client_name="Acme",
+            primary_url="https://acme.example",
+            content_planning_status="complete",
+            content_planning=planning,
+        )
+    assert {c["keyword"] for c in listed["topic_choices"]} == {
+        f"{page_type} seo" for page_type in page_types
+    }
+
+    for page_type in page_types:
+        with patch(
+            "app.services.create_content.synthesize_json",
+            new=AsyncMock(return_value=None),
+        ):
+            drafted = await run_content_production_plan(
+                client_name="Acme",
+                primary_url="https://acme.example",
+                content_planning_status="complete",
+                content_planning=planning,
+                selected_keyword=f"{page_type} seo",
+                prior_briefs=briefs,
+            )
+        assert drafted["draft_count"] == 1
+        assert drafted["drafts"][0]["page_type"] == page_type

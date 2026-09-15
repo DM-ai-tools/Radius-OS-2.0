@@ -217,6 +217,25 @@ def _is_public_host(hostname: str | None) -> bool | None:
     return False
 
 
+def assert_safe_url(url: str) -> tuple[bool, str]:
+    """SSRF pre-check for any ad-hoc httpx call that bypasses fetch_url().
+
+    Returns (True, normalized_url) if the host resolves to a public IP, or
+    (False, reason) otherwise. Callers that need redirect-time re-validation
+    too should use fetch_url() directly instead of a raw httpx client.
+    """
+    target = url if "://" in url else f"https://{url}"
+    parsed = urlparse(target)
+    if parsed.scheme not in ("http", "https"):
+        return False, "unsupported_scheme"
+    ok = _is_public_host(parsed.hostname)
+    if ok is False:
+        return False, "blocked_unsafe_host"
+    if ok is None:
+        return False, "dns_resolution_failed"
+    return True, target
+
+
 async def fetch_url(url: str, *, timeout: float = 20.0, follow: bool = True) -> dict[str, Any]:
     last: dict[str, Any] | None = None
     requested = url if url.startswith("http") else "https://" + url
@@ -319,6 +338,37 @@ async def fetch_url(url: str, *, timeout: float = 20.0, follow: bool = True) -> 
         "history": [],
         "error": "fetch_failed",
     }
+
+
+async def fetch_page_html(
+    url: str,
+    *,
+    follow: bool = True,
+    timeout: float = 15,
+) -> tuple[str, dict[str, Any]]:
+    """Fetch rendered HTML with host fallback and Firecrawl when bot protection blocks."""
+    fetched = await fetch_url(url, follow=follow, timeout=timeout)
+    html = str(fetched.get("text") or "")
+    meta: dict[str, Any] = {
+        "status_code": fetched.get("status_code"),
+        "final_url": fetched.get("url") or url,
+        "source": "fetch_url",
+        "error": fetched.get("error"),
+    }
+    blocked = fetched.get("error") == "bot_challenge_blocked" or (
+        not html and int(fetched.get("status_code") or 0) in (202, 403, 503)
+    )
+    if blocked or len(html) < 800:
+        from app.integrations.firecrawl import scrape_page
+
+        scrape = await scrape_page(meta["final_url"] or url)
+        if scrape.get("available"):
+            html = str(scrape.get("html") or "")
+            meta["source"] = "firecrawl"
+            meta["firecrawl_title"] = (scrape.get("metadata") or {}).get("title")
+            meta["status_code"] = (scrape.get("metadata") or {}).get("status_code") or meta["status_code"]
+            meta["error"] = None if html else meta.get("error")
+    return html, meta
 
 
 def parse_html(html: str) -> PageParser:
@@ -471,6 +521,27 @@ def _normalize_page_url(
     return f"{scheme}://{netloc}{path}{('?' + query) if query else ''}"
 
 
+def normalize_primary_url(raw: str | None) -> str:
+    """Canonical form for a client's primary URL: scheme present, no trailing slash.
+
+    Stored verbatim before, so a client entered as "acme.com" produced a
+    schemeless URL whose ``urlparse().path`` is the host itself — which minted a
+    phantom "/acme.com" page in the site map and broke same-host comparisons.
+    """
+    url = str(raw or "").strip()
+    if not url:
+        return url
+    if url.startswith("//"):
+        url = "https:" + url
+    elif not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url.lstrip("/")
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return str(raw or "").strip()
+    path = (parsed.path or "").rstrip("/")
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+
+
 def is_indexable_html_url(url: str) -> bool:
     """True for unique content pages; false for assets, tags, feeds, pagination."""
     raw = (url or "").strip()
@@ -500,6 +571,11 @@ def extract_sitemap_locs(xml_text: str) -> list[str]:
         seen.add(clean)
         out.append(clean)
     return out
+
+
+# Below this many directly-discovered pages, treat discovery as blocked and
+# fall back to third-party indexes (Google `site:`, then Perplexity).
+_SERP_FALLBACK_BELOW = 8
 
 
 async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]:
@@ -546,8 +622,10 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
         seen.add(nu)
         ordered.append(nu)
 
-    _add(start_url)
-
+    # Do NOT add start_url yet. prefer_netloc/prefer_scheme are still unknown,
+    # so a typed alias (acme.com) would be normalized against itself and kept
+    # alongside the resolved host (www.acme.com) — two homepage rows for one
+    # page. Add the resolved home_url below instead.
     home = await fetch_url(start_url)
     home_parsed = urlparse(home.get("url") or start_url)
     prefer_netloc = home_parsed.netloc.lower() or host
@@ -635,17 +713,22 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
         ordered.remove(home_url)
         ordered.insert(0, home_url)
 
-    # Google `site:` index — used when SiteGround/WAF blocks HTML/sitemaps.
-    try:
-        from app.integrations.dataforseo import indexed_site_urls
+    # Google `site:` index — the fallback for when a WAF blocks HTML/sitemaps.
+    # It used to run unconditionally, merging unverified index URLs into a site
+    # map that direct discovery had already built correctly: stale and removed
+    # pages came back as "existing pages", and clusters were then mapped to
+    # them. Only reach for it when direct discovery genuinely underperformed.
+    if len(ordered) < _SERP_FALLBACK_BELOW:
+        try:
+            from app.integrations.dataforseo import indexed_site_urls
 
-        for u in await indexed_site_urls(bare, limit=max_pages):
-            _add(u)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("discover_indexed_serp_failed", error=str(exc))
+            for u in await indexed_site_urls(bare, limit=max_pages):
+                _add(u)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("discover_indexed_serp_failed", error=str(exc))
 
     # Perplexity only fills remaining gaps (do not replace a real index list).
-    if len(ordered) < 8:
+    if len(ordered) < _SERP_FALLBACK_BELOW:
         try:
             from app.integrations.site_research import research_ready, research_site_crawl
 

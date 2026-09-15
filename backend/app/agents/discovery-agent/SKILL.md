@@ -19,8 +19,8 @@ Never write to `client_digital_profiles` until D5 after explicit Client Success 
 
 Before any questions are asked of the client:
 
-1. Research the public footprint: website, Google Business / local signals, social presence, reviews, visible competitors.
-2. Draft a first pass at products, business model, and positioning (plus competitors and public-signal summaries).
+1. Research the public footprint: website, Google Business / local signals, social presence, and reviews.
+2. Draft a first pass at products, business model, and positioning plus public-signal summaries. Competitor discovery is reserved for Phase 4.
 3. Tag every field with confidence (high / medium / low).
 4. Write `discovery_responses` with `source = pre_research`.
 5. Show a draft card — clearly labeled as awaiting confirmation.

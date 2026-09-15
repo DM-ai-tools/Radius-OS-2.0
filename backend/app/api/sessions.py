@@ -24,7 +24,11 @@ async def create_session(
     ).scalar_one_or_none()
     if not client:
         raise HTTPException(404, "Client not found")
-    session = ChatSession(client_id=body.client_id, user_id=user.id)
+    session = ChatSession(
+        client_id=body.client_id,
+        user_id=user.id,
+        is_onboarding=client.is_onboarding,
+    )
     db.add(session)
     await db.flush()
     await log_event(
@@ -41,13 +45,15 @@ async def create_session(
 @router.get("", response_model=list[SessionOut])
 async def list_sessions(
     client_id: UUID | None = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     q = select(ChatSession).where(ChatSession.user_id == user.id)
     if client_id:
         q = q.where(ChatSession.client_id == client_id)
-    q = q.order_by(ChatSession.started_at.desc())
+    q = q.order_by(ChatSession.started_at.desc()).offset(offset).limit(limit)
     result = await db.execute(q)
     return list(result.scalars().all())
 

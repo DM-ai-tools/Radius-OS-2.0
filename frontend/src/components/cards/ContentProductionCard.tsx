@@ -1,6 +1,10 @@
+import { useState } from "react";
+import { api } from "../../api";
+import { useAuth } from "../../auth";
 import DraftDocument, { type DraftImage } from "./DraftDocument";
 
 type Props = {
+  clientId: string;
   payload: Record<string, unknown>;
   canAct: boolean;
   onAction: (action: string, edits?: Record<string, unknown>) => void;
@@ -29,7 +33,20 @@ function sameTopic(a: unknown, b: unknown): boolean {
   return Boolean(na) && Boolean(nb) && (na === nb || na.endsWith(nb) || nb.endsWith(na));
 }
 
-export default function ContentProductionCard({ payload, canAct, onAction, onDraftTopic }: Props) {
+export default function ContentProductionCard({
+  clientId,
+  payload,
+  canAct,
+  onAction,
+  onDraftTopic,
+}: Props) {
+  const { token } = useAuth();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState("");
+  const [previewMeta, setPreviewMeta] = useState<Record<string, unknown> | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
   const briefs = asRows(payload.briefs);
   const drafts = asRows(payload.drafts);
   const held = asRows(payload.held_briefs);
@@ -48,6 +65,44 @@ export default function ContentProductionCard({ payload, canAct, onAction, onDra
       : null);
   const awaiting = Boolean(payload.awaiting_topic_selection) || (!article && choices.length > 0);
   const pickList = choices.length ? choices : briefs.filter((b) => b.writer_ready);
+
+  async function openSitePreview() {
+    if (!article?.markdown || !token) return;
+    setPreviewOpen(true);
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setPreviewHtml("");
+    try {
+      const res = await api.contentProductionSitePreview(token, clientId, {
+        title: article.title ? String(article.title) : undefined,
+        url: article.url ? String(article.url) : undefined,
+        meta_description: article.meta_description ? String(article.meta_description) : undefined,
+        keyword: article.keyword ? String(article.keyword) : undefined,
+        markdown: String(article.markdown),
+        images: Array.isArray(article.images)
+          ? (article.images as Array<Record<string, unknown>>)
+          : undefined,
+        media_base: window.location.origin,
+      });
+      setPreviewHtml(res.preview_html || "");
+      setPreviewMeta(res as unknown as Record<string, unknown>);
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : "Could not build site preview");
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  const previewActions = article?.markdown ? (
+    <button
+      type="button"
+      className="btn btn-secondary"
+      disabled={previewLoading || !token}
+      onClick={() => void openSitePreview()}
+    >
+      {previewLoading ? "Building preview…" : "Preview on client site"}
+    </button>
+  ) : null;
 
   return (
     <div className="structured-card structured-card--report">
@@ -112,12 +167,57 @@ export default function ContentProductionCard({ payload, canAct, onAction, onDra
           </div>
           {canAct ? (
             <div className="card-actions" style={{ marginTop: 10 }}>
+              {previewActions}
               <button type="button" className="btn btn-primary" onClick={() => onAction("approve")}>
                 Approve this draft
               </button>
               <button type="button" className="btn btn-ghost" onClick={() => onAction("reject")}>
                 Reject
               </button>
+            </div>
+          ) : previewActions ? (
+            <div className="card-actions" style={{ marginTop: 10 }}>
+              {previewActions}
+            </div>
+          ) : null}
+          {previewOpen ? (
+            <div className="site-preview-backdrop" role="presentation" onClick={() => setPreviewOpen(false)}>
+              <div
+                className="site-preview-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Client site preview"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="site-preview-toolbar">
+                  <div>
+                    <strong>Client site preview</strong>
+                    <span className="site-preview-sub">
+                      {previewLoading
+                        ? " · fetching brand + reference layout…"
+                        : previewMeta?.brand_applied === false
+                          ? " · neutral styling — brand assets unavailable"
+                          : " · styled with client brand"}
+                      {previewMeta?.reference_url ? ` · ref ${String(previewMeta.reference_url)}` : ""}
+                    </span>
+                  </div>
+                  <button type="button" className="btn btn-ghost" onClick={() => setPreviewOpen(false)}>
+                    Close
+                  </button>
+                </div>
+                {previewError ? (
+                  <p style={{ padding: 16, color: "var(--coral, #b42318)" }}>{previewError}</p>
+                ) : previewLoading ? (
+                  <p style={{ padding: 16, color: "var(--muted)" }}>Building preview…</p>
+                ) : previewHtml ? (
+                  <iframe
+                    className="site-preview-frame"
+                    title="Client site preview"
+                    sandbox="allow-same-origin"
+                    srcDoc={previewHtml}
+                  />
+                ) : null}
+              </div>
             </div>
           ) : null}
         </>

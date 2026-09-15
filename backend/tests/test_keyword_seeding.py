@@ -1,5 +1,7 @@
 """Tests for Ahrefs multi-mode keyword seeding (exact / related / broad)."""
 
+import pytest
+
 from app.services.keyword_seeding import (
     build_seed_clusters,
     classify_expansion,
@@ -9,6 +11,52 @@ from app.services.keyword_seeding import (
     flatten_dataset,
     run_multi_mode_seeding,
 )
+
+
+def test_build_coverage_expansions_reaches_twenty():
+    from app.services.keyword_seeding import build_coverage_expansions
+
+    rows = build_coverage_expansions("Email Marketing", min_count=20)
+    assert len(rows) >= 20
+    classes = {r["match_class"] for r in rows}
+    assert "exact" in classes
+    assert "phrase" in classes
+    assert "related" in classes or "broad" in classes
+    assert all(r.get("provider_fallback") for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_expand_uses_coverage_fallback_when_providers_fail(monkeypatch):
+    from app.config import get_settings
+    from app.services import keyword_seeding
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "use_mock_providers", False)
+    monkeypatch.setattr(settings, "ahrefs_api_key", "test-key", raising=False)
+
+    async def _empty_matching(*args, **kwargs):
+        return [], ["ahrefs_matching_terms_failed"]
+
+    async def _empty_related(*args, **kwargs):
+        return [], ["ahrefs_related_terms_failed"]
+
+    async def _empty_dfs(*args, **kwargs):
+        return [], ["dataforseo_failed"]
+
+    monkeypatch.setattr(keyword_seeding.ahrefs, "matching_terms", _empty_matching)
+    monkeypatch.setattr(keyword_seeding.ahrefs, "related_terms", _empty_related)
+    monkeypatch.setattr(keyword_seeding, "expand_seed_dataforseo", _empty_dfs)
+
+    rows, errors = await expand_seed_ahrefs(
+        "Email Marketing",
+        country="au",
+        min_volume=10,
+        location_code=2036,
+        min_keywords=20,
+    )
+    assert "provider_coverage_fallback" in errors
+    assert len(rows) >= 20
+    assert sum(1 for r in rows if r.get("match_class") != "exact") >= 15
 
 
 def test_clean_provider_seed_strips_rejected_chars():

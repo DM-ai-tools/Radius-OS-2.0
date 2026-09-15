@@ -20,9 +20,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt .
+# Playwright's Chromium is a fallback path only (used when the plain HTTP
+# crawl in live_site_scan.py comes back thin/JS-shell) but the browser binary
+# and its system deps still need to be in the image either way.
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y pytest pytest-asyncio || true \
+    && apt-get update \
+    && playwright install --with-deps chromium \
     && apt-get purge -y build-essential \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
@@ -36,10 +41,10 @@ RUN test -f /app/static/index.html \
 
 # Railway may honor Procfile (`sh scripts/start.sh`) over CMD — keep both paths.
 RUN mkdir -p /app/scripts
+COPY scripts/start.sh scripts/start-worker.sh scripts/start-beat.sh /app/scripts/
 COPY scripts/start.sh /start.sh
-COPY scripts/start.sh /app/scripts/start.sh
-RUN chmod +x /start.sh /app/scripts/start.sh \
-    && sed -i 's/\r$//' /start.sh /app/scripts/start.sh
+RUN chmod +x /start.sh /app/scripts/*.sh \
+    && sed -i 's/\r$//' /start.sh /app/scripts/*.sh
 
 ENV PYTHONPATH=/app \
     STATIC_DIR=/app/static \
@@ -48,8 +53,9 @@ ENV PYTHONPATH=/app \
 
 EXPOSE 8000
 
+# Match railway.json / railway.toml healthcheckPath
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD /bin/sh -c "curl -fsS http://127.0.0.1:$${PORT:-8000}/health || exit 1"
+    CMD /bin/sh -c "curl -fsS http://127.0.0.1:$${PORT:-8000}/healthz || exit 1"
 
 # Prefer shell form so $PORT is expanded if Railway wraps the command
 CMD ["sh", "/start.sh"]

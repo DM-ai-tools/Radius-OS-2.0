@@ -38,6 +38,23 @@ def _path(url: str) -> str:
 
 def _pages_from_website(website: dict[str, Any]) -> list[dict[str, Any]]:
     pages: list[dict[str, Any]] = []
+    from app.services.site_sitemap import sitemap_pages
+
+    # Phase 3 site sitemap is the process-wide inventory — prefer it.
+    for row in sitemap_pages(website):
+        pages.append(
+            {
+                "url": row.get("url") or row.get("path"),
+                "title": row.get("title") or "",
+                "status": row.get("status"),
+                "path": row.get("path"),
+                "cluster": row.get("cluster"),
+                "source": "site_sitemap",
+            }
+        )
+    if pages:
+        return pages
+
     samples = website.get("sample_urls") or []
     for u in samples:
         if isinstance(u, str) and u.strip():

@@ -8,7 +8,12 @@ from urllib.parse import urlparse
 
 from app.integrations import dataforseo
 from app.integrations.llm import synthesize_json
-from app.services.create_topic import funnel_balance, funnel_balance_warnings, funnel_from_intent
+from app.services.create_topic import (
+    format_audience_label,
+    funnel_balance,
+    funnel_balance_warnings,
+    funnel_from_intent,
+)
 from app.agents.prompts import load_shared_reference, load_skill_file
 
 YMYL_HINTS = (
@@ -30,6 +35,37 @@ YMYL_HINTS = (
     "crypto",
     "credit",
 )
+
+# Hard YMYL always requires credentials. Soft terms are ignored when the topic is
+# clearly marketing/SEO services (e.g. "invest in seo", "ad credit").
+_HARD_YMYL = {
+    "health",
+    "medical",
+    "doctor",
+    "diagnosis",
+    "mortgage",
+    "insurance",
+    "lawyer",
+    "attorney",
+    "supplement",
+    "crypto",
+    "loan",
+}
+_SOFT_YMYL = {"finance", "invest", "tax", "legal", "safety", "credit"}
+_MARKETING_TOPIC = {
+    "seo",
+    "sem",
+    "ppc",
+    "ads",
+    "adwords",
+    "marketing",
+    "content",
+    "agency",
+    "website",
+    "web",
+    "aeo",
+    "geo",
+}
 
 _FORUM_DOMAINS = ("reddit.com", "quora.com", "stackexchange.com", "stackoverflow.com", "forum.")
 _WEAK_DIFF = re.compile(
@@ -65,6 +101,17 @@ def _path(url: str) -> str:
 
 def _norm_kw(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _audience_label(audience: Any, client_name: str) -> str | None:
+    label = format_audience_label(audience)
+    if label:
+        return label
+    if audience and not isinstance(audience, (dict, list)):
+        text = str(audience).strip()
+        if text and not text.startswith("{"):
+            return text
+    return client_name if client_name else None
 
 
 def _kw_overlap(a: str, b: str) -> bool:
@@ -117,6 +164,10 @@ def find_existing_intent(
     for row in list(content_audit.get("inventory") or []) + list(content_audit.get("refresh_queue") or []):
         if isinstance(row, dict):
             candidates.append(row)
+    from app.services.site_sitemap import sitemap_pages
+
+    for row in sitemap_pages(website):
+        candidates.append(row)
     for key in ("sample_urls", "top_pages", "pages", "crawled_pages"):
         raw = website.get(key)
         if isinstance(raw, list):
@@ -257,6 +308,26 @@ def _first_author(*blobs: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _word_in(needle: str, haystack: str) -> bool:
+    """Whole-word match — avoids taxonomy→tax, accreditation→credit, syntax→tax."""
+    if not needle or not haystack:
+        return False
+    return bool(re.search(rf"\b{re.escape(needle)}\b", haystack, flags=re.I))
+
+
+def is_ymyl_topic(keyword: str, industry: str | None = None) -> bool:
+    """Detect YMYL-adjacent topics without substring false positives."""
+    blob = f"{keyword} {industry or ''}".lower()
+    if any(_word_in(h, blob) for h in _HARD_YMYL):
+        return True
+    if any(_word_in(h, blob) for h in _SOFT_YMYL):
+        # "invest in seo" / "meta ads credit" are marketing metaphors, not YMYL advice.
+        if any(_word_in(m, blob) for m in _MARKETING_TOPIC):
+            return False
+        return True
+    return False
+
+
 def author_standing(
     keyword: str,
     *,
@@ -264,13 +335,19 @@ def author_standing(
     marketing: dict[str, Any] | None = None,
     client_name: str | None = None,
 ) -> dict[str, Any]:
-    blob = f"{keyword} {industry or ''}".lower()
-    ymyl = any(h in blob for h in YMYL_HINTS)
+    ymyl = is_ymyl_topic(keyword, industry)
     mkt = merge_brief_memory(marketing=marketing, client_name=client_name)
     intake = dict(mkt.get("client_intake") or {})
     commercial = dict(mkt.get("commercial_scope") or {})
     author = _first_author(intake, mkt, commercial)
-    credentials = intake.get("author_credentials") or intake.get("expertise") or mkt.get("expertise")
+    credentials = (
+        intake.get("author_credentials")
+        or intake.get("expertise")
+        or intake.get("positioning")
+        or mkt.get("expertise")
+        or commercial.get("expertise")
+        or commercial.get("positioning")
+    )
     if not author and client_name and not ymyl:
         # Organization as accountable publisher — create-content needs a named byline.
         author = client_name
@@ -532,6 +609,7 @@ def _brief_image_requirements(
         for s in (item.get("image_suggestions") or [])
         if isinstance(s, dict) and str(s.get("prompt") or "").strip()
     ]
+    outline = item.get("outline") or item.get("sections") or []
     if not suggestions:
         suggestions = image_suggestions_for(
             keyword,
@@ -539,6 +617,8 @@ def _brief_image_requirements(
             str(item.get("intent") or "informational"),
             industry=industry,
             location=str(item.get("location") or item.get("geographic_focus") or "") or None,
+            outline=outline if isinstance(outline, list) else None,
+            count=item.get("image_count") if isinstance(item.get("image_count"), int) else None,
         )
     hero = next(
         (str(s.get("prompt")) for s in suggestions if str(s.get("role") or "") == "hero"),
@@ -553,8 +633,9 @@ def _brief_image_requirements(
         supporting = [f"Process diagram of how {client_name} delivers {keyword} — not stock"]
     return {
         "hero": hero,
-        "supporting": supporting[:2],
-        "suggestions": suggestions[:2],
+        "supporting": supporting,
+        "suggestions": suggestions,
+        "count": len(suggestions) if suggestions else (1 + len(supporting)),
     }
 
 
@@ -685,7 +766,7 @@ def _rule_brief(
         str(selected.get("title") or kw.title())[:60],
         f"{kw.title()} for {client_name}"[:60],
     ]
-    if page_type in ("service", "landing", "product", "location"):
+    if page_type in ("service", "subservice", "sub_service", "landing", "product", "location"):
         outcomes = [
             f"Know what {client_name} includes in {kw}",
             f"See how the work runs from first conversation to delivery",
@@ -791,8 +872,12 @@ def _rule_brief(
         },
         "meta_description": (
             f"{client_name} {kw} — what is included, how it works, and how to start."
-            if page_type in ("service", "landing", "product", "location")
-            else f"{kw.title()} for {audience or client_name}: a practical {page_type} you can use."
+            if page_type in ("service", "subservice", "sub_service", "landing", "product", "location")
+            else (
+                f"{kw.title()} for {aud_label}: a practical {page_type} you can use."
+                if (aud_label := _audience_label(audience, client_name))
+                else f"{kw.title()} — a practical {page_type} you can use."
+            )
         )[:160],
         "required_coverage": {
             "outcomes": outcomes,
@@ -829,7 +914,15 @@ def _rule_brief(
             client_name=client_name,
             industry=industry,
         ),
-        "schema_type": "FAQPage" if paa else ("Service" if page_type == "service" else "Article"),
+        "schema_type": (
+            "FAQPage"
+            if paa
+            else (
+                "Service"
+                if page_type in ("service", "subservice", "sub_service")
+                else "Article"
+            )
+        ),
         "competitive_notes": must_address,
         "differentiation": diff,
         "who_how_why": _who_how_why(
@@ -906,6 +999,57 @@ async def _enrich_brief_llm(brief: dict[str, Any], *, client_name: str) -> dict[
     if not (brief.get("serp") or {}).get("validated"):
         merged["faq"] = []
     return merged
+
+
+def refresh_brief_author_gates(
+    brief: dict[str, Any],
+    *,
+    industry: str | None,
+    marketing: dict[str, Any] | None = None,
+    client_name: str | None = None,
+) -> dict[str, Any]:
+    """Re-apply YMYL / author standing on a cached Phase 10 brief.
+
+    Topic re-picks reuse prior briefs; without this, a credentials fix never
+    clears a stale ``YMYL-adjacent…`` blocker.
+    """
+    out = dict(brief)
+    kw = str(out.get("keyword") or out.get("title") or "")
+    standing = author_standing(
+        kw,
+        industry=industry,
+        marketing=marketing,
+        client_name=client_name,
+    )
+    pre = out.get("preflight") if isinstance(out.get("preflight"), dict) else {}
+    pre = dict(pre)
+    if standing.get("author"):
+        pre["author"] = standing["author"]
+        out["author"] = standing["author"]
+    pre["author_standing"] = standing.get("standing")
+    pre["ymyl"] = bool(standing.get("ymyl"))
+    if standing.get("note"):
+        pre["author_note"] = standing["note"]
+    drop = (
+        "ymyl-adjacent",
+        "demonstrated credentials",
+        "named author missing",
+        "create-content will refuse without accountable",
+    )
+    blockers = [
+        str(b)
+        for b in (pre.get("blockers") or [])
+        if b and not any(n in str(b).lower() for n in drop)
+    ]
+    if standing.get("ymyl") and standing.get("standing") == "unverified":
+        blockers.append(str(standing.get("note") or "YMYL — credentials required."))
+    elif not standing.get("author"):
+        blockers.append(
+            "Named author missing in CDD/marketing — create-content will refuse without accountable standing."
+        )
+    pre["blockers"] = blockers
+    out["preflight"] = pre
+    return finalize_writer_ready(out)
 
 
 def finalize_writer_ready(brief: dict[str, Any]) -> dict[str, Any]:

@@ -145,12 +145,14 @@ async def approve_phase_batch(
     action: str,
     edits: dict | None = None,
     note: str | None = None,
+    permission_checked: bool = False,
 ) -> dict:
     """Approve/reject all pending findings for an agent on a client (card-level action)."""
     user = (
         await db.execute(select(User).options(selectinload(User.role)).where(User.id == user.id))
     ).scalar_one()
-    await require_permission(user, db, agent_key, need_approve=True)
+    if not permission_checked:
+        await require_permission(user, db, agent_key, need_approve=True)
 
     if action in ("approve", "edit"):
         from app.services.phase_validation import latest_validation_blocks_approve
@@ -481,13 +483,48 @@ async def _rollup_to_profile(
         }
 
     elif agent_key == "website_situation_agent":
+        prior = dict(profile.website_situation_summary or {})
         rows = (
             await db.execute(select(WebsiteAudit).where(WebsiteAudit.client_id == client_id))
         ).scalars().all()
-        profile.website_situation_summary = {
+        summary: dict = {
             r.audit_type: {"summary": r.summary, "severity": r.severity, "status": r.status}
             for r in rows
         }
+        # Keep the Phase 3 site sitemap as the process-wide URL inventory.
+        carry_keys = (
+            "site_sitemap",
+            "sitemap_url_count",
+            "sample_urls",
+            "pages_found",
+            "indexable",
+            "page_hierarchy",
+            "page_clusters",
+            "cdd_pages_count",
+            "cdd_coverage_gaps",
+            "audit_focus_note",
+            "business_weighted_score",
+            "seo_pages_analyzed",
+            "seo_overall_score",
+            "seo_score_band",
+            "note",
+        )
+        for key in carry_keys:
+            if prior.get(key) is not None and key not in summary:
+                summary[key] = prior[key]
+        crawl_blob = summary.get("crawl_technical")
+        if isinstance(crawl_blob, dict):
+            crawl_sum = crawl_blob.get("summary") if isinstance(crawl_blob.get("summary"), dict) else {}
+            if isinstance(crawl_sum, dict):
+                if crawl_sum.get("site_sitemap") and not summary.get("site_sitemap"):
+                    summary["site_sitemap"] = crawl_sum["site_sitemap"]
+                if crawl_sum.get("sitemap_url_count") is not None and summary.get("sitemap_url_count") is None:
+                    summary["sitemap_url_count"] = crawl_sum["sitemap_url_count"]
+                if crawl_sum.get("discovered_urls") and not summary.get("sample_urls"):
+                    summary["sample_urls"] = list(crawl_sum.get("discovered_urls") or [])[:40]
+                if crawl_sum.get("pages_found") is not None and summary.get("pages_found") is None:
+                    summary["pages_found"] = crawl_sum.get("pages_found")
+        profile.website_situation_summary = summary
 
     elif agent_key == "competitor_market_agent":
         comps = (
@@ -499,7 +536,7 @@ async def _rollup_to_profile(
             c.confirmed = True
         from app.services.cache import cache_get, competitor_cache_key
 
-        cached = cache_get(competitor_cache_key(str(client_id))) or {}
+        cached = await cache_get(competitor_cache_key(str(client_id))) or {}
         from app.services.memory_packs import slim_competitor_memory
 
         profile.competitive_landscape_summary = slim_competitor_memory(

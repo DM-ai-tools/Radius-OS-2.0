@@ -62,6 +62,7 @@ async def run_content_audit(
         or strategy.get("priority_queue")
         or strategy.get("content_gaps")
         or website.get("sample_urls")
+        or website.get("site_sitemap")
         or demand.get("best_opportunities")
         or demand.get("keyword_dataset")
         or profile.search_demand_status == "complete"

@@ -13,8 +13,10 @@ class SessionOut(BaseModel):
     client_id: UUID
     user_id: UUID
     active_agent_key: str | None
+    is_onboarding: bool
     started_at: datetime
     ended_at: datetime | None
+    archived_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -27,6 +29,7 @@ class MessageOut(BaseModel):
     structured_payload: dict | None
     agent_key: str | None
     created_at: datetime
+    archived_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -39,6 +42,7 @@ class ReviewRequest(BaseModel):
 
 class QuestionnaireSubmit(BaseModel):
     fields: dict[str, object]
+    session_id: UUID | None = None
 
 
 class ManualCompetitor(BaseModel):

@@ -45,10 +45,14 @@ PROFILE_SUMMARY_FIELDS: list[tuple[str, str, str]] = [
 ]
 
 CARD_ORDER: dict[str, int] = {
+    "discovery_report": 1,
+    "discovery_confirmation": 4,
     "discovery_preresearch": 1,
     "discovery_questionnaire": 2,
     "discovery_completeness": 3,
     "discovery_profile": 4,
+    "tracking_report": 10,
+    "tracking_confirmation": 16,
     "tracking_health": 10,
     "tracking_t1_access": 11,
     "tracking_t2_audit": 12,
@@ -196,10 +200,14 @@ async def build_report_export(db: AsyncSession, client_id: UUID) -> dict:
 
 
 CARD_TYPE_TITLES: dict[str, str] = {
+    "discovery_report": "Discovery Report: {client}",
+    "discovery_confirmation": "Discovery Confirmation: {client}",
     "discovery_preresearch": "D1 — Automated pre-research: {client}",
     "discovery_questionnaire": "D2 — CDD questionnaire: {client}",
     "discovery_completeness": "D3 — Completeness scoring: {client}",
     "discovery_profile": "D4 — Discovery profile: {client}",
+    "tracking_report": "Tracking & Access Report: {client}",
+    "tracking_confirmation": "Tracking Confirmation: {client}",
     "tracking_t1_access": "T1 — Access collection: {client}",
     "tracking_t2_audit": "T2 — Tracking audit: {client}",
     "tracking_t3_conversions": "T3 — Conversions: {client}",

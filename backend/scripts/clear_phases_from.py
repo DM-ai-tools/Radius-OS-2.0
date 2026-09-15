@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 # Phase → agent keys (runtime RolePermission keys)
 PHASE_AGENTS: dict[int, list[str]] = {
+    3: ["website_situation_agent"],
     4: ["competitor_market_agent"],
     5: ["search_demand"],
     6: ["content_strategy", "site_architecture"],
@@ -32,6 +33,7 @@ PHASE_AGENTS: dict[int, list[str]] = {
 
 # Phase → CDP summary + status column pairs
 PHASE_CDP_FIELDS: dict[int, list[tuple[str, str]]] = {
+    3: [("website_situation_summary", "website_status")],
     4: [("competitive_landscape_summary", "competitor_status")],
     5: [("search_demand_summary", "search_demand_status")],
     6: [
@@ -47,6 +49,7 @@ PHASE_CDP_FIELDS: dict[int, list[tuple[str, str]]] = {
 }
 
 PHASE_CARD_TYPES: dict[int, list[str]] = {
+    3: ["website_audit", "website_situation_report"],
     4: ["competitor_landscape"],
     5: ["search_demand_report"],
     6: ["content_strategy_report", "site_architecture_blueprint"],
@@ -132,6 +135,9 @@ async def clear_phases(
         for summary_col, status_col in cdp_fields:
             set_bits.append(f"{summary_col} = '{{}}'::json")
             set_bits.append(f"{status_col} = 'not_started'")
+        # Clearing website+ later means Phase 5 gate must re-open from readiness.
+        if from_phase <= 3:
+            set_bits.append("ready_for_phase5 = false")
         sql = f"UPDATE client_digital_profiles SET {', '.join(set_bits)} WHERE client_id = :cid"
         r = await session.execute(text(sql), {"cid": str(cid)})
         print(f"cdp_columns_reset={r.rowcount}")
@@ -178,6 +184,14 @@ async def clear_phases(
             {"cid": str(cid), "agents": agents},
         )
         print(f"phase_validations_deleted={r.rowcount}")
+
+        # Website audits reference agent_jobs — clear before job deletes (phase 3+).
+        if from_phase <= 3:
+            r = await session.execute(
+                text("DELETE FROM website_audits WHERE client_id = :cid"),
+                {"cid": str(cid)},
+            )
+            print(f"website_audits_deleted={r.rowcount}")
 
         r = await session.execute(
             text(
@@ -227,10 +241,19 @@ async def clear_phases(
             print(f"competitor_cache_cleared=0 ({exc})")
 
     # --- Recompute readiness (phases 1–4 only) -----------------------------
+    import sys
+
+    backend_root = Path(__file__).resolve().parents[1]
+    if str(backend_root) not in sys.path:
+        sys.path.insert(0, str(backend_root))
+
     async with Session() as session:
         from app.services.readiness import recompute_readiness
 
         profile = await recompute_readiness(session, cid)
+        if from_phase <= 3 and getattr(profile, "ready_for_phase5", False):
+            # Website/competitor cleared — do not leave the Phase 5 gate open.
+            profile.ready_for_phase5 = False
         await session.commit()
         print(
             json.dumps(

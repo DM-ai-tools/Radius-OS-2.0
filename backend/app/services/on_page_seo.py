@@ -385,7 +385,11 @@ def build_internal_linking_plan(
 
     # Orphans / depth / dead ends from IA current_state
     cs = ia.get("current_state") if isinstance(ia.get("current_state"), dict) else {}
-    orphans_raw = cs.get("orphans") or ia.get("orphans") or []
+    orphans_raw = cs.get("orphans") if "orphans" in cs else ia.get("orphans")
+    if isinstance(orphans_raw, int):
+        orphans_raw = []
+    elif not isinstance(orphans_raw, list):
+        orphans_raw = []
     orphans: list[dict[str, Any]] = []
     for o in orphans_raw[:12]:
         if isinstance(o, dict):

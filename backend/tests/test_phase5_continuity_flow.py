@@ -196,7 +196,6 @@ class TestPhase6aContinuity:
 
     def test_phase6a_core_topics_preserve_intent(self, mock_phase5_output):
         """Phase 6a core_topics preserve intent from Phase 5 topics."""
-        from app.services.content_strategy import build_authority_map
 
         # Extract pillars from topic ideas (what Phase 6a does)
         topics = mock_phase5_output["topic_plan"]["topic_ideas"]

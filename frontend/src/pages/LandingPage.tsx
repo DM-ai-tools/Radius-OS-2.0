@@ -171,7 +171,15 @@ export default function LandingPage() {
       <main id="top">
         <section className="landing-hero" aria-label="Hero">
           <div className="landing-hero-media" aria-hidden="true">
-            <img src="/landing/hero.jpg" alt="" className="landing-hero-img" />
+            <img
+              src="/landing/hero.jpg"
+              alt=""
+              className="landing-hero-img"
+              width={1920}
+              height={1080}
+              decoding="async"
+              fetchPriority="high"
+            />
             <div className="landing-hero-shade" />
           </div>
           <div className="landing-hero-copy">
@@ -258,7 +266,14 @@ export default function LandingPage() {
           ref={story.ref}
         >
           <div className="landing-method-media" aria-hidden="true">
-            <img src="/landing/workflow.jpg" alt="" />
+            <img
+              src="/landing/workflow.jpg"
+              alt=""
+              width={1200}
+              height={900}
+              loading="lazy"
+              decoding="async"
+            />
           </div>
           <div className="landing-method-copy">
             <p className="landing-kicker">Method</p>
@@ -282,7 +297,14 @@ export default function LandingPage() {
           ref={close.ref}
         >
           <div className="landing-close-media" aria-hidden="true">
-            <img src="/landing/radar.jpg" alt="" />
+            <img
+              src="/landing/radar.jpg"
+              alt=""
+              width={1920}
+              height={1080}
+              loading="lazy"
+              decoding="async"
+            />
             <div className="landing-close-shade" />
           </div>
           <div className="landing-close-copy">
@@ -307,6 +329,10 @@ export default function LandingPage() {
       <footer className="landing-footer">
         <span>Radius OS</span>
         <span>Discovery to publish · Role-gated skills · Shared memory</span>
+        <nav className="landing-footer-nav" aria-label="Footer">
+          <a href="#phases">Phases</a>
+          <a href="#method">Method</a>
+        </nav>
       </footer>
 
       <AuthModal

@@ -166,8 +166,13 @@ def _append_phrase(out: list[str], seen: set[str], raw: str) -> None:
     text = str(raw or "").strip()
     if not text:
         return
-    # Path / URL last-segment fallback
-    if "/" in text or text.startswith("http"):
+    # Path / URL last-segment fallback — only for real URLs/paths, not
+    # service labels like "AEO Services (AI/answer engine optimization)".
+    looks_like_url = bool(re.search(r"https?://|www\.|\.[a-z]{2,3}(/|$)", text, re.I))
+    looks_like_path = text.startswith("/") or (
+        "/" in text and " " not in text and not text.startswith("(")
+    )
+    if looks_like_url or looks_like_path:
         seg = [s for s in re.sub(r"^https?://", "", text).split("/") if s and "." not in s]
         if seg:
             text = seg[-1].replace("-", " ").replace("_", " ")
@@ -419,6 +424,7 @@ def evaluate_keyword(
     match_class: str | None = None,
     seed: str | None = None,
     gap_flag: bool = False,
+    provider_fallback: bool = False,
 ) -> tuple[bool, str, str]:
     """Return (keep, reason, evidence_note)."""
     kw = str(keyword or "").strip()
@@ -451,19 +457,75 @@ def evaluate_keyword(
     if not ctx.has_business_evidence:
         return True, "hygiene_only", ""
 
+    from app.services.keyword_opportunity import is_ambiguous_seed, is_noisy_keyword
+
+    if is_noisy_keyword(kw):
+        return False, "noisy", ""
+
+    def _ambiguous_seed_on_topic() -> bool:
+        """Short acronym seeds must keep expansions on the business sense of the seed."""
+        if not seed_text or not is_ambiguous_seed(seed_text):
+            return True
+        seed_toks = _tokens(seed_text)
+        kw_toks = _tokens(kw)
+        if not seed_toks:
+            return True
+        has_seed_token = bool(seed_toks & kw_toks)
+        extra = (kw_toks & ctx.distinctive_tokens) - seed_toks
+        if has_seed_token and extra:
+            return True
+        # Allow the bare acronym itself (exact seed row)
+        if has_seed_token and kw_toks <= seed_toks:
+            return True
+        # Prefer full service/CDD strings — evidence_phrases may fragment parentheticals
+        parents = [
+            *list(ctx.services or []),
+            *list(ctx.cdd_keywords or []),
+            *list(ctx.seeds or []),
+            *list(ctx.evidence_phrases or []),
+        ]
+        for phrase in parents:
+            pn = _norm(phrase)
+            if not pn or pn == _norm(seed_text):
+                continue
+            if not (seed_toks & _tokens(phrase)):
+                continue
+            phrase_extra = _tokens(phrase) - seed_toks
+            overlap = kw_toks & phrase_extra
+            if len(overlap) >= 2:
+                return True
+            if overlap and len(kw_toks) <= 4:
+                return True
+            if _norm(kw) in pn or pn in _norm(kw):
+                return True
+        return False
+
+    # Coverage rows generated after provider failure — keep when the seed itself
+    # is a supported service/CDD term (already hygiene-checked above).
+    if provider_fallback and seed_supported:
+        return True, "seed_related" if cls in ("related", "broad") else "seed_phrase", seed_text
+
     # Seed lineage: if the seed is supported, keep its expansions
     if seed_text and _norm(kw) == _norm(seed_text) and seed_supported:
         return True, "seed_exact", seed_text
     if cls == "exact" and seed_supported:
+        if not _ambiguous_seed_on_topic():
+            return False, "ambiguous_seed_drift", seed_text
         return True, "seed_exact", seed_text
     if cls == "phrase" and seed_supported:
+        if not _ambiguous_seed_on_topic():
+            return False, "ambiguous_seed_drift", seed_text
         return True, "seed_phrase", seed_text
     if cls == "related" and seed_supported:
+        if not _ambiguous_seed_on_topic():
+            return False, "ambiguous_seed_drift", seed_text
         return True, "seed_related", seed_text
 
     # Even when the seed isn't fully supported, keep exact/phrase expansions
     # that themselves share evidence tokens (broader match).
     if cls in ("exact", "phrase") and seed_text and broad_token_hit:
+        if not _ambiguous_seed_on_topic():
+            return False, "ambiguous_seed_drift", seed_text
         return True, "seed_phrase", " ".join(sorted(broad_token_hit))
 
     if phrase_hit:
@@ -490,11 +552,15 @@ def evaluate_keyword(
         return True, "theme_overlap", " ".join(sorted(broad_token_hit))
 
     if gap_flag and seed_supported:
+        if not _ambiguous_seed_on_topic():
+            return False, "ambiguous_seed_drift", seed_text
         return True, "competitor_gap", seed_text
 
     # Last resort: keep related/broad expansions that share at least one
     # evidence token, even after the distinctive filter stripped weak words.
     if broad_token_hit and seed_text:
+        if not _ambiguous_seed_on_topic():
+            return False, "ambiguous_seed_drift", seed_text
         return True, "seed_related", " ".join(sorted(broad_token_hit))
 
     return False, "no_business_evidence", ""
@@ -588,6 +654,7 @@ def filter_relevant_keywords(
             match_class=cls,
             seed=seed,
             gap_flag=bool(row.get("gap_flag")),
+            provider_fallback=bool(row.get("provider_fallback")),
         )
         if keep:
             kept.append({**row, "relevance_reason": reason, "relevance_evidence": evidence})

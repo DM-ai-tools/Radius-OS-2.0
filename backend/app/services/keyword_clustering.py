@@ -8,10 +8,8 @@ from typing import Any
 from app.services.keyword_opportunity import (
     detect_funnel as _detect_funnel,
     detect_intent,
-    is_stale_year_keyword,
 )
 from app.services.keyword_pipeline import run_keyword_pipeline
-from app.services.keyword_relevance import evaluate_keyword
 from app.services.topic_naming import specific_cluster_name
 
 _STOP = {"the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with"}
@@ -32,6 +30,9 @@ _LOCATIONS = {
     "delhi",
 }
 _BRAND_HINTS = ("brand", "official", "login", "pricing", "cost")
+# Keyword rows carried on a cluster. Members beyond this are still counted in
+# keyword_count and reported via keywords_truncated — never silently dropped.
+_MAX_CLUSTER_KEYWORDS = 50
 
 
 def _norm(s: str) -> str:
@@ -60,6 +61,54 @@ def _singularize(word: str) -> str:
 def _stem_key(kw: str) -> str:
     toks = sorted(_singularize(t) for t in _tokens(kw))
     return " ".join(toks)
+
+
+def _nest_subservices(group: dict[str, Any]) -> None:
+    """Move sub-service page seeds into nested buckets under each CDD service."""
+    subservices_map: dict[str, dict[str, Any]] = {}
+    regular_seeds: list[dict[str, Any]] = []
+    for seed in group.get("seeds") or []:
+        if str(seed.get("target_type") or "").lower() != "sub_service":
+            regular_seeds.append(seed)
+            continue
+        name = str(seed.get("target") or seed.get("seed") or "").strip()
+        key = _norm(name)
+        bucket = subservices_map.get(key)
+        if not bucket:
+            bucket = {
+                "subservice": name,
+                "page_path": seed.get("page_path"),
+                "parent_service": group.get("service"),
+                "seed_count": 0,
+                "keyword_count": 0,
+                "total_volume": 0,
+                "seeds": [],
+            }
+            subservices_map[key] = bucket
+        bucket["seeds"].append(seed)
+        bucket["seed_count"] += 1
+        bucket["keyword_count"] += int(seed.get("keyword_count") or 0)
+        bucket["total_volume"] += sum(
+            int(row.get("volume") or 0)
+            for row in seed.get("keywords") or []
+            if isinstance(row, dict) and isinstance(row.get("volume"), (int, float))
+        )
+
+    group["seeds"] = regular_seeds
+    subservices = list(subservices_map.values())
+    for sub in subservices:
+        sub["seeds"].sort(
+            key=lambda row: (
+                -int(row.get("keyword_count") or 0),
+                str(row.get("seed") or "").lower(),
+            )
+        )
+        for index, seed in enumerate(sub["seeds"], start=1):
+            seed["seed_index"] = index
+            seed["seed_label"] = f"Sub-seed {index}"
+    subservices.sort(key=lambda row: str(row.get("subservice") or "").lower())
+    group["subservices"] = subservices
+    group["subservice_count"] = len(subservices)
 
 
 def build_service_seed_clusters(
@@ -176,6 +225,9 @@ def build_service_seed_clusters(
             "seed": cluster.get("seed"),
             "target": cluster.get("target") or cluster.get("seed"),
             "target_type": cluster.get("target_type") or "keyword",
+            "page_type": cluster.get("page_type"),
+            "page_path": cluster.get("page_path"),
+            "parent_segment": cluster.get("parent_segment"),
             "assignment_reason": reason,
             "assignment_score": score,
             "keyword_count": len(keywords),
@@ -193,12 +245,18 @@ def build_service_seed_clusters(
             if isinstance(row, dict) and isinstance(row.get("volume"), (int, float))
         )
 
-    out = [group for group in groups.values() if group["seeds"]]
+    out: list[dict[str, Any]] = []
+    for group in groups.values():
+        if not group["seeds"]:
+            continue
+        _nest_subservices(group)
+        if group["seeds"] or group.get("subservices"):
+            out.append(group)
     for group in out:
         group["seeds"].sort(
             key=lambda row: (
-                {"service": 0, "page": 1, "keyword": 2}.get(
-                    str(row.get("target_type") or "keyword"), 3
+                {"service": 0, "sub_service": 1, "page": 2, "keyword": 3}.get(
+                    str(row.get("target_type") or "keyword"), 4
                 ),
                 -int(row.get("keyword_count") or 0),
                 str(row.get("seed") or "").lower(),
@@ -438,11 +496,18 @@ def build_clusters_deterministic(
         if len(items) == 1 and not key.startswith(("cmp:", "brand:", "loc:")):
             only = items[0]
             if (only.get("opportunity_score") or 0) < 50 and (only.get("volume") or 0) < 200:
+                orphan_kw = str(only.get("keyword") or "")
+                orphan_intent = _detect_intent(orphan_kw, only.get("intent"))
                 orphans.append(
                     {
                         "keyword": only.get("keyword"),
                         "notes": "Single low-value keyword - needs more related terms",
                         "volume": only.get("volume"),
+                        # An orphan is still a classified keyword — it was
+                        # excluded from a cluster, not from the analysis.
+                        "intent": orphan_intent,
+                        "funnel": _detect_funnel(orphan_kw, orphan_intent),
+                        "exclusion_reason": "single_low_value_keyword",
                     }
                 )
                 continue
@@ -491,7 +556,7 @@ def build_clusters_deterministic(
         else:
             cluster_name = specific_cluster_name(pkw, intent=intent, head=head, mod=mod)
         kw_rows = []
-        for i, r in enumerate(ranked[:15]):
+        for i, r in enumerate(ranked[:_MAX_CLUSTER_KEYWORDS]):
             is_primary = _norm(str(r.get("keyword") or "")) == _norm(pkw)
             if is_primary:
                 role = "Primary"
@@ -545,7 +610,12 @@ def build_clusters_deterministic(
                 "recommended_url": f"/blog/{_slug(pkw)}",
                 "primary_keyword": pkw,
                 "est_traffic": est_traffic,
-                "keyword_count": len(kw_rows),
+                # True membership, not the number of rows that fit under the
+                # display cap — reporting the capped figure made keywords
+                # disappear from the audit trail with nothing recording it.
+                "keyword_count": len(ranked),
+                "keywords_shown": len(kw_rows),
+                "keywords_truncated": max(0, len(ranked) - len(kw_rows)),
                 "avg_difficulty": (
                     round(
                         sum(float(r["difficulty"]) for r in ranked if r.get("difficulty") is not None)
@@ -607,8 +677,44 @@ def build_clusters_deterministic(
         "orphan_count": len(orphans),
         "clusters": clusters_out,
         "orphans": orphans[:30],
+        "orphans_truncated": max(0, len(orphans) - 30),
         "content_roadmap": roadmap,
         "source": "deterministic_rules",
+        "keyword_accounting": build_keyword_accounting(clusters_out, orphans, input_count=len(rows)),
+    }
+
+
+def build_keyword_accounting(
+    clusters: list[dict[str, Any]],
+    orphans: list[dict[str, Any]],
+    *,
+    input_count: int,
+) -> dict[str, Any]:
+    """Prove every keyword that entered clustering is accounted for.
+
+    ``balanced`` is the invariant: clustered + orphaned == input. When it is
+    False something was dropped without a recorded reason, and the run should
+    not be treated as a complete keyword map.
+    """
+    clustered = sum(
+        int(c.get("keyword_count") or len(c.get("keywords") or []))
+        for c in clusters
+        if isinstance(c, dict)
+    )
+    orphaned = len(orphans)
+    return {
+        "input_count": input_count,
+        "clustered_count": clustered,
+        "orphan_count": orphaned,
+        "accounted_count": clustered + orphaned,
+        "unaccounted_count": max(0, input_count - clustered - orphaned),
+        "balanced": clustered + orphaned == input_count,
+        "orphan_reasons": {
+            reason: sum(1 for o in orphans if o.get("exclusion_reason") == reason)
+            for reason in sorted(
+                {str(o.get("exclusion_reason") or "unspecified") for o in orphans}
+            )
+        },
     }
 
 
@@ -701,6 +807,18 @@ def clusters_for_cdp(report: dict[str, Any]) -> list[dict[str, Any]]:
                 "content_type": c.get("content_type"),
                 "entities": c.get("entities") or [],
                 "business_relevance": c.get("business_relevance"),
+                "existing_page_match": c.get("existing_page_match"),
+                "topic_disposition": c.get("topic_disposition"),
+                "sitemap_match": c.get("sitemap_match"),
+                # Topic classification verdict + its justification, so the CDP
+                # view can show *why* a cluster is existing/new/supporting.
+                "topic_status": c.get("topic_status"),
+                "topic_reason": c.get("topic_reason"),
+                "topic_confidence": c.get("topic_confidence"),
+                "topic_needs_review": c.get("topic_needs_review"),
+                "url_status": c.get("url_status"),
+                "supporting_parent": c.get("supporting_parent"),
+                "cannibalization": c.get("cannibalization"),
             }
         )
     return out
@@ -728,6 +846,14 @@ async def run_keyword_clustering(
     )
     report["keyword_pipeline"] = pipeline_result["pipeline"]
     report["pipeline_excluded"] = pipeline_result["excluded"][:24]
+    # The excluded *sample* is capped for payload size; the counts must not be,
+    # or the cleaning stage silently loses keywords from the audit trail.
+    excluded_all = pipeline_result["excluded"]
+    report["pipeline_excluded_count"] = len(excluded_all)
+    report["pipeline_excluded_by_reason"] = {
+        reason: sum(1 for e in excluded_all if e.get("reason") == reason)
+        for reason in sorted({str(e.get("reason") or "unspecified") for e in excluded_all})
+    }
     report["keyword_cleaning"] = pipeline_result.get("relevance_audit") or {}
 
     if not use_llm or len(cleaned) < 3:
@@ -768,7 +894,12 @@ async def run_keyword_clustering(
             "source": "keyword_clustering_skill",
             "keyword_pipeline": report.get("keyword_pipeline"),
             "pipeline_excluded": report.get("pipeline_excluded"),
+            "pipeline_excluded_count": report.get("pipeline_excluded_count"),
+            "pipeline_excluded_by_reason": report.get("pipeline_excluded_by_reason"),
             "keyword_cleaning": report.get("keyword_cleaning"),
             "llm_invented_dropped": llm_result.get("llm_invented_dropped") or [],
+            "keyword_accounting": build_keyword_accounting(
+                clusters, orphans, input_count=len(cleaned)
+            ),
         }
     )

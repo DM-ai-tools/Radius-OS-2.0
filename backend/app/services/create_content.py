@@ -7,8 +7,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.config import get_settings
+from app.logging_config import get_logger
+from app.services.publish_preview import sanitize_meta_description
 from app.integrations.llm import generate_openrouter_image, synthesize_json
 from app.agents.prompts import load_shared_reference, load_skill_file
+
+log = get_logger("create_content")
 
 _WEAK_DIFF = re.compile(
     r"^(lead with|ranking pages typically|n/?a|none|tbd|todo)\b",
@@ -243,6 +247,7 @@ _PAGE_ALIASES = {
     "blog": "article",
     "post": "article",
     "guide": "guide",
+    "tool": "tool",
     "home": "home",
     "utility": "utility",
 }
@@ -443,6 +448,61 @@ def page_playbook(page_type: str, *, keyword: str, client_name: str) -> dict[str
                 {"title": "What is included", "notes": ["Packaging, limits you can state without inventing prices"]},
             ],
         },
+        "tool": {
+            "job": (
+                "Specify an interactive calculator, quiz, estimator, or template tool "
+                "that helps the user reach a concrete result."
+            ),
+            "not": (
+                "Do not pretend a prose article is the tool, invent formulas, or claim "
+                "the interactive component has been implemented."
+            ),
+            "voice": (
+                "Product-spec clarity with concise supporting copy. Separate confirmed "
+                "requirements from implementation decisions."
+            ),
+            "length": (
+                "Brief introduction, structured component specification, concise usage "
+                "guidance, result interpretation, and implementation handoff."
+            ),
+            "outline": [
+                {
+                    "title": "Tool purpose and user outcome",
+                    "notes": ["User problem, intended result, appropriate use"],
+                },
+                {
+                    "title": "Interactive component specification",
+                    "notes": [
+                        "Embed placeholder",
+                        "Component state and user flow",
+                        "No invented implementation",
+                    ],
+                },
+                {
+                    "title": "Inputs and validation",
+                    "notes": ["Required inputs, formats, validation, error states"],
+                },
+                {
+                    "title": "Calculation or decision logic",
+                    "notes": [
+                        "Formula or branching logic requiring product-owner confirmation",
+                        "Assumptions and limits",
+                    ],
+                },
+                {
+                    "title": "Results and next steps",
+                    "notes": ["Output format, interpretation, useful next action"],
+                },
+                {
+                    "title": "Accessibility, analytics, and implementation handoff",
+                    "notes": [
+                        "Keyboard and screen-reader behavior",
+                        "Events to measure",
+                        "Engineering acceptance checks",
+                    ],
+                },
+            ],
+        },
         "article": {
             "job": "Publish a finished article that answers the query and earns a human read-through.",
             "not": "Do not write an outline, a brief, or SEO commentary about the keyword.",
@@ -532,6 +592,40 @@ def _topic_context(
     }
 
 
+# Soft ceiling so a bad brief cannot spawn unbounded OpenRouter image calls.
+MAX_DRAFT_IMAGES = 12
+
+
+def _image_count_target(brief: dict[str, Any], collected: int) -> int:
+    """How many frames this page should carry — driven by requirements / outline."""
+    req = brief.get("image_requirements") if isinstance(brief.get("image_requirements"), dict) else {}
+    for key in ("count", "image_count", "min_count"):
+        raw = req.get(key) if key != "image_count" else (req.get(key) or brief.get(key))
+        if isinstance(raw, int) and raw > 0:
+            return max(1, min(raw, MAX_DRAFT_IMAGES))
+        if isinstance(raw, str) and raw.strip().isdigit():
+            return max(1, min(int(raw.strip()), MAX_DRAFT_IMAGES))
+
+    outline = brief.get("outline") or brief.get("sections") or []
+    body_n = 0
+    if isinstance(outline, list):
+        for row in outline:
+            title = ""
+            if isinstance(row, dict):
+                title = str(row.get("title") or row.get("heading") or "")
+            else:
+                title = str(row or "")
+            if title.strip() and title.strip().upper() not in ("FAQ", "CTA", "NEXT STEP", "CONCLUSION"):
+                body_n += 1
+
+    # Prefer whatever was already collected from strategy/brief; grow with outline when thin.
+    if collected >= 3:
+        return min(MAX_DRAFT_IMAGES, collected)
+    if body_n:
+        return min(MAX_DRAFT_IMAGES, max(collected, 1 + max(1, (body_n + 1) // 2)))
+    return min(MAX_DRAFT_IMAGES, max(collected, 2))
+
+
 def collect_image_specs(
     brief: dict[str, Any],
     *,
@@ -540,7 +634,7 @@ def collect_image_specs(
     industry: str | None = None,
     location: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Pick image prompts from strategy queue, then brief requirements. Cap 2."""
+    """Pick image prompts from strategy / brief requirements — count follows the page, not a fixed 2."""
     specs: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -593,23 +687,32 @@ def collect_image_specs(
     for row in supporting or []:
         _add(row, "supporting")
 
-    if not specs:
+    target = _image_count_target(brief, len(specs))
+    if len(specs) < target:
         from app.services.content_strategy import image_suggestions_for
 
         ctx = _topic_context(brief, client_name=client_name, industry=industry, location=location)
+        outline = brief.get("outline") or brief.get("sections") or []
         for sug in image_suggestions_for(
             ctx["keyword"],
             ctx["format"] or "blog",
             ctx["intent"] or "informational",
             industry=ctx["industry"] or industry,
             location=ctx["geo"] or location,
+            outline=outline if isinstance(outline, list) else None,
+            count=target,
         ):
             _add(sug)
+            if len(specs) >= target:
+                break
 
-    # Hero first, then one supporting
+    # Hero first, then supporting — keep every distinct prompt up to the soft ceiling.
     heroes = [s for s in specs if s.get("role") == "hero"]
     rest = [s for s in specs if s.get("role") != "hero"]
-    ordered = (heroes[:1] or specs[:1]) + rest
+    ordered = (heroes[:1] or []) + rest
+    if not ordered:
+        ordered = list(specs)
+
     deduped: list[dict[str, Any]] = []
     seen_p: set[str] = set()
     for s in ordered:
@@ -618,7 +721,7 @@ def collect_image_specs(
             continue
         seen_p.add(k)
         deduped.append(s)
-        if len(deduped) >= 2:
+        if len(deduped) >= min(target, MAX_DRAFT_IMAGES):
             break
     return deduped
 
@@ -632,9 +735,37 @@ def _figure_markdown(img: dict[str, Any]) -> str:
     return f"[FIGURE {img.get('role') or 'image'}] {cap[:220]}"
 
 
+def _inject_supporting_into_markdown(md: str, figures: list[dict[str, Any]]) -> str:
+    """Spread supporting figures after body H2 sections; append any leftovers."""
+    if not figures:
+        return md
+    parts = re.split(r"(?m)(^##\s+.+)$", md)
+    if len(parts) < 3:
+        extra = "\n\n".join(_figure_markdown(f) for f in figures)
+        return (md.rstrip() + "\n\n" + extra + "\n") if extra else md
+
+    out: list[str] = [parts[0]]
+    fig_i = 0
+    i = 1
+    while i < len(parts):
+        heading = parts[i]
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        out.append(heading)
+        out.append(body)
+        skip = bool(re.match(r"(?i)^##\s+(faq|cta|next step)\b", heading or ""))
+        if fig_i < len(figures) and body.strip() and not skip:
+            out.append("\n\n" + _figure_markdown(figures[fig_i]) + "\n")
+            fig_i += 1
+        i += 2
+    while fig_i < len(figures):
+        out.append("\n\n" + _figure_markdown(figures[fig_i]) + "\n")
+        fig_i += 1
+    return "".join(out)
+
+
 async def generate_draft_images(specs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for spec in specs[:2]:
+    for spec in specs[:MAX_DRAFT_IMAGES]:
         prompt = str(spec.get("prompt") or "").strip()
         if not prompt:
             continue
@@ -684,6 +815,117 @@ def _count_placeholders(text: str) -> tuple[int, int]:
     return blob.count("[AUTHOR INPUT REQUIRED"), blob.count("[VERIFY]")
 
 
+_INVENTED_STAT = re.compile(
+    r"\b(\d{1,3}(?:\.\d+)?%\s+(?:of|increase|decrease|growth|boost|more|higher|lower)"
+    r"|studies show|research shows|according to (?:a |our )?study"
+    r"|\$\d[\d,]*(?:\.\d+)?\s+(?:ROI|revenue|savings))\b",
+    re.I,
+)
+
+
+def score_draft_accuracy(
+    draft: dict[str, Any],
+    brief: dict[str, Any],
+    *,
+    client_name: str,
+    related: list[str] | None = None,
+) -> dict[str, Any]:
+    """Heuristic accuracy score — keyword/client grounding, scope, invention risk."""
+    blob = " ".join(
+        str(draft.get(k) or "")
+        for k in ("title", "markdown", "meta_description", "opening")
+    ).lower()
+    grounding = brief.get("accuracy_grounding") if isinstance(brief.get("accuracy_grounding"), dict) else {}
+    primary = str(
+        grounding.get("primary_keyword") or brief.get("keyword") or brief.get("title") or ""
+    ).strip()
+    related_terms = [
+        str(t).strip()
+        for t in (related or grounding.get("related_keywords") or brief.get("secondary_keywords") or [])
+        if str(t).strip()
+    ][:8]
+    must_name = [str(x) for x in (grounding.get("must_name") or [client_name]) if x]
+    out_of_scope = [str(x) for x in (grounding.get("out_of_scope") or []) if x]
+    geo = str(grounding.get("geo") or brief.get("location") or "").strip()
+    checks: list[dict[str, Any]] = []
+
+    def _check(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": ok, "detail": detail})
+
+    if primary:
+        _check(
+            "primary_keyword",
+            primary.lower() in blob,
+            f"Primary “{primary}” {'found' if primary.lower() in blob else 'missing'} in draft",
+        )
+    if client_name:
+        _check(
+            "client_named",
+            client_name.lower() in blob,
+            f"Client “{client_name}” {'named' if client_name.lower() in blob else 'missing'}",
+        )
+    if related_terms:
+        hits = [t for t in related_terms if t.lower() in blob]
+        _check(
+            "related_keywords",
+            len(hits) >= max(1, min(2, len(related_terms))),
+            f"{len(hits)}/{len(related_terms)} related terms used",
+        )
+    for name in must_name[:3]:
+        if name.lower() == (client_name or "").lower():
+            continue
+        _check("must_name", name.lower() in blob, f"Must-name “{name}” {'present' if name.lower() in blob else 'missing'}")
+    scope_hits = [s for s in out_of_scope if len(s) >= 8 and s.lower() in blob]
+    _check(
+        "out_of_scope",
+        not scope_hits,
+        "No out-of-scope topics" if not scope_hits else f"Out-of-scope leaked: {', '.join(scope_hits[:2])}",
+    )
+    if geo and len(geo) >= 3:
+        _check(
+            "geo_grounding",
+            geo.lower() in blob,
+            f"Geo “{geo}” {'present' if geo.lower() in blob else 'missing'}",
+        )
+    invented = bool(_INVENTED_STAT.search(blob)) and "[verify]" not in blob
+    _check(
+        "no_unsourced_claims",
+        not invented,
+        "No unsourced stat patterns" if not invented else "Possible unsourced stat/claim — needs [VERIFY]",
+    )
+    passed = sum(1 for c in checks if c["ok"])
+    total = len(checks) or 1
+    score = round(100.0 * passed / total)
+    return {
+        "score": score,
+        "passed": passed,
+        "total": total,
+        "checks": checks,
+        "ok": score >= 70,
+    }
+
+
+def _accuracy_prompt_block(brief: dict[str, Any]) -> str:
+    g = brief.get("accuracy_grounding") if isinstance(brief.get("accuracy_grounding"), dict) else {}
+    if not g:
+        return ""
+    lines = ["ACCURACY GROUNDING (honour exactly — do not invent beyond this):"]
+    for rule in g.get("rules") or []:
+        lines.append(f"- {rule}")
+    if g.get("geo"):
+        lines.append(f"- Geography: {g['geo']}")
+    if g.get("products"):
+        lines.append(f"- Nameable products/services only: {g['products']}")
+    if g.get("serp_competitors_to_beat"):
+        lines.append(
+            "- SERP titles to beat (do not paraphrase as your H1/H2): "
+            + "; ".join(str(t) for t in g["serp_competitors_to_beat"][:5])
+        )
+    if g.get("competitive_notes"):
+        lines.append("- Competitive gaps to cover: " + "; ".join(str(n) for n in g["competitive_notes"][:5]))
+    return "\n".join(lines) + "\n"
+
+
 def _section_prose(
     *,
     stitle: str,
@@ -715,7 +957,58 @@ def _section_prose(
         else ""
     )
 
-    if page_type in ("service", "landing", "product", "location"):
+    if page_type == "tool":
+        section = stitle.lower()
+        if "interactive component" in section:
+            return (
+                "**[INTERACTIVE COMPONENT REQUIRED — specification, not an implemented embed]**\n\n"
+                f"The {kw} component should guide one user through one complete task and "
+                "return a result they can understand without reading a separate article. "
+                "Engineering must confirm the component framework, persistence, and embed "
+                "location before this page is marked publish-ready.\n\n"
+                "Required states: initial, valid input, invalid input, calculating, result, "
+                "and recoverable error. Never substitute static prose for these states."
+            )
+        if "inputs and validation" in section:
+            return (
+                f"Define every input for {kw} with its label, data type, unit, required status, "
+                "allowed range, default, and plain-language help text. Product owners must "
+                "approve any defaults or ranges; this draft does not invent them.\n\n"
+                "Validation must be inline, keyboard-accessible, and specific about how to "
+                "correct the value. Empty, malformed, extreme, and conflicting inputs need "
+                "documented behavior."
+            )
+        if "calculation" in section or "decision logic" in section:
+            return (
+                f"Document the formula or branch table for {kw} as an implementation contract. "
+                "Each input must map to an output, with assumptions, rounding, units, and edge "
+                "cases stated explicitly.\n\n"
+                "**[PRODUCT CONFIRMATION REQUIRED]** — no formula, scoring weight, benchmark, "
+                "or recommendation may be inferred from the keyword alone."
+            )
+        if "accessibility" in section or "handoff" in section:
+            return (
+                "Implementation acceptance: complete keyboard operation, programmatic labels, "
+                "announced validation and results, sensible focus movement, mobile layout, and "
+                "a non-JavaScript explanation of the tool's purpose.\n\n"
+                "Analytics should distinguish tool start, validation failure, completion, result "
+                "view, and next-step click without recording sensitive input values."
+            )
+        if "results" in section:
+            return (
+                f"The result for {kw} should name the outcome, show the inputs that produced it, "
+                "explain assumptions, and give the user a useful next step. Include reset and "
+                "edit-input actions; do not present an estimate as a guaranteed result."
+            )
+        return (
+            f"{kw} should help {who}{place} complete a defined task, not merely read about it. "
+            f"This specification states the user outcome and the boundary of what the tool can "
+            f"claim on behalf of {client_name}.\n\n"
+            "Success means a user can provide valid inputs, understand the result, and decide "
+            "what to do next. The interactive component remains an engineering deliverable."
+        )
+
+    if page_type in ("service", "subservice", "sub_service", "landing", "product", "location"):
         p1 = (
             f"{client_name} offers {kw}{place} for {who}. "
             f"This part of the page — {stitle.lower()} — is the practical detail a buyer needs "
@@ -788,7 +1081,18 @@ def _opening_prose(
         else ""
     )
     diff = _differentiation(brief)
-    if page_type in ("service", "landing", "product", "location"):
+    if page_type == "tool":
+        return (
+            f"{kw[0].upper() + kw[1:] if kw else 'This tool'} is an interactive product page "
+            f"for {who}{place}, not a prose-only article. "
+            + (f"Its intended outcome is to help the user {outcome[0].lower() + outcome[1:]}. " if outcome else "")
+            + (f"{diff} " if diff else "")
+            + "\n\n"
+            "**[INTERACTIVE COMPONENT REQUIRED]** — this draft supplies the component contract "
+            "and supporting copy. Product and engineering must confirm the calculation or "
+            "decision logic before implementation or publication."
+        )
+    if page_type in ("service", "subservice", "sub_service", "landing", "product", "location"):
         lead = (
             f"{client_name} provides {kw}{place} for {who}. "
             + (f"{outcome}. " if outcome else "This page says what is included, how the work runs, and how to start. ")
@@ -839,7 +1143,15 @@ def _cta_prose(
     geo: str = "",
 ) -> str:
     place = f" in {geo}" if geo else ""
-    if page_type in ("service", "landing", "product", "location") or intent in (
+    if page_type == "tool":
+        return (
+            f"After reviewing the {kw} result{place}, the user should be able to revise their "
+            f"inputs, save or share the outcome where appropriate, or discuss the next step "
+            f"with {client_name}.\n\n"
+            "Do not enable a conversion claim or recommendation until the component logic, "
+            "privacy handling, and result wording have been approved."
+        )
+    if page_type in ("service", "subservice", "sub_service", "landing", "product", "location") or intent in (
         "transactional",
         "commercial",
     ):
@@ -879,7 +1191,7 @@ def _build_markdown(
     url = str(brief.get("url") or pre.get("url") or brief.get("path") or "/")
     parent = str(pre.get("parent") or brief.get("parent") or "/")
     action = str(brief.get("action") or "create")
-    meta = str(brief.get("meta_description") or "")[:160]
+    meta = sanitize_meta_description(brief.get("meta_description"))[:160]
     cov = _coverage(brief)
     ctx = _topic_context(
         brief, client_name=client_name, marketing=marketing, industry=industry, location=location
@@ -973,9 +1285,9 @@ def _build_markdown(
 
     has_full = len(full_page) >= 500 and "## " in full_page
     if has_full:
-        lines.extend([full_page, ""])
-        if supporting:
-            lines.extend([_figure_markdown(supporting.pop(0)), ""])
+        body_md = _inject_supporting_into_markdown(full_page, supporting)
+        supporting = []
+        lines.extend([body_md, ""])
         a_n, v_n = _count_placeholders(full_page)
         if a_n:
             author_placeholders.append("body")
@@ -1019,6 +1331,9 @@ def _build_markdown(
                 author_placeholders.append(stitle)
             if v_n:
                 verify_placeholders.append(stitle)
+        # Any remaining frames (outline shorter than image count) go before FAQ/CTA.
+        while supporting:
+            lines.extend([_figure_markdown(supporting.pop(0)), ""])
 
     # FAQ from PAA only — skip if the full page already includes FAQ
     faq_in = faq_answers if faq_answers is not None else (brief.get("faq") or [])
@@ -1204,15 +1519,18 @@ async def _llm_draft_article(
         "[VERIFY] only beside a specific unsourced number/date/price/study. "
         "Honour out_of_scope. Deliver differentiation in the opening and again in the body. "
         "No word_count field. One page only. Pass the people-first test: original value, "
-        "bookmark-worthy, leaves the reader able to act."
+        "bookmark-worthy, leaves the reader able to act. "
+        "Accuracy: only use supplied related keywords, products, geo, and competitive notes; "
+        "never invent markets, stats, or case studies."
     )
     image_note = ""
     if image_specs:
         image_note = (
-            "Image captions to reference in the matching section using [FIGURE role] caption:\n"
+            "Image captions to reference in the matching section using [FIGURE role] caption "
+            f"({len(image_specs)} figures — place each where it helps the reader, hero under the title):\n"
             + "\n".join(
                 f"- {s.get('role')}: {str(s.get('prompt') or '')[:180]}"
-                for s in image_specs[:2]
+                for s in image_specs[:MAX_DRAFT_IMAGES]
             )
             + "\n"
         )
@@ -1254,6 +1572,7 @@ async def _llm_draft_article(
         f"H2 outline (use these titles, in order; write finished copy under each):\n{outline_lines}\n"
         f"FAQ (PAA only — answer in 3–5 sentences of real copy): {brief.get('faq') or []}\n"
         f"CTA: write a finished Next step section, not a label like Contact / Learn more.\n"
+        f"{_accuracy_prompt_block(brief)}"
         f"{image_note}"
     )
     try:
@@ -1269,7 +1588,8 @@ async def _llm_draft_article(
             max_tokens=12288,
             model=write_model,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log.warning("create_content_draft_generation_failed", keyword=kw, error=str(exc))
         return None
     if not isinstance(parsed, dict):
         return None
@@ -1334,8 +1654,22 @@ async def write_one_page(
     location: str | None = None,
     generate_images: bool | None = None,
     search_demand: dict[str, Any] | None = None,
+    enhance_brief: bool = True,
 ) -> dict[str, Any]:
     """Write a single page. Never call in a loop to fill a calendar unattended."""
+    enhancements: list[str] = []
+    if enhance_brief and isinstance(brief, dict):
+        from app.services.content_enhancement import enhance_brief_for_writing
+
+        brief, enhancements = enhance_brief_for_writing(
+            brief,
+            client_name=client_name,
+            marketing=marketing,
+            industry=industry,
+            location=location,
+            seo_strategy=seo_strategy,
+            search_demand=search_demand,
+        )
     gate = draft_gate(brief)
     if not gate.get("ok"):
         return {
@@ -1396,6 +1730,14 @@ async def write_one_page(
     )
     draft["ok"] = True
     draft["refused"] = False
+    if enhancements:
+        draft["enhancements"] = enhancements
+    draft["accuracy"] = score_draft_accuracy(
+        draft,
+        brief,
+        client_name=client_name,
+        related=related,
+    )
     return draft
 
 

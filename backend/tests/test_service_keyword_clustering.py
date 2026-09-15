@@ -8,6 +8,7 @@ def _seed_cluster(
     *,
     target: str | None = None,
     target_type: str = "keyword",
+    page_path: str | None = None,
     exact: list[str] | None = None,
     phrase: list[str] | None = None,
     related: list[str] | None = None,
@@ -25,7 +26,7 @@ def _seed_cluster(
             for keyword in (keywords or [])
         ]
 
-    return {
+    cluster = {
         "seed": seed,
         "target": target or seed,
         "target_type": target_type,
@@ -35,6 +36,9 @@ def _seed_cluster(
         "broad": rows(broad, "broad"),
         "classes_missing": [],
     }
+    if page_path:
+        cluster["page_path"] = page_path
+    return cluster
 
 
 def test_groups_explicit_service_seed_with_all_extracted_keywords():
@@ -68,6 +72,33 @@ def test_groups_explicit_service_seed_with_all_extracted_keywords():
         "generation of qualified leads",
         "sales prospecting",
     }
+
+
+def test_nests_subservice_seeds_under_parent_service():
+    groups = build_service_seed_clusters(
+        [
+            _seed_cluster(
+                "local seo",
+                target="Local SEO",
+                target_type="sub_service",
+                page_path="/services/seo/local-seo",
+                phrase=["local seo services"],
+            ),
+            _seed_cluster(
+                "seo audit",
+                target_type="page",
+                phrase=["technical seo audit"],
+            ),
+        ],
+        ["SEO Services", "Lead Generation"],
+    )
+
+    seo = next(g for g in groups if g["service"] == "SEO Services")
+    assert seo["subservice_count"] == 1
+    assert seo["subservices"][0]["subservice"] == "Local SEO"
+    assert seo["subservices"][0]["page_path"] == "/services/seo/local-seo"
+    assert seo["subservices"][0]["seeds"][0]["seed"] == "local seo"
+    assert seo["seeds"][0]["seed"] == "seo audit"
 
 
 def test_maps_page_seed_to_service_by_overlap_and_keeps_unmapped_visible():
@@ -168,3 +199,47 @@ def test_empty_cleaned_seed_still_appears_once():
     assert seed["seed_index"] == 1
     assert seed["keyword_count"] == 0
     assert seed["class_counts"] == {"exact": 0, "phrase": 0, "related": 0, "broad": 0}
+
+
+def test_enrich_subservice_competitor_matrix():
+    from app.services.keyword_opportunity import enrich_service_clusters_with_competitors
+
+    groups = build_service_seed_clusters(
+        [
+            _seed_cluster(
+                "local seo",
+                target="Local SEO",
+                target_type="sub_service",
+                page_path="/seo/local",
+                exact=["local seo agency"],
+            )
+        ],
+        ["SEO Services"],
+    )
+    scored = [
+        {
+            "keyword": "local seo agency",
+            "gap_flag": True,
+            "competitor_domains": ["rival-a.com", "rival-b.com"],
+            "volume": 500,
+        }
+    ]
+    competitive = {
+        "service_level_comparison": {
+            "best_by_service": {
+                "seo": {"service": "seo", "competitor": "Rival A", "score": 8.2},
+            }
+        }
+    }
+    enriched, matrix = enrich_service_clusters_with_competitors(
+        groups,
+        scored,
+        competitive_landscape=competitive,
+        competitors=[{"name": "Rival A", "domain": "rival-a.com"}],
+    )
+    sub = enriched[0]["subservices"][0]
+    assert sub["gap_keyword_count"] == 1
+    assert sub["competitor_category"] == "seo"
+    assert sub["category_leader"]["competitor"] == "Rival A"
+    assert matrix[0]["subservice"] == "Local SEO"
+    assert matrix[0]["gap_keyword_count"] == 1

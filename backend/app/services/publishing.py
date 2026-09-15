@@ -22,7 +22,9 @@ from urllib.parse import urlparse
 from app.integrations import brandfetch, firecrawl, wordpress
 from app.integrations.wordpress import WordPressConnection
 from app.logging_config import get_logger
-from app.services.publish_preview import build_page_preview
+from app.services.publish_preview import build_content_html, build_page_preview
+from app.services.wp_content import validate_publish_payload
+from app.services.wp_publish_strategy import PublishTarget, publish_to_wordpress
 
 log = get_logger("publishing")
 
@@ -44,15 +46,51 @@ def on_page_gate_ok(on_page_status: str | None, on_page: dict[str, Any]) -> bool
     return bool(on_page.get("pages") or on_page.get("queue"))
 
 
+def _matches_url(candidate: str, want: str) -> bool:
+    cand = (candidate or "").rstrip("/").lower()
+    if not cand:
+        return False
+    return cand == want or cand.endswith(urlparse(want).path or "\x00")
+
+
 def _brief_for(url: str, production: dict[str, Any]) -> dict[str, Any]:
     want = (url or "").rstrip("/").lower()
     for b in production.get("briefs") or []:
-        if not isinstance(b, dict):
-            continue
-        cand = str(b.get("url") or "").rstrip("/").lower()
-        if cand and (cand == want or cand.endswith(urlparse(want).path or "\x00")):
+        if isinstance(b, dict) and _matches_url(str(b.get("url") or ""), want):
             return b
     return {}
+
+
+def _draft_for(url: str, production: dict[str, Any]) -> dict[str, Any]:
+    """The written Phase 10 draft for this URL, if one exists.
+
+    Without this the publisher only ever saw the *brief*, and rendered its outline
+    into heading-plus-placeholder markup — publishing a skeleton where the finished
+    article already existed alongside it in the same pack.
+    """
+    want = (url or "").rstrip("/").lower()
+    for d in production.get("drafts") or []:
+        if isinstance(d, dict) and _matches_url(str(d.get("url") or ""), want):
+            return d
+    return {}
+
+
+def _content_for(
+    page: dict[str, Any], brief: dict[str, Any], draft: dict[str, Any]
+) -> tuple[str, str]:
+    """(content_html, source). Prefers the written draft over the brief outline."""
+    from app.services.wp_content import markdown_to_publish_html
+
+    markdown = str(draft.get("markdown") or "")
+    if markdown.strip():
+        rendered = markdown_to_publish_html(
+            markdown,
+            images=draft.get("images") if isinstance(draft.get("images"), list) else None,
+            media_base=str(draft.get("media_base") or "") or None,
+        )
+        if rendered.strip():
+            return rendered, "phase10_draft"
+    return build_content_html(page, brief), "brief_outline"
 
 
 def platform_capability_check(
@@ -146,6 +184,16 @@ async def run_publishing_plan(
     )
     effective_mode = MODE_PREVIEW if capability_blockers else mode
 
+    # What this particular site can accept — Elementor, which SEO plugin, whether the
+    # pages/media endpoints exist. Probed once per run, and only when we intend to write.
+    site_capabilities: dict[str, Any] = {}
+    if effective_mode != MODE_PREVIEW and wordpress_connection is not None:
+        try:
+            site_capabilities = await wordpress.detect_site_capabilities(wordpress_connection)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("capability_probe_failed", error=str(exc))
+            site_capabilities = {"error": str(exc)}
+
     target_status = {
         MODE_PREVIEW: "draft",
         MODE_DRAFT: "draft",
@@ -157,6 +205,17 @@ async def run_publishing_plan(
     verification: list[dict[str, Any]] = []
     url_list: list[str] = []
 
+    # Pages beyond the per-run cap used to vanish with no trace — a reviewer saw a
+    # "complete" run that had quietly skipped most of the queue.
+    deferred = [
+        {
+            "url": str(p.get("url") or p.get("path") or ""),
+            "keyword": p.get("keyword"),
+            "reason": f"Beyond the {MAX_PAGES}-page per-run cap — re-run to continue.",
+        }
+        for p in pages[MAX_PAGES:]
+    ]
+
     for page in pages[:MAX_PAGES]:
         url = str(page.get("url") or "")
         if not url.startswith("http"):
@@ -164,6 +223,8 @@ async def run_publishing_plan(
         url_list.append(url)
         slug = wordpress.slug_from_url(url) or wordpress.slugify(str(page.get("keyword") or ""))
         brief = _brief_for(url, production)
+        draft = _draft_for(url, production)
+        content_html, content_source = _content_for(page, brief, draft)
 
         preview = build_page_preview(
             client_name=client_name,
@@ -173,6 +234,14 @@ async def run_publishing_plan(
             layout=layout,
             target_status=target_status,
             slug=slug,
+            content_html=content_html,
+        )
+        preview["content_source"] = content_source
+        payload = preview["cms_payload"]
+
+        # Run the same gate in preview so a reviewer sees what would block a real run.
+        preview["validation"] = validate_publish_payload(
+            payload, require_written_copy=(content_source == "phase10_draft")
         )
         previews.append(preview)
 
@@ -181,45 +250,75 @@ async def run_publishing_plan(
                 {
                     "url": url,
                     "slug": slug,
-                    "title": preview["cms_payload"]["title"],
+                    "title": payload["title"],
                     "keyword": page.get("keyword"),
                     "status": "preview_only",
                     "cms": "wordpress" if has_connection else "not_connected",
+                    "content_source": content_source,
+                    "would_block": not preview["validation"]["ok"],
                     "note": "Dry run — no CMS write attempted",
                 }
             )
             continue
 
-        payload = preview["cms_payload"]
-        result = await wordpress.upsert_post(
-            wordpress_connection,
+        target = PublishTarget(
+            url=url,
+            slug=slug,
             title=payload["title"],
             content_html=payload["content"],
-            slug=slug,
             excerpt=payload["excerpt"],
+            page_type=str(page.get("page_type") or draft.get("page_type") or "") or None,
             status=target_status,
+            images=[i for i in (draft.get("images") or []) if isinstance(i, dict)],
+            seo_description=payload["excerpt"],
         )
+        trace = await publish_to_wordpress(
+            wordpress_connection,
+            target,
+            capabilities=site_capabilities,
+            # A brief outline is a skeleton, not an article — never write it live.
+            require_written_copy=True,
+        )
+        write = trace.get("write") or {}
         entry = {
             "url": url,
             "slug": slug,
             "title": payload["title"],
             "keyword": page.get("keyword"),
-            "status": result.get("status") if result.get("ok") else "failed",
+            "status": write.get("status") if trace.get("ok") or write.get("ok") else "failed",
             "cms": "wordpress",
-            "post_id": result.get("post_id"),
-            "link": result.get("link"),
-            "edit_link": result.get("edit_link"),
-            "action": result.get("action"),
+            "content_source": content_source,
+            "strategy": trace.get("strategy"),
+            "post_type": trace.get("post_type"),
+            "post_id": write.get("post_id"),
+            "link": write.get("link"),
+            "edit_link": write.get("edit_link"),
+            "action": write.get("action"),
         }
-        if not result.get("ok"):
-            entry["error"] = result.get("error")
-            entry["detail"] = result.get("detail")
-        if result.get("downgraded"):
+        if trace.get("error"):
+            entry["error"] = trace.get("error")
+            entry["detail"] = trace.get("detail") or trace.get("strategy_reason")
+            entry["failed_stage"] = trace.get("stage")
+            if trace.get("validation") and not trace["validation"].get("ok"):
+                entry["validation_errors"] = trace["validation"]["errors"]
+            if trace.get("blockers"):
+                entry["blockers"] = trace["blockers"]
+                capability_blockers.extend(trace["blockers"])
+        if write.get("downgraded"):
             entry["downgraded"] = True
-            entry["downgrade_reason"] = result.get("downgrade_reason")
+            entry["downgrade_reason"] = write.get("downgrade_reason")
         publish_queue.append(entry)
 
-        verification.append(await _verify_write(wordpress_connection, result, payload))
+        verification.append(
+            trace.get("verification")
+            or {
+                "slug": slug,
+                "verified": False,
+                "reason": trace.get("error") or "write_failed",
+                "failed_stage": trace.get("stage"),
+                "action_required": "Human review — the CMS write did not succeed.",
+            }
+        )
 
     checklist = _checklist(ia, effective_mode)
     indexnow_preview = {
@@ -239,6 +338,7 @@ async def run_publishing_plan(
         "cms_connection": {k: v for k, v in connection.items() if k != "error"}
         | ({"error": connection.get("error")} if connection.get("error") else {}),
         "capability_blockers": capability_blockers,
+        "site_capabilities": site_capabilities,
         "design": {
             "brand_available": bool(brand.get("available")),
             "brand_error": brand.get("error"),
@@ -253,6 +353,8 @@ async def run_publishing_plan(
         },
         "previews": previews,
         "publish_queue": publish_queue,
+        "deferred_pages": deferred,
+        "pages_in_package": len(pages),
         "verification": verification,
         "publish_checklist": checklist,
         "indexnow_preview": indexnow_preview,
@@ -280,55 +382,9 @@ def _pick_reference_url(ia: dict[str, Any], primary_url: str) -> str:
     return primary_url
 
 
-async def _verify_write(
-    conn: WordPressConnection | None, result: dict[str, Any], payload: dict[str, Any]
-) -> dict[str, Any]:
-    """Re-read the post and compare — v1.9 step 14, confirm rather than assume."""
-    if not result.get("ok") or not result.get("post_id") or conn is None:
-        return {
-            "slug": result.get("slug"),
-            "verified": False,
-            "reason": result.get("error") or "write_failed",
-            "action_required": "Human review — the CMS write did not succeed.",
-        }
-    stored = await wordpress.fetch_post(conn, int(result["post_id"]))
-    if not stored:
-        return {
-            "slug": result.get("slug"),
-            "post_id": result.get("post_id"),
-            "verified": False,
-            "reason": "could_not_reread_post",
-            "action_required": "Open the post in WP Admin and confirm manually.",
-        }
-
-    def _rendered(field: str) -> str:
-        block = stored.get(field)
-        if isinstance(block, dict):
-            return str(block.get("raw") or block.get("rendered") or "")
-        return str(block or "")
-
-    title_ok = _rendered("title").strip() == str(payload.get("title") or "").strip()
-    status_ok = str(stored.get("status") or "") == str(result.get("status") or "")
-    mismatches = []
-    if not title_ok:
-        mismatches.append("title")
-    if not status_ok:
-        mismatches.append("status")
-    return {
-        "slug": result.get("slug"),
-        "post_id": result.get("post_id"),
-        "verified": not mismatches,
-        "stored_status": stored.get("status"),
-        "stored_title": _rendered("title")[:160],
-        "mismatches": mismatches,
-        "action_required": (
-            None
-            if not mismatches
-            else f"CMS stored different {', '.join(mismatches)} — review before go-live."
-        ),
-    }
-
-
+# Verification moved to wp_publish_strategy.verify_publication(), which checks the
+# stored content, Elementor data, SEO meta and the live public page rather than
+# only the title and status this used to compare.
 def _checklist(ia: dict[str, Any], mode: str) -> list[str]:
     items = [
         "Confirm title / H1 / meta match the approved on-page package",

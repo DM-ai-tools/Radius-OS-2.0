@@ -1,4 +1,6 @@
-from app.models import Client, ClientDigitalProfile
+from sqlalchemy import select
+
+from app.models import ChatMessage, ChatSession, Client, ClientDigitalProfile
 from tests.conftest import make_user
 
 
@@ -38,6 +40,37 @@ async def test_questionnaire_allowed_for_csm(api_client, db_session):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
+
+
+async def test_questionnaire_persists_d3_d4_events_to_session(api_client, db_session):
+    client_id = await _make_client(db_session)
+    user, token = await make_user(db_session, "client_success_manager", "csm-persist@example.com")
+    session = ChatSession(client_id=client_id, user_id=user.id)
+    db_session.add(session)
+    await db_session.commit()
+
+    resp = await api_client.post(
+        f"/api/v1/clients/{client_id}/questionnaire",
+        json={
+            "session_id": str(session.id),
+            "fields": {"business_model": "b2b"},
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert resp.status_code == 200
+    rows = (
+        await db_session.execute(
+            select(ChatMessage).where(ChatMessage.session_id == session.id)
+        )
+    ).scalars().all()
+    cards = [
+        (row.structured_payload or {}).get("card_type")
+        for row in rows
+        if row.structured_payload
+    ]
+    assert "discovery_confirmation" in cards
+    assert "discovery_completeness" not in cards
 
 
 async def test_known_changes_forbidden_for_view_only_role(api_client, db_session):

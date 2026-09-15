@@ -22,6 +22,10 @@ celery_app.conf.update(
             "task": "app.tasks.jobs.recheck_unverified_tracking",
             "schedule": 3600.0,
         },
+        "archive-expired-client-memory": {
+            "task": "app.tasks.jobs.archive_expired_client_memory",
+            "schedule": 86400.0,
+        },
     },
 )
 

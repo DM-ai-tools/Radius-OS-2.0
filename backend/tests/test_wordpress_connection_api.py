@@ -201,6 +201,29 @@ async def test_role_without_publish_trigger_cannot_connect(api_client, db_sessio
     assert resp.status_code == 403
 
 
+async def test_request_layer_blocks_private_host_ssrf():
+    """AUDIT-004: a connection pointed at an internal/private base_url must
+    never reach an outbound request — _request() is the single choke point
+    every WordPress call goes through, so this is checked once, here."""
+    conn = wordpress.WordPressConnection(
+        base_url="http://169.254.169.254/", username="e", app_password="p"
+    )
+    result = await wordpress.verify_connection(conn)
+    assert result["ok"] is False
+    assert "blocked unsafe host" in result["error"]
+
+
+async def test_upsert_post_blocks_private_host_ssrf():
+    conn = wordpress.WordPressConnection(
+        base_url="http://10.0.0.5/", username="e", app_password="p"
+    )
+    result = await wordpress.upsert_post(
+        conn, title="T", content_html="<p>x</p>", slug="t"
+    )
+    assert result["ok"] is False
+    assert "blocked unsafe host" in result["error"]
+
+
 async def test_two_clients_have_independent_connections(api_client, db_session, monkeypatch):
     client_a = await _make_client(db_session, "Client A")
     client_b = await _make_client(db_session, "Client B")

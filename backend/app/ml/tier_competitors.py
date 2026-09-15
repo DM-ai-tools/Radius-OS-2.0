@@ -118,6 +118,8 @@ async def score_entity_live(
     industry: str | None = None,
 ) -> dict[str, Any]:
     """Score from live page fetch + skill model; falls back to mid-range if LLM unavailable."""
+    import asyncio
+
     from app.config import get_settings
     from app.integrations.llm import synthesize_json
     from app.integrations.web_fetch import fetch_url, page_text_excerpt, parse_html
@@ -136,33 +138,39 @@ async def score_entity_live(
     industry_ctx = (industry or "infer from site — any vertical").strip()
     # Architecture v1.9: Competitor Research forced to Gemini 2.5 Pro
     competitor_model = get_settings().competitor_model
-    payload = await synthesize_json(
-        skill_system_preamble("competitor_market_agent")
-        + "\n\nScore EACH of the 16 parameters on an INTEGER scale of 0 to 10 "
-        "(not 0–1, not 0–100). "
-        "Adapt scoring to the client's industry — do not assume agency/ads-only signals. "
-        "For Industry Specialization, score vertical overlap with the stated client industry. "
-        "For Service Maturity / Performance Marketing, interpret relative to THIS business type "
-        "(e.g. product catalog & booking for a clinic; inventory & retail media for ecommerce; "
-        "paid + SEO stack for an agency). "
-        "Use website evidence. If evidence is thin or the page failed to load, "
-        "use conservative mid-range 3–5 and say so in evidence — NEVER use 0 "
-        "unless the business clearly has zero signal for that parameter. "
-        "Never invent employee counts or revenue as facts.",
-        (
-            f"Entity: {name}\nURL: {resolved_url}\n"
-            f"Client industry / vertical: {industry_ctx}\n"
-            f"Role: {'client baseline — score THIS business, not competitors' if is_client else 'competitor in the same vertical'}\n"
-            f"Title: {parser.title}\nMeta: {parser.meta.get('description', '')}\n"
-            f"Fetch status: {fetched.get('status_code')} error={fetched.get('error')}\n"
-            f"Excerpt:\n{excerpt or '(empty — score mid-range 3–5 from company name/industry only)'}\n\n"
-            f"industry_specialization = overlap with client industry '{industry_ctx}' "
-            "(exact same vertical -> 8-10; adjacent -> 5-7; unrelated -> 1-4).\n"
-            f"Return JSON object keyed by: {keys}. Each value = "
-            '{"score": <integer 0-10>, "evidence": "short string"}.'
-        ),
-        model=competitor_model,
-    )
+    try:
+        payload = await asyncio.wait_for(
+            synthesize_json(
+                skill_system_preamble("competitor_market_agent")
+                + "\n\nScore EACH of the 16 parameters on an INTEGER scale of 0 to 10 "
+                "(not 0–1, not 0–100). "
+                "Adapt scoring to the client's industry — do not assume agency/ads-only signals. "
+                "For Industry Specialization, score vertical overlap with the stated client industry. "
+                "For Service Maturity / Performance Marketing, interpret relative to THIS business type "
+                "(e.g. product catalog & booking for a clinic; inventory & retail media for ecommerce; "
+                "paid + SEO stack for an agency). "
+                "Use website evidence. If evidence is thin or the page failed to load, "
+                "use conservative mid-range 3–5 and say so in evidence — NEVER use 0 "
+                "unless the business clearly has zero signal for that parameter. "
+                "Never invent employee counts or revenue as facts.",
+                (
+                    f"Entity: {name}\nURL: {resolved_url}\n"
+                    f"Client industry / vertical: {industry_ctx}\n"
+                    f"Role: {'client baseline — score THIS business, not competitors' if is_client else 'competitor in the same vertical'}\n"
+                    f"Title: {parser.title}\nMeta: {parser.meta.get('description', '')}\n"
+                    f"Fetch status: {fetched.get('status_code')} error={fetched.get('error')}\n"
+                    f"Excerpt:\n{excerpt or '(empty — score mid-range 3–5 from company name/industry only)'}\n\n"
+                    f"industry_specialization = overlap with client industry '{industry_ctx}' "
+                    "(exact same vertical -> 8-10; adjacent -> 5-7; unrelated -> 1-4).\n"
+                    f"Return JSON object keyed by: {keys}. Each value = "
+                    '{"score": <integer 0-10>, "evidence": "short string"}.'
+                ),
+                model=competitor_model,
+            ),
+            timeout=45,
+        )
+    except Exception:  # noqa: BLE001 — timeout / provider failure → heuristic mid-range
+        payload = None
     if not payload:
         # Still prefer mid-range over zeros when the live site was unreachable
         if thin_page:

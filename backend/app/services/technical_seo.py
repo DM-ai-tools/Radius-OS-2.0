@@ -18,7 +18,9 @@ from app.integrations.providers import (
     run_seo_audit,
     run_technical_seo_audit,
 )
-from app.agents.prompts import load_skill, load_skill_file
+from app.logging_config import get_logger
+
+log = get_logger("technical_seo")
 
 
 PHASE7_SKILL_DIRS = (
@@ -33,6 +35,8 @@ PHASE7_SKILL_DIRS = (
 
 def phase7_skill_contracts() -> dict[str, int]:
     """Confirm Phase 7 skill markdown is loadable (chars loaded per skill)."""
+    from app.agents.prompts import load_skill, load_skill_file
+
     out: dict[str, int] = {}
     for dirname in PHASE7_SKILL_DIRS:
         body = load_skill_file(dirname)
@@ -214,7 +218,8 @@ async def run_technical_seo_plan(
                 project_id=ahrefs_project_id or settings.ahrefs_site_audit_project_id,
                 date_compared=prev_crawl,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("technical_seo_ahrefs_failed", url=primary_url, error=str(exc))
             return None
 
     async def _fetch_tech() -> dict[str, Any]:
@@ -222,7 +227,8 @@ async def run_technical_seo_plan(
             out = await run_technical_seo_audit(primary_url, display_name=client_name)
             out["_provider"] = "technical_seo_audit"
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("technical_seo_audit_failed_falling_back", url=primary_url, error=str(exc))
             out = await _rule_based_fallback(primary_url, client_name)
             out["_provider"] = "rule_based_crawl"
             return out
@@ -230,7 +236,8 @@ async def run_technical_seo_plan(
     async def _fetch_cwv() -> dict[str, Any]:
         try:
             return await run_cwv_measurement(primary_url, display_name=client_name)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("technical_seo_cwv_failed", url=primary_url, error=str(exc))
             return {}
 
     async def _fetch_rendering() -> dict[str, Any]:
@@ -241,13 +248,15 @@ async def run_technical_seo_plan(
             }
         try:
             return await run_rendering_snapshot(primary_url)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("technical_seo_rendering_failed", url=primary_url, error=str(exc))
             return {"status": "NOT_AVAILABLE"}
 
     async def _fetch_broken() -> dict[str, Any]:
         try:
             return await check_broken_links(primary_url)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("technical_seo_broken_links_failed", url=primary_url, error=str(exc))
             return {"broken_count": 0, "internal": [], "external": [], "quick_fixes": []}
 
     async def _fetch_seo() -> dict[str, Any]:
@@ -257,14 +266,16 @@ async def run_technical_seo_plan(
                 display_name=client_name,
                 max_pages=settings.technical_seo_seo_audit_max_pages,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("technical_seo_seo_audit_failed", url=primary_url, error=str(exc))
             return {}
 
     async def _fetch_hreflang(sample_urls: list[str]) -> dict[str, Any]:
         try:
             out = await run_hreflang_surface_check(primary_url, sample_urls=sample_urls)
             return out
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.warning("technical_seo_hreflang_failed", url=primary_url, error=str(exc))
             return {"status": "NOT_AVAILABLE"}
 
     # Phase 1 — Ahrefs issues + CWV only (skip redundant homepage crawl until we know Ahrefs failed).

@@ -44,7 +44,7 @@ async def test_pipeline_times_out_instead_of_hanging(db_session, monkeypatch):
         return []
 
     monkeypatch.setitem(pipeline_module.AGENT_RUNNERS, "discovery_agent", _never_finishes)
-    monkeypatch.setattr(pipeline_module, "AGENT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(pipeline_module, "agent_timeout_seconds", lambda _agent_key: 0.2)
 
     async def _fake_route(content, statuses):
         return "discovery_agent"

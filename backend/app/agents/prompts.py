@@ -47,6 +47,8 @@ AGENT_SKILL_DIRS = {
     "internal_linking": "internal-linking",
     "publishing": "platform-publish",
     "platform_publish": "platform-publish",
+    "firecrawl": "firecrawl",
+    "site_page_inventory": "site-page-inventory",
 }
 
 

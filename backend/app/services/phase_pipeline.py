@@ -1,18 +1,25 @@
 """Cross-phase pipeline definitions and handoff validation.
 
+PHASE 3 — SITE MAP (app.services.site_sitemap)
+└── URL inventory: hierarchy, page types, parents, canonicals, overlaps
+        ↓  (source of truth for the existing topical structure)
 PHASE 5 — SEARCH DEMAND & KEYWORD RESEARCH
 ├── Keyword Research
 ├── Keyword Cleaning / Relevance Filtering
-├── Topic Creation
-├── Keyword Clustering
+├── Keyword Clustering (+ intent / funnel)
+├── Sitemap cluster classification (app.services.topic_classification):
+│     existing / needs-optimization / needs-consolidation / new /
+│     supporting / cannibalization-risk / out-of-scope / uncertain,
+│     each with a reason, a confidence, and its supporting evidence
+├── Topic Creation (new clusters only)
 └── Search Intent / Cluster Understanding
         ↓
 PHASE 6 — SEO STRATEGY & INFORMATION ARCHITECTURE
-├── Cluster → URL Mapping
+├── Cluster → URL Mapping (executes the Phase 5 topic decision)
 ├── Existing URL matching
 ├── New URL identification
 ├── Site structure
-└── Cannibalization decisions
+└── Cannibalization decisions (duplicate proposals + URL collisions)
         ↓
 PHASE 8/9 — CONTENT PLANNING
 ├── Existing content → audit/optimization
@@ -33,8 +40,9 @@ from typing import Any
 PHASE_5_STAGES = [
     "keyword_research",
     "keyword_cleaning",
-    "topic_creation",
     "keyword_clustering",
+    "sitemap_cluster_classification",
+    "topic_creation",
     "cluster_intent_understanding",
 ]
 
@@ -98,16 +106,46 @@ def validate_phase5_pack(pack: dict[str, Any]) -> dict[str, Any]:
     )
     stages.append(
         _stage_ok(
-            "topic_creation",
-            bool((pack.get("topic_plan") or {}).get("topic_ideas") or pack.get("topics")),
-            detail=f"{len((pack.get('topic_plan') or {}).get('topic_ideas') or pack.get('topics') or [])} topics",
-        )
-    )
-    stages.append(
-        _stage_ok(
             "keyword_clustering",
             bool(cluster_report.get("clusters")),
             detail=f"{cluster_report.get('clusters_created', 0)} clusters",
+        )
+    )
+    classification = dict(
+        pack.get("sitemap_classification")
+        or cluster_report.get("sitemap_classification")
+        or {}
+    )
+    counts = dict(classification.get("counts") or {})
+    stages.append(
+        _stage_ok(
+            "sitemap_cluster_classification",
+            bool(classification) or any(
+                isinstance(c, dict) and c.get("topic_disposition")
+                for c in (cluster_report.get("clusters") or [])
+            ),
+            detail=(
+                f"{classification.get('existing_topic_count', 0)} existing, "
+                f"{classification.get('existing_review_count', 0)} review, "
+                f"{classification.get('new_topic_count', 0)} new, "
+                f"{classification.get('supporting_topic_count', 0)} supporting, "
+                f"{classification.get('uncertain_count', 0)} uncertain, "
+                f"{classification.get('out_of_scope_count', 0)} out of scope"
+                + (f" (statuses: {counts})" if counts else "")
+            ),
+        )
+    )
+    topic_ideas = (pack.get("topic_plan") or {}).get("topic_ideas") or pack.get("topics") or []
+    new_count = int(classification.get("new_topic_count") or 0)
+    stages.append(
+        _stage_ok(
+            "topic_creation",
+            bool(topic_ideas) or new_count == 0,
+            detail=(
+                f"{len(topic_ideas)} new topics drafted"
+                if topic_ideas
+                else "no new clusters — nothing to draft"
+            ),
         )
     )
     intent_pack = dict(pack.get("cluster_intent") or cluster_report.get("cluster_intent") or {})
@@ -118,7 +156,8 @@ def validate_phase5_pack(pack: dict[str, Any]) -> dict[str, Any]:
             detail=f"{intent_pack.get('page_count', len(cluster_report.get('clusters') or []))} clusters understood",
         )
     )
-    ok = all(s["ok"] for s in stages[:4])  # intent enrichment is additive
+    # research, cleaning, clustering, sitemap classify, topics (intent additive)
+    ok = all(s["ok"] for s in stages[:5])
     return {"phase": 5, "agent": "search_demand", "stages": stages, "ready_for_phase_6": ok}
 
 
@@ -240,13 +279,19 @@ def validate_phase6_pack(pack: dict[str, Any]) -> dict[str, Any]:
     # trivially true and told a reviewer nothing about whether cannibalization
     # was actually checked.
     collisions = sum(1 for row in ownership if isinstance(row, dict) and row.get("cannibalization"))
+    # Risk raised in Phase 5 (cluster ↔ cluster, before any URL existed) plus
+    # colliding brand-new proposals caught at mapping time.
+    pre_map_risk = sum(1 for row in url_map if isinstance(row, dict) and row.get("cannibalization_risk"))
+    duplicate_proposed = int(summary.get("duplicate_proposed_urls") or 0)
     stages.append(
         _stage_ok(
             "cannibalization_decisions",
             bool(url_map),
             detail=(
-                f"{collisions} cross-cluster URL collisions, {cannibal_flags} review-band "
-                f"mappings, {competing} competing URLs noted across {len(ownership)} owners"
+                f"{pre_map_risk} clusters flagged pre-mapping, {duplicate_proposed} duplicate "
+                f"proposed URLs, {collisions} cross-cluster URL collisions, {cannibal_flags} "
+                f"review-band mappings, {competing} competing URLs noted across "
+                f"{len(ownership)} owners"
             ),
         )
     )
