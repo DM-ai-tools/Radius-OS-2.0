@@ -41,3 +41,6 @@ backend/data/draft_images/
 # Generated report artifacts from local runs
 *.pdf
 !docs/**/*.pdf
+
+# Adversarial validation artifacts — large, regenerable, may contain provider payloads
+validation/runs/
