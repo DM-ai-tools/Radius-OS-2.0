@@ -595,7 +595,9 @@ async def live_pre_research(
     if not _skill_provider_ready():
         return mock_pre_research(display_name, primary_url, industry=industry)
 
-    fetched = await fetch_url(primary_url)
+    # Client-resolution: a redirect onto another registrable domain must stop the
+    # run, not be researched as if it were the client (see P0-2).
+    fetched = await fetch_url(primary_url, enforce_registrable_domain=True)
     if fetched.get("error") or not fetched.get("text"):
         base = mock_pre_research(display_name, primary_url, industry=industry)
         for k, v in list(base.items()):

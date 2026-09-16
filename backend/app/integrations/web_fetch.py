@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 import httpx
+import tldextract
 
 from app.logging_config import get_logger
 
@@ -107,38 +108,110 @@ def _host_bare(host: str) -> str:
     return (host or "").lower().split(":")[0].removeprefix("www.")
 
 
+class CrossRegistrableDomain(RuntimeError):
+    """A fetch resolved onto a different registrable domain than was asked for.
+
+    Raised rather than logged. The case this exists for is a client-resolution
+    fetch landing on a stranger's website: guessing ``example.com`` ->
+    ``example.com.au`` reached a real, unrelated Australian company, whose pages
+    were then crawled and attributed to the client. Continuing with a warning is
+    how that data reaches a deliverable, so this stops the run instead.
+    """
+
+
+# Public Suffix List, bundled snapshot only — `suffix_list_urls=()` means this
+# never reaches the network at runtime. Private suffixes are included so that
+# `a.github.io` and `b.github.io` are correctly treated as *different*
+# registrable domains rather than both collapsing to `github.io`.
+_PSL = tldextract.TLDExtract(suffix_list_urls=(), include_psl_private_domains=True)
+
+
+def registrable_domain(url_or_host: str) -> str:
+    """eTLD+1 for a URL or bare host, via the Public Suffix List.
+
+    Returns the bare host for things the PSL has no opinion about (IP literals,
+    ``localhost``, single-label hosts) so that staging targets still compare
+    equal to themselves. Returns "" only for input with no host at all.
+    """
+    raw = str(url_or_host or "").strip()
+    if not raw:
+        return ""
+    host = urlparse(raw if "://" in raw else f"//{raw}", scheme="https").hostname or ""
+    host = _idna(host.lower().rstrip("."))
+    if not host:
+        return ""
+    return _PSL(host).top_domain_under_public_suffix or host
+
+
+def _idna(host: str) -> str:
+    """ASCII (punycode) form of a host, so an IDN typed in unicode compares
+    equal to its ASCII spelling. Returns the input unchanged when it cannot be
+    encoded — a host we cannot normalise must not silently become a different one.
+    """
+    if not host or host.isascii():
+        return host
+    try:
+        return host.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        return host
+
+
+def same_registrable_domain(a: str, b: str) -> bool:
+    ra, rb = registrable_domain(a), registrable_domain(b)
+    return bool(ra) and ra == rb
+
+
+def assert_same_registrable_domain(requested: str, resolved: str, *, context: str = "fetch") -> None:
+    """Raise if ``resolved`` sits on a different registrable domain than ``requested``."""
+    if not same_registrable_domain(requested, resolved):
+        raise CrossRegistrableDomain(
+            f"{context}: refused to use {resolved!r} for {requested!r} — "
+            f"{registrable_domain(resolved)!r} is a different registrable domain than "
+            f"{registrable_domain(requested)!r}. This is a different organisation's site."
+        )
+
+
 def _url_host_variants(url: str) -> list[str]:
-    """Try apex, www, and common country-TLD aliases (e.g. .com ↔ .com.au)."""
+    """Host spellings of the SAME registrable domain: apex <-> www.
+
+    Deliberately does not guess neighbouring domains. The previous version tried
+    ``.com`` -> ``.com.au`` and ``.co.uk`` -> ``.com``, which changes the
+    registrable domain and therefore the owner of the site. Scheme and trailing
+    slash are normalised by the caller/httpx; punycode is normalised here so an
+    IDN typed in unicode compares equal to its ASCII form.
+    """
     if not url.startswith("http"):
         url = "https://" + url
     parsed = urlparse(url)
     host = (parsed.netloc or "").lower()
     if not host:
         return [url]
-    bare = _host_bare(host)
-    hosts: list[str] = [host]
-    if host.startswith("www."):
-        hosts.append(bare)
-    else:
-        hosts.append(f"www.{bare}")
-    # AU businesses sometimes type .com when the live site is .com.au
-    alts: list[str] = []
-    if bare.endswith(".com") and not bare.endswith(".com.au"):
-        alts.append(bare[:-4] + ".com.au")
-    # Do not auto-fallback .com.au → .com (often SSL mismatch / different site)
-    elif bare.endswith(".co.uk"):
-        alts.append(bare[:-6] + ".com")
-    for alt in alts:
-        hosts.extend([alt, f"www.{alt}"])
+
+    # Normalise IDN to punycode so unicode and ASCII spellings are one host.
+    hostname = (parsed.hostname or "").rstrip(".")
+    port = f":{parsed.port}" if parsed.port else ""
+    try:
+        ascii_host = hostname.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        ascii_host = hostname
+
+    bare = _host_bare(ascii_host)
+    hosts = [ascii_host + port]
+    hosts.append((bare if ascii_host.startswith("www.") else f"www.{bare}") + port)
 
     variants: list[str] = []
     seen: set[str] = set()
     for h in hosts:
+        if not h:
+            continue
         candidate = url.replace(parsed.netloc, h, 1)
+        # Belt and braces: never emit a variant off the requested domain.
+        if not same_registrable_domain(url, candidate):
+            continue
         if candidate not in seen:
             seen.add(candidate)
             variants.append(candidate)
-    return variants
+    return variants or [url]
 
 
 def _looks_parked_or_placeholder(result: dict[str, Any]) -> bool:
@@ -236,7 +309,21 @@ def assert_safe_url(url: str) -> tuple[bool, str]:
     return True, target
 
 
-async def fetch_url(url: str, *, timeout: float = 20.0, follow: bool = True) -> dict[str, Any]:
+async def fetch_url(
+    url: str,
+    *,
+    timeout: float = 20.0,
+    follow: bool = True,
+    enforce_registrable_domain: bool = False,
+) -> dict[str, Any]:
+    """Fetch a URL, trying apex/www spellings of the same registrable domain.
+
+    ``enforce_registrable_domain=True`` is for the **client resolution** path:
+    redirects that land on a different registrable domain raise
+    :class:`CrossRegistrableDomain` instead of being followed silently. Leave it
+    False for competitor/market crawling, where following a redirect to another
+    company's site is the intended behaviour.
+    """
     last: dict[str, Any] | None = None
     requested = url if url.startswith("http") else "https://" + url
     for attempt in _url_host_variants(url):
@@ -317,9 +404,24 @@ async def fetch_url(url: str, *, timeout: float = 20.0, follow: bool = True) -> 
                 if len(resp.text) < 250 and "<a " not in resp.text.lower() and "<title" not in resp.text.lower():
                     last = {**result, "error": "empty_or_shell_page"}
                     continue
+                # A redirect can still cross to another owner's site even when the
+                # requested host was in-scope. On the client-resolution path that
+                # must stop the run, not be adopted.
+                if enforce_registrable_domain:
+                    assert_same_registrable_domain(
+                        url, str(resp.url), context="client site resolution"
+                    )
                 if attempt.rstrip("/") != requested.rstrip("/"):
-                    log.info("fetch_host_fallback", requested=url, resolved=str(resp.url))
+                    log.info(
+                        "fetch_host_fallback",
+                        requested=url,
+                        resolved=str(resp.url),
+                        registrable=registrable_domain(str(resp.url)),
+                    )
                 return result
+        except CrossRegistrableDomain:
+            # Never downgraded to a "failed fetch" — this is a hard stop.
+            raise
         except Exception as exc:  # noqa: BLE001
             log.warning("fetch_failed", url=attempt, error=str(exc))
             last = {

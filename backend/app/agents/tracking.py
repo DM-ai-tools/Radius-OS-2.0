@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.prompts import load_skill
 from app.integrations.providers import validate_tracking
-from app.integrations.web_fetch import detect_tracking_snippets, fetch_url, parse_html
+from app.integrations.web_fetch import (
+    CrossRegistrableDomain,
+    detect_tracking_snippets,
+    fetch_url,
+    parse_html,
+)
 from app.ml.scoring import tracking_anomaly_flags
 from app.models import ApiCredential, Client, FindingsLedger, TrackingAudit
 from app.services.agent_runtime import get_profile
@@ -156,9 +161,14 @@ async def run_tracking(
     snippets: dict = {}
     try:
         url = client.primary_url if client.primary_url.startswith("http") else f"https://{client.primary_url}"
-        fetched = await fetch_url(url)
+        fetched = await fetch_url(url, enforce_registrable_domain=True)
         parser = parse_html(fetched.get("text") or "")
         snippets = detect_tracking_snippets(fetched.get("text") or "", parser.scripts)
+    except CrossRegistrableDomain:
+        # The configured client URL resolves to a different organisation's site.
+        # That invalidates the whole run, not just tag detection — never degrade
+        # it to "no tags found".
+        raise
     except Exception:  # noqa: BLE001
         snippets = {}
 
