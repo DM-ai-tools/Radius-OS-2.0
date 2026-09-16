@@ -31,6 +31,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,19 +91,26 @@ SUMMARY_ATTR = {
 # --- raw provider capture ---------------------------------------------------
 
 _capture_path: Path | None = None
+_hosts_path: Path | None = None
+_current_phase: str = "setup"
 _orig_send = httpx.AsyncClient.send
 _REDACT = ("authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization")
+TAB = chr(9)      # hosts.txt is tab-separated
+NEWLINE = chr(10)
 
 
-def _install_capture(path: Path) -> None:
-    global _capture_path
+def _install_capture(path: Path, hosts_path: Path) -> None:
+    global _capture_path, _hosts_path
     _capture_path = path
+    _hosts_path = hosts_path
     path.write_text("", encoding="utf-8")
+    hosts_path.write_text('# phase\tmethod\thost\tstatus\turl\n', encoding="utf-8")
 
     async def send(self, request, **kwargs):
         started = time.monotonic()
         entry: dict = {
             "ts": time.time(),
+            "phase": _current_phase,
             "method": request.method,
             "url": str(request.url),
         }
@@ -112,6 +120,7 @@ def _install_capture(path: Path) -> None:
             entry |= {"error": f"{type(exc).__name__}: {exc}"[:300],
                       "ms": round((time.monotonic() - started) * 1000)}
             _write(entry)
+            _write_host(entry)
             raise
         body = ""
         try:
@@ -128,9 +137,24 @@ def _install_capture(path: Path) -> None:
             "body_truncated": len(body) > 200_000,
         }
         _write(entry)
+        _write_host(entry)
         return resp
 
     httpx.AsyncClient.send = send
+
+
+def _write_host(entry: dict) -> None:
+    """One line per outbound request. This is how we prove what we did and did
+    not touch, and how any other host-leaking path gets caught."""
+    if _hosts_path is None:
+        return
+    host = urlparse(str(entry.get("url") or "")).hostname or "?"
+    with _hosts_path.open("a", encoding="utf-8") as fh:
+        row = TAB.join([
+            str(entry.get("phase")), str(entry.get("method")), host,
+            str(entry.get("status", entry.get("error", "?"))), str(entry.get("url")),
+        ])
+        fh.write(row + NEWLINE)
 
 
 def _write(entry: dict) -> None:
@@ -306,7 +330,7 @@ async def main() -> int:
 
     out = OUT_ROOT / args.fixture
     out.mkdir(parents=True, exist_ok=True)
-    _install_capture(out / "providers.jsonl")
+    _install_capture(out / "providers.jsonl", out / "hosts.txt")
 
     manifest: dict = {
         "fixture": args.fixture, "url": args.url, "name": args.name,
@@ -332,6 +356,8 @@ async def main() -> int:
             c0, k0 = await _cost_snapshot(db)
             t0 = time.monotonic()
             events, error = [], None
+            global _current_phase
+            _current_phase = f"p{num:02d}_{agent_key}"
 
             try:
                 events = await asyncio.wait_for(
@@ -393,6 +419,34 @@ async def main() -> int:
             c1, k1 = await _cost_snapshot(db)
             run_cost += (k1 - k0)
 
+            # Guard the CLIENT RESOLUTION path only. Phases 1-2 must stay on the
+            # fixture's registrable domain. Deliberately NOT a blanket egress
+            # allowlist: competitor analysis crawling third parties is the
+            # product working correctly, and an allowlist would corrupt
+            # fixtures 5, 7 and 10.
+            egress_violations: list[str] = []
+            if num <= 2 and _hosts_path is not None:
+                from app.integrations.web_fetch import registrable_domain
+
+                want = registrable_domain(args.url)
+                for line in _hosts_path.read_text(encoding="utf-8").splitlines():
+                    if not line.startswith(f"p{num:02d}_"):
+                        continue
+                    parts = line.split("	")
+                    if len(parts) < 3:
+                        continue
+                    host = parts[2]
+                    # Provider APIs are expected egress; the client's own site is not.
+                    if any(p in host for p in ("dataforseo", "ahrefs", "openrouter",
+                                               "anthropic", "firecrawl", "brandfetch",
+                                               "googleapis", "seomoz")):
+                        continue
+                    if registrable_domain(host) != want:
+                        egress_violations.append(host)
+                if egress_violations:
+                    print(f"  !! CLIENT-RESOLUTION EGRESS off {want}: "
+                          f"{sorted(set(egress_violations))}")
+
             summaries = {}
             for attr in SUMMARY_ATTR.get(agent_key, ()):
                 summaries[attr] = _jsonable(getattr(profile, attr, None))
@@ -410,6 +464,7 @@ async def main() -> int:
                 "event_types": [e.get("type") for e in (events or [])],
                 "blocked": any(e.get("type") == "error" or "blocked" in str(e.get("content", "")).lower()
                                for e in (events or [])),
+                "egress_violations": sorted(set(egress_violations)) if num <= 2 else None,
                 "findings_ledger": await _findings(db, client.id, agent_key),
                 "summaries": summaries,
             }

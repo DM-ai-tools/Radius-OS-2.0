@@ -75,11 +75,25 @@ async def main() -> int:
             rows, source = a_rows, "ahrefs"
         else:
             errors.extend(a_err or ["ahrefs_no_rows"])
-            d_rows, d_err = await dataforseo.search_volume(keywords)
+            # NOTE: dataforseo.search_volume() is broken — _task_items expects the
+            # Labs shape result[0].items[], but google_ads/search_volume returns
+            # rows directly in result[], so it silently returns ([], []). Ledgered
+            # as P0-4. Parse the raw response here rather than fix pipeline code
+            # before the finding is ledgered.
+            body = await dataforseo._post(
+                "/keywords_data/google_ads/search_volume/live",
+                [{"keywords": [k for k in keywords],
+                  "location_code": dataforseo.DEFAULT_LOCATION,
+                  "language_code": dataforseo.DEFAULT_LANGUAGE}],
+            )
+            result = ((body or {}).get("tasks") or [{}])[0].get("result") or []
+            d_rows = [{"keyword": r.get("keyword"), "volume": r.get("search_volume"),
+                       "competition": r.get("competition"), "cpc": r.get("cpc")}
+                      for r in result if isinstance(r, dict)]
             if d_rows:
-                rows, source = d_rows, "dataforseo"
+                rows, source = d_rows, "dataforseo(raw)"
             else:
-                errors.extend(d_err or ["dataforseo_no_rows"])
+                errors.append("dataforseo_empty_result")
 
         vols = {}
         for r in rows:
