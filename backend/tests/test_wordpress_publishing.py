@@ -59,6 +59,7 @@ def _settings(monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "test-suite-secret-key-not-a-real-default-value")
     monkeypatch.setenv("ENCRYPTION_KEY", "test-suite-encryption-key-not-a-real-default")
     monkeypatch.setenv("WORDPRESS_ALLOW_LIVE_PUBLISH", "false")
+    monkeypatch.setenv("ENABLE_PLAYWRIGHT_RENDERING", "false")
     clear_settings_cache()
     yield
     clear_settings_cache()
@@ -848,3 +849,530 @@ def test_media_upload_returns_the_public_source_url(monkeypatch):
     )
     assert result["ok"] is True
     assert result["source_url"].endswith("/wp-content/a.png")
+
+
+def test_site_url_strips_wp_admin_and_wp_json():
+    """Pasting the login screen or the REST index must not become the API base."""
+    assert wordpress.normalize_site_url("https://clicktrends.com.au/wp-admin/") == "https://clicktrends.com.au"
+    assert wordpress.normalize_site_url("https://clicktrends.com.au/wp-json/wp/v2") == "https://clicktrends.com.au"
+    assert wordpress.normalize_site_url("clicktrends.com.au/wp-login.php") == "https://clicktrends.com.au"
+    # A subdirectory install is a real WordPress root and must be kept.
+    assert wordpress.normalize_site_url("https://example.com/blog/wp-admin") == "https://example.com/blog"
+
+
+def test_verify_finds_rest_root_when_pasted_url_404s(monkeypatch):
+    """The WordPress app connects because it discovers the origin. So do we."""
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if request.url.path == "/wp-json/wp/v2/users/me":
+            return httpx.Response(
+                200,
+                json={"id": 1, "name": "Ada", "slug": "ada", "capabilities": {"publish_posts": True}},
+            )
+        return httpx.Response(404, json={"code": "rest_no_route"})
+
+    mock_wp(monkeypatch, handler)
+    conn = WordPressConnection(
+        base_url="https://example.com/services/seo/",
+        username="editor",
+        app_password="abcd efgh",
+    )
+    result = asyncio.run(wordpress.verify_connection(conn))
+    assert result["ok"] is True
+    assert result["base_url"] == "https://example.com"
+    assert result["user"] == "Ada"
+    assert result["capabilities_publish"] is True
+    assert any("/services/seo/wp-json/wp/v2/users/me" in url for url in seen)
+    assert any(
+        url.split("?", 1)[0].endswith("/wp-json/wp/v2/users/me") and "/services/" not in url
+        for url in seen
+    )
+
+
+_XMLRPC_OK = """<?xml version="1.0"?>
+<methodResponse><params><param><value><struct>
+<member><name>isAdmin</name><value><boolean>1</boolean></value></member>
+<member><name>blogid</name><value><string>1</string></value></member>
+<member><name>blogName</name><value><string>Click Trends</string></value></member>
+</struct></value></param></params></methodResponse>"""
+
+_XMLRPC_PROFILE = """<?xml version="1.0"?>
+<methodResponse><params><param><value><struct>
+<member><name>display_name</name><value><string>Ada</string></value></member>
+<member><name>roles</name><value><array><data><value><string>editor</string></value></data></array></value></member>
+</struct></value></param></params></methodResponse>"""
+
+_XMLRPC_DENIED = """<?xml version="1.0"?>
+<methodResponse><fault><value><struct>
+<member><name>faultCode</name><value><int>403</int></value></member>
+<member><name>faultString</name><value><string>Incorrect username or password.</string></value></member>
+</struct></value></fault></methodResponse>"""
+
+
+def test_verify_requests_edit_context_so_capabilities_are_returned(monkeypatch):
+    """Without context=edit WordPress omits capabilities and the app false-blocks publish."""
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"id": 2, "name": "Ada", "slug": "ada", "capabilities": {"publish_pages": True}},
+        )
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is True
+    assert result["capabilities_publish"] is True
+    assert any("context=edit" in url for url in seen)
+
+
+def test_missing_capabilities_are_unknown_not_a_denial(monkeypatch):
+    def handler(request):
+        return httpx.Response(200, json={"id": 2, "name": "Ada", "slug": "ada"})
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is True
+    assert result["capabilities_publish"] is None
+
+
+def test_write_falls_back_to_xmlrpc_when_rest_header_is_dropped(monkeypatch):
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            body = request.content.decode()
+            if "wp.newPost" in body or "wp.editPost" in body:
+                return httpx.Response(
+                    200,
+                    text='<?xml version="1.0"?><methodResponse><params><param><value><string>44</string></value></param></params></methodResponse>',
+                    headers={"content-type": "text/xml"},
+                )
+            if "wp.getPosts" in body:
+                return httpx.Response(
+                    200,
+                    text='<?xml version="1.0"?><methodResponse><params><param><value><array><data></data></array></value></param></params></methodResponse>',
+                    headers={"content-type": "text/xml"},
+                )
+            return httpx.Response(
+                200,
+                text='<?xml version="1.0"?><methodResponse><params><param><value><struct><member><name>post_id</name><value><string>44</string></value></member><member><name>post_name</name><value><string>s</string></value></member><member><name>post_status</name><value><string>draft</string></value></member></struct></value></param></params></methodResponse>',
+                headers={"content-type": "text/xml"},
+            )
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in."},
+        )
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(
+        wordpress.upsert_object(CONN, title="T", content_html="<p>x</p>", slug="s")
+    )
+    assert result["ok"] is True
+    assert result["transport"] == "xmlrpc"
+    assert result["post_id"] == 44
+
+
+def test_verify_uses_xmlrpc_when_rest_header_is_dropped(monkeypatch):
+    """Cloudflare/SiteGround returns rest_not_logged_in even with a valid password."""
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            body = request.content.decode()
+            if "wp.getProfile" in body:
+                return httpx.Response(200, text=_XMLRPC_PROFILE, headers={"content-type": "text/xml"})
+            return httpx.Response(200, text=_XMLRPC_OK, headers={"content-type": "text/xml"})
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in.", "data": {"status": 401}},
+        )
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is True
+    assert result["auth_transport"] == "xmlrpc"
+    assert result["user"] == "Ada"
+    assert result["capabilities_publish"] is True
+    assert result["base_url"] == "https://example.com"
+
+
+def test_xmlrpc_bad_password_is_not_reported_as_a_missing_header(monkeypatch):
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            return httpx.Response(200, text=_XMLRPC_DENIED, headers={"content-type": "text/xml"})
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in.", "data": {"status": 401}},
+        )
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is False
+    assert "username or password" in result["error"]
+
+
+def test_verify_retries_xmlrpc_after_waf_challenge(monkeypatch):
+    """SiteGround answers 202 (bot check) then lets the WordPress-app XML-RPC through."""
+    posts = {"n": 0}
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            posts["n"] += 1
+            if posts["n"] == 1:
+                return httpx.Response(202, text="<html>challenge</html>", headers={"content-type": "text/html"})
+            body = request.content.decode()
+            if "wp.getProfile" in body:
+                return httpx.Response(200, text=_XMLRPC_PROFILE, headers={"content-type": "text/xml"})
+            return httpx.Response(200, text=_XMLRPC_OK, headers={"content-type": "text/xml"})
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in.", "data": {"status": 401}},
+        )
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is True
+    assert result["auth_transport"] == "xmlrpc"
+    assert posts["n"] >= 2
+
+
+def test_verify_explains_persistent_waf_challenge(monkeypatch):
+    async def no_browser(url, headers, body):
+        return {
+            "ok": False,
+            "fault_code": 202,
+            "fault_string": "xmlrpc_blocked",
+            "attempted_url": url,
+            "waf_challenge": True,
+        }
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            return httpx.Response(202, text="<html>challenge</html>", headers={"content-type": "text/html"})
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in.", "data": {"status": 401}},
+        )
+
+    monkeypatch.setattr(wordpress, "_xmlrpc_post_via_chromium", no_browser)
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is False
+    assert result["error"] == "xmlrpc_blocked"
+    assert "bot check" in (result.get("detail") or "").lower()
+    assert "202" in (result.get("detail") or "")
+
+
+def test_verify_uses_chromium_when_httpx_stays_on_waf(monkeypatch):
+    calls = {"n": 0}
+
+    async def chromium(url, headers, body):
+        calls["n"] += 1
+        xml = _XMLRPC_PROFILE if "wp.getProfile" in body else _XMLRPC_OK
+        parsed = wordpress._parse_xmlrpc(xml)
+        parsed["attempted_url"] = url
+        return parsed
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            return httpx.Response(202, text="<html>challenge</html>", headers={"content-type": "text/html"})
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in.", "data": {"status": 401}},
+        )
+
+    monkeypatch.setattr(wordpress, "_xmlrpc_post_via_chromium", chromium)
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is True
+    assert result["auth_transport"] == "xmlrpc"
+    assert calls["n"] >= 1
+
+
+def test_verify_chromium_runs_off_the_uvicorn_event_loop(monkeypatch):
+    """Windows uvicorn uses SelectorEventLoop — Chromium must run in a child process."""
+    from app.config import clear_settings_cache
+
+    monkeypatch.setenv("ENABLE_PLAYWRIGHT_RENDERING", "true")
+    clear_settings_cache()
+
+    class _FakeChromium:
+        def __init__(self, *, user_agent: str = ""):
+            self.user_agent = user_agent
+
+        def post_xmlrpc(self, url, headers, body, origin=None, timeout=45.0):
+            xml = _XMLRPC_PROFILE if "wp.getProfile" in str(body) else _XMLRPC_OK
+            return 200, xml
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(wordpress, "ChromiumSession", _FakeChromium)
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            return httpx.Response(202, text="<html>challenge</html>", headers={"content-type": "text/html"})
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in.", "data": {"status": 401}},
+        )
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is True
+    assert result["auth_transport"] == "xmlrpc"
+
+
+def test_verify_explains_chromium_launch_failure(monkeypatch):
+    async def boom(url, headers, body):
+        return {
+            "ok": False,
+            "fault_code": 202,
+            "fault_string": "xmlrpc_blocked",
+            "attempted_url": url,
+            "waf_challenge": True,
+            "chromium_error": "launch_failed",
+            "chromium_error_detail": "NotImplementedError",
+        }
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            return httpx.Response(202, text="<html>challenge</html>", headers={"content-type": "text/html"})
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in.", "data": {"status": 401}},
+        )
+
+    monkeypatch.setattr(wordpress, "_xmlrpc_post_via_chromium", boom)
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is False
+    assert "could not start" in (result.get("detail") or "").lower()
+    assert "NotImplementedError" in (result.get("detail") or "")
+
+
+def test_verify_uses_chrome_rest_when_httpx_is_challenged(monkeypatch):
+    from app.config import clear_settings_cache
+
+    monkeypatch.setenv("ENABLE_PLAYWRIGHT_RENDERING", "true")
+    clear_settings_cache()
+
+    class _FakeChromium:
+        def __init__(self, *, user_agent: str = ""):
+            self.user_agent = user_agent
+
+        def rest_get(self, url, headers, origin=None, timeout=90.0):
+            assert "users/me" in url
+            assert "Authorization" in headers
+            return 200, json.dumps(
+                {"id": 1, "name": "Ada", "slug": "ada", "capabilities": {"publish_posts": True}}
+            )
+
+        def post_xmlrpc(self, *args, **kwargs):
+            raise AssertionError("xmlrpc must not run after Chrome REST succeeds")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(wordpress, "ChromiumSession", _FakeChromium)
+
+    def handler(request):
+        return httpx.Response(202, text="<html>challenge</html>", headers={"content-type": "text/html"})
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN, use_browser=True))
+    assert result["ok"] is True
+    assert result["user"] == "Ada"
+    assert result["auth_transport"] == "rest"
+
+
+def test_verify_explains_chromium_socket_hang_up(monkeypatch):
+    async def boom(url, headers, body):
+        return {
+            "ok": False,
+            "fault_code": 202,
+            "fault_string": "xmlrpc_blocked",
+            "attempted_url": url,
+            "waf_challenge": True,
+            "chromium_error": "request_failed",
+            "chromium_error_detail": "APIRequestContext.post: socket hang up",
+        }
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/xmlrpc.php"):
+            return httpx.Response(202, text="<html>challenge</html>", headers={"content-type": "text/html"})
+        return httpx.Response(
+            401,
+            json={"code": "rest_not_logged_in", "message": "You are not currently logged in.", "data": {"status": 401}},
+        )
+
+    monkeypatch.setattr(wordpress, "_xmlrpc_post_via_chromium", boom)
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is False
+    detail = (result.get("detail") or "").lower()
+    assert "restart the api" not in detail
+    assert "xmlrpc" in detail
+    assert "socket hang up" in (result.get("detail") or "")
+
+
+def test_rest_login_uses_wordpress_app_user_agent(monkeypatch):
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(request.headers.get("user-agent") or "")
+        return httpx.Response(
+            200,
+            json={"id": 1, "name": "Ada", "slug": "ada", "capabilities": {"publish_posts": True}},
+        )
+
+    mock_wp(monkeypatch, handler)
+    result = asyncio.run(wordpress.verify_connection(CONN))
+    assert result["ok"] is True
+    assert seen
+    assert seen[0].startswith("WordPress/")
+    assert "Chrome" not in seen[0]
+
+
+def _xml_post(*, post_id: str, slug: str, title: str, content: str, status: str, post_type: str) -> str:
+    return f"""<?xml version="1.0"?>
+<methodResponse><params><param><value><struct>
+<member><name>post_id</name><value><string>{post_id}</string></value></member>
+<member><name>post_title</name><value><string>{title}</string></value></member>
+<member><name>post_content</name><value><string>{content}</string></value></member>
+<member><name>post_name</name><value><string>{slug}</string></value></member>
+<member><name>post_status</name><value><string>{status}</string></value></member>
+<member><name>post_type</name><value><string>{post_type}</string></value></member>
+<member><name>link</name><value><string>https://example.com/{slug}/</string></value></member>
+</struct></value></param></params></methodResponse>"""
+
+
+def _xml_list(inner_struct: str = "") -> str:
+    data = f"<value>{inner_struct}</value>" if inner_struct else ""
+    return (
+        '<?xml version="1.0"?><methodResponse><params><param><value>'
+        f"<array><data>{data}</data></array></value></param></params></methodResponse>"
+    )
+
+
+def test_xmlrpc_transport_creates_a_page_not_a_post(monkeypatch):
+    """Service URLs must be WordPress pages, written on the login path that works."""
+    methods: list[str] = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        body = request.content.decode()
+        if "wp.getPosts" in body:
+            methods.append("wp.getPosts")
+            return httpx.Response(200, text=_xml_list())
+        if "wp.newPost" in body:
+            methods.append("wp.newPost")
+            assert ">page</string>" in body
+            assert "local-seo" in body
+            return httpx.Response(200, text=(
+                '<?xml version="1.0"?><methodResponse><params><param><value>'
+                "<string>44</string></value></param></params></methodResponse>"
+            ))
+        if "wp.getPost" in body:
+            methods.append("wp.getPost")
+            return httpx.Response(
+                200,
+                text=_xml_post(
+                    post_id="44",
+                    slug="local-seo",
+                    title="Local SEO",
+                    content="Hello service page",
+                    status="draft",
+                    post_type="page",
+                ),
+            )
+        return httpx.Response(200, text=_xml_list())
+
+    mock_wp(monkeypatch, handler)
+    conn = WordPressConnection(
+        base_url="https://example.com",
+        username="editor",
+        app_password="app-pw-1234",
+        auth_transport="xmlrpc",
+    )
+    result = asyncio.run(wordpress.upsert_object(
+        conn,
+        title="Local SEO",
+        content_html="<p>Hello service page</p>",
+        slug="local-seo",
+        post_type="pages",
+        status="draft",
+    ))
+    assert result["ok"] is True
+    assert result["post_id"] == 44
+    assert result["post_type"] == "pages"
+    assert result["status"] == "draft"
+    assert result["transport"] == "xmlrpc"
+    assert "wp.newPost" in methods
+    assert "wp.editPost" not in methods
+    blob = json.dumps(result)
+    assert "app-pw-1234" not in blob
+
+
+def test_xmlrpc_transport_updates_an_existing_page(monkeypatch):
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        body = request.content.decode()
+        if "wp.getPosts" in body and ">page</string>" in body:
+            return httpx.Response(
+                200,
+                text=_xml_list(
+                    "<struct>"
+                    "<member><name>post_id</name><value><string>9</string></value></member>"
+                    "<member><name>post_name</name><value><string>about</string></value></member>"
+                    "<member><name>post_type</name><value><string>page</string></value></member>"
+                    "<member><name>post_status</name><value><string>draft</string></value></member>"
+                    "<member><name>post_title</name><value><string>About</string></value></member>"
+                    "</struct>"
+                ),
+            )
+        if "wp.editPost" in body:
+            assert ">page</string>" in body
+            assert "<int>9</int>" in body
+            return httpx.Response(
+                200,
+                text='<?xml version="1.0"?><methodResponse><params><param><value><boolean>1</boolean></value></param></params></methodResponse>',
+            )
+        if "wp.getPost" in body:
+            return httpx.Response(
+                200,
+                text=_xml_post(
+                    post_id="9",
+                    slug="about",
+                    title="About",
+                    content="Updated about page",
+                    status="draft",
+                    post_type="page",
+                ),
+            )
+        return httpx.Response(200, text=_xml_list())
+
+    mock_wp(monkeypatch, handler)
+    conn = WordPressConnection(
+        base_url="https://example.com",
+        username="editor",
+        app_password="app-pw-1234",
+        auth_transport="xmlrpc",
+    )
+    result = asyncio.run(wordpress.upsert_object(
+        conn,
+        title="About",
+        content_html="<p>Updated about page</p>",
+        slug="about",
+        post_type="pages",
+        status="publish",
+    ))
+    assert result["ok"] is True
+    assert result["action"] == "updated"
+    assert result["post_id"] == 9
+    assert result["post_type"] == "pages"
+    assert result["status"] == "draft"
+    assert result["downgraded"] is True

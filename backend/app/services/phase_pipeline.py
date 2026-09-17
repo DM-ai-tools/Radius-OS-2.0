@@ -1,36 +1,19 @@
 """Cross-phase pipeline definitions and handoff validation.
 
-PHASE 3 — SITE MAP (app.services.site_sitemap)
-└── URL inventory: hierarchy, page types, parents, canonicals, overlaps
-        ↓  (source of truth for the existing topical structure)
-PHASE 5 — SEARCH DEMAND & KEYWORD RESEARCH
-├── Keyword Research
-├── Keyword Cleaning / Relevance Filtering
-├── Keyword Clustering (+ intent / funnel)
-├── Sitemap cluster classification (app.services.topic_classification):
-│     existing / needs-optimization / needs-consolidation / new /
-│     supporting / cannibalization-risk / out-of-scope / uncertain,
-│     each with a reason, a confidence, and its supporting evidence
-├── Topic Creation (new clusters only)
-└── Search Intent / Cluster Understanding
-        ↓
-PHASE 6 — SEO STRATEGY & INFORMATION ARCHITECTURE
-├── Cluster → URL Mapping (executes the Phase 5 topic decision)
-├── Existing URL matching
-├── New URL identification
-├── Site structure
-└── Cannibalization decisions (duplicate proposals + URL collisions)
-        ↓
-PHASE 8/9 — CONTENT PLANNING
-├── Existing content → audit/optimization
-└── New content → page planning
-        ↓
-PHASE 11 — ON-PAGE SEO
-├── Title
-├── H1/H2
-├── Meta
-├── Content
-└── Internal Linking
+Documented phase numbers (docs/architecture, v1.9). Execution order inside Phase 6
+is URL mapping, then titles and calendar — not the reverse.
+
+PHASE 3 — WEBSITE AUDIT + SITE MAP
+PHASE 4 — COMPETITORS
+PHASE 5 — KEYWORDS (find, classify, cluster)
+PHASE 6a — URL MAPPING (optimize existing or create new)
+PHASE 6b — TITLES + CONTENT CALENDAR (new pages)
+PHASE 7 — TECHNICAL SEO
+PHASE 8 — EXISTING CONTENT AUDIT
+PHASE 9 — LOCK THE SELECTED PAGE
+PHASE 10 — DRAFT, KEYWORD CLUSTER IN THE COPY, PREVIEW
+PHASE 11 — ON-PAGE PACKAGE + INTERNAL LINKING PLAN
+PHASE 12 — PUBLISH THROUGH THE CONNECTED WORDPRESS ACCOUNT
 """
 
 from __future__ import annotations
@@ -68,12 +51,11 @@ PHASE_11_STAGES = [
 ]
 
 PHASE_CHAIN = {
-    "phase_5": {"key": "search_demand", "stages": PHASE_5_STAGES, "next": "content_strategy"},
+    "phase_5": {"key": "search_demand", "stages": PHASE_5_STAGES, "next": "site_architecture"},
     "phase_6": {
         "key": "site_architecture",
         "stages": PHASE_6_STAGES,
-        "also": ["content_strategy"],
-        "next": "content_planning",
+        "next": "content_strategy",
     },
     "phase_8_9": {"key": "content_planning", "stages": PHASE_8_9_STAGES, "next": "content_production"},
     "phase_11": {"key": "on_page_seo", "stages": PHASE_11_STAGES, "next": "publishing"},

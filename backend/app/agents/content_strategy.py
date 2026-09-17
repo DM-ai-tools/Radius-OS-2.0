@@ -38,7 +38,7 @@ async def run_content_strategy(
             "content_strategy",
             pack_notes=[
                 f"demand={profile.search_demand_status}",
-                f"audit={profile.content_audit_status}",
+                f"url_map={profile.site_architecture_status}",
             ],
         )
     )
@@ -54,13 +54,25 @@ async def run_content_strategy(
         )
         return events
 
+    architecture = dict(profile.site_architecture_summary or {})
+    has_map = bool(architecture.get("final_url_map") or architecture.get("target_url_tree"))
+    if profile.site_architecture_status != "complete" and not has_map:
+        events.extend(
+            blocked_events(
+                "content_strategy",
+                "URL mapping must decide optimize-versus-create before titles and the calendar.",
+                route_to="site_architecture",
+            )
+        )
+        return events
+
     profile.seo_strategy_status = "in_progress"
     events.append(
         {
             "type": "system_notice",
             "content": (
-                "Building content strategy — topical authority, gaps, priority queue, "
-                "and 12-week calendar from Phase 5 + competitors…"
+                "Writing titles for new pages and building the content calendar "
+                "from the URL map (existing pages stay on the optimize path)…"
             ),
         }
     )

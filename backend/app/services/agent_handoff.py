@@ -11,15 +11,15 @@ from __future__ import annotations
 
 from typing import Any
 
-# Linear default chain (status-aware overrides in next_agent_for)
+# Linear default chain. URL mapping happens with the keyword pack, before titles/calendar.
 PHASE_ORDER: list[str] = [
     "discovery_agent",
     "tracking_access_agent",
     "website_situation_agent",
     "competitor_market_agent",
     "search_demand",
-    "content_strategy",
     "site_architecture",
+    "content_strategy",
     "technical_seo",
     "content_audit",
     "content_planning",
@@ -47,17 +47,17 @@ AGENT_LABELS: dict[str, str] = {
 # Chip / chat prompts for the next agent
 NEXT_PROMPTS: dict[str, str] = {
     "tracking_access_agent": "Run tracking check",
-    "website_situation_agent": "Run website situation analysis — SEO audit every page",
-    "competitor_market_agent": "Refresh competitor scan",
-    "search_demand": "Run keyword research / search demand",
-    "content_audit": "Run existing content audit",
-    "content_strategy": "Run content strategy and content calendar",
-    "site_architecture": "Run site architecture and click-depth audit",
+    "website_situation_agent": "Run website audit and sitemap",
+    "competitor_market_agent": "Fetch competitors",
+    "search_demand": "Find, classify, and cluster keywords",
+    "site_architecture": "Map clusters to URLs — optimize existing or create new",
+    "content_strategy": "Decide titles for new pages and build the content calendar",
     "technical_seo": "Run technical SEO audit",
-    "content_planning": "Merge strategy, architecture, and audit into a locked page roadmap",
-    "content_production": "Run content production briefs and drafts",
-    "on_page_seo": "Run on-page SEO package",
-    "publishing": "Run publishing checklist and IndexNow preview",
+    "content_audit": "Score existing pages marked for optimization",
+    "content_planning": "Lock the selected page before drafting",
+    "content_production": "Write the full draft for the next priority topic and show the preview",
+    "on_page_seo": "Build the on-page package and internal linking plan",
+    "publishing": "Publish through the connected WordPress account using the internal linking plan",
 }
 
 # What each agent must have consumed (for start-of-run notices)
@@ -66,9 +66,9 @@ CONSUMES: dict[str, list[str]] = {
     "website_situation_agent": ["tracking_access_agent"],
     "competitor_market_agent": ["discovery_agent", "website_situation_agent"],
     "search_demand": ["discovery_agent", "competitor_market_agent", "website_situation_agent"],
-    "content_strategy": ["search_demand", "competitor_market_agent"],
-    "site_architecture": ["content_strategy", "search_demand"],
-    "technical_seo": ["site_architecture", "website_situation_agent"],
+    "site_architecture": ["search_demand", "website_situation_agent"],
+    "content_strategy": ["site_architecture", "search_demand"],
+    "technical_seo": ["content_strategy", "site_architecture", "website_situation_agent"],
     "content_audit": ["website_situation_agent", "search_demand", "technical_seo"],
     "content_planning": ["content_strategy", "site_architecture", "content_audit"],
     "content_production": ["content_planning"],
@@ -86,7 +86,7 @@ def next_agent_for(
     *,
     phase_statuses: dict[str, str] | None = None,
 ) -> str | None:
-    """Pick the next agent after approve (v1.9: demand → strategy → IA → technical → audit)."""
+    """Next agent: demand → URL mapping → titles/calendar → technical → draft → WordPress."""
     _ = phase_statuses
 
     if agent_key == "publishing":

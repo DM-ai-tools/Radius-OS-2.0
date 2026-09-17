@@ -31,7 +31,7 @@ const SEQUENCE = [
   {
     n: "02",
     title: "Search demand",
-    body: "Keyword clusters from live Ahrefs / DataForSEO metrics — scored into best, evergreen, trend, and avoid. Volumes are never invented.",
+    body: "Keyword clusters from live SEMrush / DataForSEO metrics — scored into best, evergreen, trend, and avoid. Volumes are never invented.",
   },
   {
     n: "03",

@@ -69,6 +69,16 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
     payload.issues_by_category && typeof payload.issues_by_category === "object"
       ? (payload.issues_by_category as Record<string, unknown[]>)
       : null;
+  const auditCoverage =
+    payload.audit_coverage && typeof payload.audit_coverage === "object"
+      ? (payload.audit_coverage as {
+          summary?: Record<string, unknown>;
+          groups?: Array<{
+            group: string;
+            fields?: Array<{ field: string; status: string; note?: string }>;
+          }>;
+        })
+      : null;
   const auditComparison =
     payload.audit_comparison && typeof payload.audit_comparison === "object"
       ? (payload.audit_comparison as Record<string, unknown>)
@@ -172,6 +182,40 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
           Ahrefs Site Audit unavailable — {String(ahrefsAudit?.reason || "not configured")}. Crawl-based
           audit used instead; issue URL counts may be limited.
         </p>
+      ) : null}
+
+      {auditCoverage ? (
+        <>
+          <h4 style={{ marginBottom: 6 }}>Targeting coverage</h4>
+          <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
+            {String(auditCoverage.summary?.coverage_pct ?? "—")}% of checklist fields measured
+            {" · "}
+            {String(auditCoverage.summary?.with_issues ?? 0)} with issues
+            {" · "}
+            {String(auditCoverage.summary?.not_measured ?? 0)} not measured
+          </p>
+          <div style={{ display: "grid", gap: 8, marginBottom: 14 }}>
+            {(auditCoverage.groups || []).map((group) => (
+              <div key={group.group} style={{ border: "1px solid var(--line)", borderRadius: 8, padding: 8 }}>
+                <strong style={{ fontSize: 12 }}>{group.group}</strong>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                  {(group.fields || []).map((field) => (
+                    <span
+                      key={`${group.group}-${field.field}`}
+                      title={field.note || ""}
+                      className={`severity ${
+                        field.status === "issue" ? "critical" : field.status === "checked" ? "info" : "warning"
+                      }`}
+                      style={{ fontSize: 11 }}
+                    >
+                      {field.field}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
       ) : null}
 
       {severitySummary ? (

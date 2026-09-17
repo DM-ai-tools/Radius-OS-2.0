@@ -99,6 +99,8 @@ def test_slim_memory_packs_trim():
     assert plan.get("locked") is True
     assert plan.get("pages")
     assert plan.get("roadmap")
+    assert plan["pages"][0].get("action") == "create"
+    assert plan["pages"][0].get("keyword") == "seo"
 
 
 # --- Phase 6a -> 9: funnel tag must not be dropped on the roadmap join --------------

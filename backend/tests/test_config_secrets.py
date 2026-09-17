@@ -29,6 +29,37 @@ def test_rejects_known_bad_secret_key(bad_key, monkeypatch):
         Settings(_env_file=None)
 
 
+def test_production_uses_railway_public_domain_when_urls_are_localhost(monkeypatch):
+    monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "radius-os.up.railway.app")
+    monkeypatch.setenv("SECRET_KEY", "a-fine-secret-key-for-this-test-only")
+    monkeypatch.setenv("ENCRYPTION_KEY", "a-fine-encryption-key-for-this-test-only")
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        frontend_url="http://localhost:5173",
+        oauth_redirect_uri="http://localhost:8000/api/v1/oauth/callback",
+        cors_origins="http://localhost:5173,http://127.0.0.1:5173",
+    )
+    assert settings.frontend_url == "https://radius-os.up.railway.app"
+    assert settings.oauth_redirect_uri == "https://radius-os.up.railway.app/api/v1/oauth/callback"
+    assert settings.cors_origins == "https://radius-os.up.railway.app"
+
+
+def test_explicit_production_url_is_not_replaced_by_railway_domain(monkeypatch):
+    monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "radius-os.up.railway.app")
+    monkeypatch.setenv("SECRET_KEY", "a-fine-secret-key-for-this-test-only")
+    monkeypatch.setenv("ENCRYPTION_KEY", "a-fine-encryption-key-for-this-test-only")
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        frontend_url="https://app.example.com",
+        oauth_redirect_uri="https://app.example.com/api/v1/oauth/callback",
+        cors_origins="https://app.example.com",
+    )
+    assert settings.frontend_url == "https://app.example.com"
+    assert settings.oauth_redirect_uri == "https://app.example.com/api/v1/oauth/callback"
+
+
 def test_accepts_a_real_looking_key(monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "a-fine-secret-key-for-this-test-only")
     monkeypatch.setenv("ENCRYPTION_KEY", "a-fine-encryption-key-for-this-test-only")

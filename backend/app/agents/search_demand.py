@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.prompts import load_skill, load_skill_file
 from app.config import get_settings
-from app.integrations import ahrefs, dataforseo
+from app.integrations import dataforseo, semrush
 from app.integrations.llm import extract_domain
 from app.logging_config import get_logger
 from app.models import (
@@ -310,13 +310,6 @@ async def run_search_demand(
     )
     profile.website_situation_summary = website
     competitive = dict(profile.competitive_landscape_summary or {})
-    # Fresh crawl seeded from the Phase 3 site sitemap (must exist first).
-    live_scan_task = asyncio.ensure_future(
-        scan_live_site(
-            client.primary_url,
-            seed_urls=sitemap_urls(website),
-        )
-    )
     cdd = await _load_cdd_fields(db, client.id)
 
     has_cdd = bool(
@@ -335,7 +328,6 @@ async def run_search_demand(
                 route_to="discovery_agent",
             )
         )
-        live_scan_task.cancel()
         return events
 
     events.extend(
@@ -447,7 +439,22 @@ async def run_search_demand(
 
     prioritization = dict(commercial.get("service_prioritization") or {})
     if not is_prioritization_confirmed(prioritization):
-        competitor_trees = await discover_competitor_service_trees(competitors)
+        try:
+            competitor_trees = await asyncio.wait_for(
+                discover_competitor_service_trees(
+                    competitors,
+                    max_competitors=3,
+                    max_urls_each=20,
+                ),
+                timeout=45,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "competitor_service_trees_timeout",
+                client_id=str(client.id),
+                competitors=len(competitors),
+            )
+            competitor_trees = []
         pack = build_prioritization_pack(
             client_name=client.display_name,
             services=services,
@@ -484,7 +491,6 @@ async def run_search_demand(
                 "payload": {"search_demand_status": "awaiting_service_selection"},
             }
         )
-        live_scan_task.cancel()
         return events
 
     competitor_brand_full, competitor_brand_tokens = competitor_brand_blocklist(
@@ -575,6 +581,8 @@ async def run_search_demand(
         n = t.lower()
         if not t or len(n) < 2 or is_stale_year_keyword(n):
             return
+        if len(t.split()) > 6:
+            return
         # Never seed on a competitor's brand name — seeds describe the client.
         if _is_competitor_brand(t):
             return
@@ -633,7 +641,7 @@ async def run_search_demand(
     )
 
     services, seed_targets = apply_service_selection(services, seed_targets, prioritization)
-    seed_roots = [r for r in seed_roots if r.lower() in seed_targets]
+    seed_roots = [r for r in seed_roots if r.lower() in seed_targets][:8]
 
     service_catalog = build_client_service_catalog(
         services=services,
@@ -641,8 +649,23 @@ async def run_search_demand(
         page_seeds=_page_target_seeds(website),
     )
     trees = list(prioritization.get("competitor_trees") or [])
-    if not trees:
-        trees = await discover_competitor_service_trees(competitors)
+    if not trees and not prioritization.get("service_catalog"):
+        try:
+            trees = await asyncio.wait_for(
+                discover_competitor_service_trees(
+                    competitors,
+                    max_competitors=3,
+                    max_urls_each=20,
+                ),
+                timeout=45,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "competitor_service_trees_timeout",
+                client_id=str(client.id),
+                stage="post_selection",
+            )
+            trees = []
     if trees:
         service_catalog = merge_competitor_subservices(
             service_catalog,
@@ -661,6 +684,12 @@ async def run_search_demand(
         prioritization=prioritization,
         service_catalog=service_catalog,
     )
+    seed_roots = [r for r in seed_roots if len(str(r).split()) <= 6][:8]
+    seed_targets = {
+        k: v
+        for k, v in seed_targets.items()
+        if any(str(r).lower() == k for r in seed_roots)
+    }
 
     from app.services.keyword_pool import (
         resolve_client_pool_target,
@@ -703,7 +732,7 @@ async def run_search_demand(
         seed_roots,
         country=country,
         min_volume=10,
-        max_seeds=pool_limits["max_seeds"],
+        max_seeds=min(8, pool_limits["max_seeds"]),
         limit_per_mode=pool_limits["limit_per_mode"],
         seed_targets=seed_targets,
         location_code=labs_location_code,
@@ -776,7 +805,7 @@ async def run_search_demand(
             {
                 "type": "system_notice",
                 "content": (
-                    "Ahrefs Keywords Explorer / DataForSEO Labs are unavailable on this "
+                    "SEMrush / DataForSEO Labs are unavailable on this "
                     "account (plan or billing). Coverage fallback supplied ≥20 keywords "
                     "per service seed so the Phase 5 report stays usable."
                 ),
@@ -784,8 +813,8 @@ async def run_search_demand(
         )
 
     if keyword_dataset or seed_clusters:
-        if "ahrefs" not in providers_used:
-            providers_used.append("ahrefs")
+        if "semrush" not in providers_used:
+            providers_used.append("semrush")
         for row in keyword_dataset:
             if is_stale_year_keyword(str(row.get("keyword") or "")):
                 continue
@@ -798,7 +827,7 @@ async def run_search_demand(
                     "cpc": row.get("cpc"),
                     "intent": row.get("intent"),
                     "parent_topic": row.get("parent_topic"),
-                    "source": row.get("source") or "ahrefs",
+                    "source": row.get("source") or "semrush",
                     "match_class": row.get("match_class"),
                     "seed": row.get("seed"),
                     "target": row.get("target"),
@@ -827,7 +856,7 @@ async def run_search_demand(
 
     # Client + competitor organic keywords (gap signals)
     if domain:
-        org, e3 = await ahrefs.organic_keywords(domain, country=country, limit=50)
+        org, e3 = await semrush.organic_keywords(domain, country=country, limit=50)
         provider_errors.extend(e3)
         client_kw_map = {
             str(r.get("keyword") or "").lower(): r.get("position")
@@ -841,7 +870,7 @@ async def run_search_demand(
             r["client_position"] = r.get("position")
             pending_org.append(r)
         kept, _excl, audit = filter_relevant_keywords(
-            pending_org, relevance_ctx, source_label="ahrefs_organic"
+            pending_org, relevance_ctx, source_label="semrush_organic"
         )
         cleaning_audits.append(audit)
         ahrefs_rows.extend(kept)
@@ -849,7 +878,7 @@ async def run_search_demand(
         client_kw_map = {}
 
     for cd in competitor_domains[:4]:
-        corg, e4 = await ahrefs.organic_keywords(cd, country=country, limit=40)
+        corg, e4 = await semrush.organic_keywords(cd, country=country, limit=40)
         provider_errors.extend(e4)
         pending_comp: list[dict[str, Any]] = []
         for r in corg:
@@ -861,7 +890,7 @@ async def run_search_demand(
             r["competitor_domain"] = cd
             pending_comp.append(r)
         kept, _excl, audit = filter_relevant_keywords(
-            pending_comp, relevance_ctx, source_label="ahrefs_competitor"
+            pending_comp, relevance_ctx, source_label="semrush_competitor"
         )
         cleaning_audits.append(audit)
         ahrefs_rows.extend(kept)
@@ -1216,17 +1245,38 @@ async def run_search_demand(
         int(group.get("seed_count") or 0) for group in service_clusters
     )
 
-    try:
-        live_scan = await live_scan_task
-    except Exception as exc:  # noqa: BLE001
-        log.warning("live_site_scan_failed", client_id=str(client.id), error=str(exc))
-        live_scan = {"pages": [], "page_count": 0, "source_counts": {}, "scanned_at": None}
-
-    # Sitemap FIRST inventory + live enrich → classify existing vs new topics
+    # Phase 3 sitemap is the inventory. Only recrawl if it is empty, and cap that
+    # recrawl so keyword research cannot spend the whole turn fetching HTML.
     sm_pages = sitemap_pages(website)
+    live_scan: dict[str, Any] = {
+        "pages": sm_pages,
+        "page_count": len(sm_pages),
+        "source_counts": {"sitemap": len(sm_pages)},
+        "scanned_at": None,
+        "source": "phase3_sitemap",
+    }
+    if not sm_pages:
+        try:
+            live_scan = await asyncio.wait_for(
+                scan_live_site(
+                    client.primary_url,
+                    seed_urls=sitemap_urls(website),
+                    max_pages=12,
+                    use_playwright=False,
+                    discover_more=False,
+                ),
+                timeout=45,
+            )
+        except asyncio.TimeoutError:
+            log.warning("live_site_scan_timeout", client_id=str(client.id))
+            live_scan = {"pages": [], "page_count": 0, "source_counts": {}, "scanned_at": None}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("live_site_scan_failed", client_id=str(client.id), error=str(exc))
+            live_scan = {"pages": [], "page_count": 0, "source_counts": {}, "scanned_at": None}
+
     sitemap_classification = classify_clusters_against_sitemap(
         list(cluster_report.get("clusters") or []),
-        sitemap_pages=sm_pages,
+        sitemap_pages=sm_pages or list(live_scan.get("pages") or []),
         live_pages=list(live_scan.get("pages") or []),
         # A capped inventory means "no page covers this" was only checked
         # against part of the site — the new-topic calls get flagged, not trusted.

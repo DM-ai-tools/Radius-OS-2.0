@@ -58,7 +58,7 @@ def test_cluster_and_suggestion_items():
     issues = [
         {
             "rule_id": "A",
-            "category": "Indexability",
+            "category": "Indexation",
             "title": "Noindex",
             "severity": "High",
             "priority": 80,
@@ -70,7 +70,7 @@ def test_cluster_and_suggestion_items():
         }
     ]
     grouped = cluster_issues_by_category(issues)
-    assert "Indexability" in grouped
+    assert "Indexation" in grouped
     items = build_suggestion_items(issues)
     assert items[0]["confidence"] == "high"
     assert items[0]["status"] == "pending"

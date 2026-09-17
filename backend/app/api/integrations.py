@@ -41,6 +41,47 @@ async def _get_client(db: AsyncSession, client_id: UUID) -> Client:
     return client
 
 
+def wordpress_gate(*, stored: bool, result: dict | None = None) -> dict:
+    """Single status the Workspace and Publishing card both display.
+
+    ready: live REST check passed and the user can publish posts.
+    limited: credentials work, but the WordPress user cannot publish.
+    failed: a connection is stored, but the live check did not pass.
+    not_connected: nothing stored for this client.
+    """
+    if not stored:
+        return {
+            "state": "not_connected",
+            "label": "Not connected",
+            "ok": False,
+            "detail": "No WordPress site is saved for this client.",
+        }
+    result = result or {}
+    if not result.get("ok"):
+        return {
+            "state": "failed",
+            "label": "Connection failed",
+            "ok": False,
+            "detail": str(result.get("error") or "WordPress did not accept the saved credentials."),
+        }
+    if result.get("capabilities_publish") is False:
+        return {
+            "state": "limited",
+            "label": "Connected — cannot publish",
+            "ok": False,
+            "detail": "Credentials work, but this WordPress user cannot publish posts.",
+        }
+    return {
+        "state": "ready",
+        "label": "Connected",
+        "ok": True,
+        "detail": str(
+            (result or {}).get("detail")
+            or "Live WordPress check passed. Draft publishing is allowed."
+        ),
+    }
+
+
 @router.get("/{client_id}/integrations/wordpress")
 async def wordpress_status(
     client_id: UUID,
@@ -50,15 +91,42 @@ async def wordpress_status(
     """Connection status only — never returns the Application Password."""
     conn = await wordpress.load_connection(db, client_id)
     if not conn:
-        return {"connected": False}
+        return {"connected": False, "gate": wordpress_gate(stored=False)}
     result = await wordpress.verify_connection(conn)
+    discovered = str(result.get("auth_transport") or "")
+    discovered_url = str(result.get("base_url") or "")
+    if result.get("ok") and (
+        (discovered and discovered != conn.auth_transport)
+        or (discovered_url and discovered_url.rstrip("/") != conn.base_url.rstrip("/"))
+    ):
+        updated = WordPressConnection(
+            base_url=discovered_url or conn.base_url,
+            username=conn.username,
+            app_password=conn.app_password,
+            auth_transport=discovered or conn.auth_transport,
+        )
+        row = (
+            await db.execute(
+                select(ApiCredential).where(
+                    ApiCredential.client_id == client_id,
+                    ApiCredential.provider == CREDENTIAL_PROVIDER,
+                    ApiCredential.revoked_at.is_(None),
+                )
+            )
+        ).scalars().first()
+        if row is not None:
+            row.encrypted_token = encrypt_token(wordpress.pack_connection(updated))
+            await db.commit()
+            conn = updated
     return {
         "connected": bool(result.get("ok")),
         "base_url": conn.base_url,
         "username": conn.username,
         "wp_user": result.get("user"),
         "can_publish": result.get("capabilities_publish"),
+        "auth_transport": conn.auth_transport,
         "error": result.get("error") if not result.get("ok") else None,
+        "gate": wordpress_gate(stored=True, result=result),
     }
 
 
@@ -82,13 +150,25 @@ async def wordpress_connect(
         username=body.username.strip(),
         app_password=body.app_password.strip(),
     )
-    result = await wordpress.verify_connection(conn)
+    result = await wordpress.verify_connection(conn, use_browser=True)
     if not result.get("ok"):
-        raise HTTPException(
-            400,
-            f"Could not connect to WordPress: {result.get('error') or 'unknown error'}. "
-            "Check the site URL and that the Application Password hasn't been revoked.",
-        )
+        error = str(result.get("error") or "unknown error")
+        detail = str(result.get("detail") or "").strip()
+        attempted = result.get("attempted_url")
+        message = f"Could not connect to WordPress: {error}."
+        if detail and detail not in error:
+            message = f"{message} {detail}"
+        if attempted:
+            message = f"{message} Tried {attempted}."
+        raise HTTPException(400, message)
+    # Store the root that actually answered, not a pasted /wp-admin or page path.
+    working_url = str(result.get("base_url") or conn.base_url)
+    conn = WordPressConnection(
+        base_url=working_url,
+        username=conn.username,
+        app_password=conn.app_password,
+        auth_transport=str(result.get("auth_transport") or "rest"),
+    )
 
     prior = (
         await db.execute(
@@ -125,6 +205,7 @@ async def wordpress_connect(
         "username": conn.username,
         "wp_user": result.get("user"),
         "can_publish": result.get("capabilities_publish"),
+        "gate": wordpress_gate(stored=True, result=result),
     }
 
 
@@ -157,4 +238,4 @@ async def wordpress_disconnect(
         event_detail={},
     )
     await db.commit()
-    return {"connected": False}
+    return {"connected": False, "gate": wordpress_gate(stored=False)}

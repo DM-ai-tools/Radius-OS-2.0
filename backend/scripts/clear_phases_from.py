@@ -49,7 +49,12 @@ PHASE_CDP_FIELDS: dict[int, list[tuple[str, str]]] = {
 }
 
 PHASE_CARD_TYPES: dict[int, list[str]] = {
-    3: ["website_audit", "website_situation_report"],
+    3: [
+        "website_audit",
+        "website_situation_report",
+        "seo_audit_report",
+        "broken_link_report",
+    ],
     4: ["competitor_landscape"],
     5: ["search_demand_report"],
     6: ["content_strategy_report", "site_architecture_blueprint"],

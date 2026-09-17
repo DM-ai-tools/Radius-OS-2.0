@@ -24,7 +24,7 @@ export function statusLinesForPrompt(prompt: string): string[] {
   ) {
     return [
       "Seeding topics from Discovery & competitors…",
-      "Pulling Ahrefs + DataForSEO keyword metrics…",
+      "Pulling SEMrush + DataForSEO keyword metrics…",
       "Scoring best / evergreen / trend opportunities…",
     ];
   }

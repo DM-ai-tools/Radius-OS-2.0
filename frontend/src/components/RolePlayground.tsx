@@ -88,17 +88,17 @@ type PhaseMeta = {
 const PIPELINE: PhaseMeta[] = [
   { id: "discovery", order: 1, label: "01 · Discovery" },
   { id: "tracking", order: 2, label: "02 · Tracking" },
-  { id: "website", order: 3, label: "03 · Website" },
+  { id: "website", order: 3, label: "03 · Website audit + sitemap" },
   { id: "competitor", order: 4, label: "04 · Competitors" },
-  { id: "search_demand", order: 5, label: "05 · Search demand" },
-  { id: "seo_strategy", order: 6, label: "06a · Content strategy" },
-  { id: "site_architecture", order: 7, label: "06b · Site architecture" },
+  { id: "search_demand", order: 5, label: "05 · Keywords" },
+  { id: "site_architecture", order: 6, label: "06a · URL mapping" },
+  { id: "seo_strategy", order: 7, label: "06b · Titles & calendar" },
   { id: "technical_seo", order: 8, label: "07 · Technical SEO" },
-  { id: "content_audit", order: 9, label: "08 · Content audit" },
+  { id: "content_audit", order: 9, label: "08 · Existing content audit" },
   { id: "content_planning", order: 10, label: "09 · Content planning" },
-  { id: "content_production", order: 11, label: "10 · Content production" },
-  { id: "on_page_seo", order: 12, label: "11 · On-page SEO" },
-  { id: "publishing", order: 13, label: "12 · Publishing" },
+  { id: "content_production", order: 11, label: "10 · Draft & preview" },
+  { id: "on_page_seo", order: 12, label: "11 · On-page & linking" },
+  { id: "publishing", order: 13, label: "12 · Publish to WordPress" },
 ];
 
 const KIND_TO_ID: Record<string, string> = {
@@ -129,7 +129,7 @@ function phaseIdsForSection(sec: PlaygroundSection): string[] {
   if (t.includes("website")) ids.push("website");
   if (t.includes("competitor")) ids.push("competitor");
   if (t.includes("search demand") || t.includes("keyword")) ids.push("search_demand");
-  if (t.includes("site architecture") || (t.includes("architecture") && !t.includes("strategy"))) {
+  if (t.includes("url mapping") || t.includes("site architecture") || (t.includes("architecture") && !t.includes("strategy"))) {
     ids.push("site_architecture");
   }
   if (t.includes("technical seo")) ids.push("technical_seo");

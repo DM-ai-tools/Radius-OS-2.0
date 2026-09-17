@@ -169,36 +169,16 @@ def image_suggestions_for(
 
 
 def _content_type(intent: str, keyword: str = "") -> str:
-    kw = _norm(keyword)
-    if " vs " in kw or " versus " in kw:
-        return "comparison"
-    if kw.startswith("best ") or kw.startswith("top "):
-        return "listicle"
-    if intent == "transactional":
-        return "landing"
-    if intent == "commercial":
-        return "guide"
-    if kw.startswith("how to"):
-        return "guide"
-    return "blog"
+    """This pipeline only plans service pages — not blog posts or guides."""
+    _ = intent, keyword
+    return "service"
 
 
 def _suggested_path(keyword: str, intent: str, content_type: str) -> str:
-    """Intent-aware URL path — do not force every idea under /blog/."""
+    """New URLs are service pages. Do not invent /blog/ or /guides/."""
+    _ = intent, content_type
     slug = _slug(keyword)
-    i = (intent or "").lower()
-    ct = (content_type or "").lower()
-    if i == "transactional" or ct == "landing":
-        if any(x in _norm(keyword) for x in ("pricing", "price", "cost")):
-            return f"/pricing/{slug}/" if "pricing" not in slug else f"/{slug}/"
-        return f"/services/{slug}/"
-    if i == "commercial" or ct in ("comparison", "listicle"):
-        return f"/compare/{slug}/" if ct == "comparison" else f"/guides/{slug}/"
-    if i == "navigational":
-        return f"/{slug}/"
-    if ct == "guide":
-        return f"/guides/{slug}/"
-    return f"/blog/{slug}/"
+    return f"/services/{slug}/"
 
 
 def _cluster_volume(c: dict[str, Any]) -> Any:
@@ -810,7 +790,7 @@ def build_success_metrics(
         "organic_traffic_target": "Grow non-brand organic sessions 20–40% over 12 weeks after publishing cadence starts",
         "keywords_to_track": track,
         "content_production_kpis": [
-            "Publish at least 1 strategic article per week (12 in 12 weeks)",
+            "Publish at least 1 service page per week (12 in 12 weeks)",
             f"Ship {min(4, len(core_topics))} pillar pages in Month 1–2",
             "Internal links: every cluster page links to its pillar",
             "Track rankings for quick-win + big-bet keywords biweekly",

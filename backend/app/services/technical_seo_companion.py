@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from app.services.technical_seo_schemas import TechnicalSEOIssue, TechnicalSEOPage
+from app.services.technical_seo_schemas import TechnicalSEOIssue, TechnicalSEOPage, normalize_category
 
 MOBILE_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
@@ -321,7 +321,7 @@ def build_suggestion_items(
 def cluster_issues_by_category(issues: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for issue in issues:
-        cat = str(issue.get("category") or "Other")
+        cat = normalize_category(str(issue.get("category") or "Crawlability"))
         grouped.setdefault(cat, []).append(issue)
     for cat in grouped:
         grouped[cat].sort(key=lambda i: (-int(i.get("priority") or 0), i.get("title") or ""))

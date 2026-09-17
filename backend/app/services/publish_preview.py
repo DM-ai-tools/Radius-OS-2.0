@@ -139,6 +139,55 @@ def _brand_style(brand: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def preview_design_meta(brand: dict[str, Any], site_design: dict[str, Any] | None) -> dict[str, str]:
+    """WordPress kit, then Brandfetch, then neutral. Never invents a colour."""
+    design = site_design or {}
+    brand_style = _brand_style(brand)
+    brand_ok = brand_style["brand_applied"] == "yes"
+    if str(design.get("source") or "") == "measured" and design.get("available"):
+        primary = str(design.get("primary_color") or "")
+        font_name = str(design.get("font") or "")
+        if primary or font_name:
+            return {
+                "primary": primary or brand_style["primary"],
+                "font": f'"{font_name}", {NEUTRAL_FONT}' if font_name else brand_style["font"],
+                "brand_applied": "yes",
+                "source": "measured",
+                "fallback": "brandfetch" if (not primary and brand.get("primary_color")) else "",
+                "filled": "color" if not primary and brand.get("primary_color") else "",
+            }
+        return {**brand_style, "source": "unavailable", "fallback": "", "filled": ""}
+    wp_ok = bool(design.get("available"))
+    wp_color = str(design.get("primary_color") or "") if wp_ok else ""
+    wp_font = str(design.get("font") or "") if wp_ok else ""
+    brand_font = str((brand.get("font") or {}).get("name") or "") if brand.get("available") else ""
+    filled: list[str] = []
+    if wp_ok:
+        primary = wp_color or brand_style["primary"]
+        font = f'"{wp_font}", {NEUTRAL_FONT}' if wp_font else brand_style["font"]
+        if not wp_color and brand.get("primary_color"):
+            filled.append("color")
+        if not wp_font and brand_font:
+            filled.append("type")
+        if not design.get("chrome") and (brand.get("logo") or {}).get("url"):
+            filled.append("logo")
+        return {
+            "primary": primary,
+            "font": font,
+            "brand_applied": "yes",
+            "source": "wordpress",
+            "fallback": "brandfetch" if filled else "",
+            "filled": ",".join(filled),
+        }
+    if brand_ok:
+        return {**brand_style, "source": "brandfetch", "fallback": "", "filled": ""}
+    return {**brand_style, "source": "neutral", "fallback": "", "filled": ""}
+
+
+def _preview_style(brand: dict[str, Any], site_design: dict[str, Any] | None) -> dict[str, str]:
+    return preview_design_meta(brand, site_design)
+
+
 def render_preview_html(
     *,
     client_name: str,
@@ -146,43 +195,103 @@ def render_preview_html(
     content_html: str,
     brand: dict[str, Any],
     layout: dict[str, Any] | None = None,
+    site_design: dict[str, Any] | None = None,
     target_status: str = "draft",
     banner_label: str = "DRY-RUN PREVIEW",
     banner_subtitle: str = "no CMS write has occurred",
 ) -> str:
     """A self-contained HTML document for reviewer eyeballs. Never written to the CMS."""
-    style = _brand_style(brand)
+    style = _preview_style(brand, site_design)
     layout = layout or {}
+    design = site_design or {}
     logo = (brand.get("logo") or {}).get("url") if brand.get("available") else None
     title = _title_of(page)
     meta = _meta_of(page)
     url = str(page.get("url") or "")
 
     notices: list[str] = []
-    if style["brand_applied"] != "yes":
+    if style["source"] == "measured":
         notices.append(
-            f"Brand assets unavailable ({_esc(brand.get('error') or 'not fetched')}) — "
+            "Styled from the live page: Context.dev computed styles, plus a local CSS walk "
+            "for tokens that API does not return. Missing colors are left unavailable, not invented."
+        )
+    elif style["source"] == "wordpress" and style.get("fallback") == "brandfetch":
+        kit = f" kit {design.get('kit_id')}" if design.get("kit_id") else ""
+        filled = style.get("filled") or "missing tokens"
+        notices.append(
+            f"Styled from the live WordPress site{kit}. "
+            f"Brandfetch filled {filled.replace(',', ', ')}."
+        )
+    elif style["source"] == "wordpress":
+        kit = f" kit {design.get('kit_id')}" if design.get("kit_id") else ""
+        notices.append(
+            f"Styled from the live WordPress site{kit}"
+            + (" — header and footer included." if design.get("chrome") else ".")
+        )
+    elif style["source"] == "brandfetch":
+        notices.append(
+            "WordPress design was not available — Brandfetch fallback. "
+            "This is the brand record, not the live page chrome."
+        )
+    elif style["brand_applied"] != "yes":
+        notices.append(
+            f"Brand assets unavailable ({_esc(brand.get('error') or design.get('error') or 'not fetched')}) — "
             "neutral styling shown, not the client's real design."
         )
-    if not layout.get("available"):
+    if not layout.get("available") and not design.get("chrome"):
         notices.append("No live reference page scraped — layout is generic.")
     if target_status != "publish":
         notices.append(f"Target CMS status: <strong>{_esc(target_status)}</strong> — not live.")
 
     notice_html = "".join(f"<li>{n}</li>" for n in notices)
-    swatches = "".join(
+    kit_swatches = "".join(
+        f'<span class="sw" style="background:{_esc(color)}" title="{_esc(name)}"></span>'
+        for name, color in list((design.get("colors") or {}).items())[:6]
+        if isinstance(color, str) and color.startswith("#")
+    )
+    swatches = kit_swatches or "".join(
         f'<span class="sw" style="background:{_esc(c.get("hex"))}" title="{_esc(c.get("hex"))}"></span>'
         for c in (brand.get("palette") or [])[:6]
         if isinstance(c, dict) and c.get("hex")
     )
+    sheets = "".join(
+        f'<link rel="stylesheet" href="{_esc(href)}">'
+        for href in (design.get("stylesheets") or [])[:12]
+        if isinstance(href, str) and href.startswith("http")
+    )
+    kit_class = f"elementor-kit-{_esc(design.get('kit_id'))}" if design.get("kit_id") else ""
+    site_mode = bool(design.get("available"))
+    shots = ((design.get("design_capture") or {}).get("screenshots") or []) if style["source"] == "measured" else []
+    hero = next(
+        (
+            s.get("url")
+            for s in shots
+            if isinstance(s, dict) and s.get("url") and s.get("screenshot_type") != "fullPage"
+        ),
+        "",
+    )
+    reference_shot = (
+        f'<p class="ref-shot"><img src="{_esc(hero)}" alt="Live page screenshot"></p>'
+        if isinstance(hero, str) and hero.startswith("http")
+        else ""
+    )
+    chrome_header = design.get("header_html") or ""
+    chrome_footer = design.get("footer_html") or ""
+    generic_header = (
+        f'<img src="{_esc(logo)}" alt="" onerror="this.remove()">'
+        f'<strong class="hdr-fallback">{_esc(client_name)}</strong>'
+        if logo
+        else f"<strong>{_esc(client_name)}</strong>"
+    )
 
-    return f"""<!doctype html>
+    html_doc = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Preview — {_esc(title)}</title>
+{sheets}
 <style>
   :root {{ --brand: {style["primary"]}; }}
-  body {{ margin:0; font-family:{style["font"]}; color:#0f172a; background:#f8fafc; }}
+  body.preview-root {{ margin:0; font-family:{style["font"]}; color:#0f172a; background:#fff; }}
   .bar {{ background:#0f172a; color:#e2e8f0; padding:10px 16px; font-size:13px;
           display:flex; gap:12px; align-items:center; justify-content:space-between; }}
   .bar strong {{ color:#fff; }}
@@ -196,17 +305,19 @@ def render_preview_html(
   .serp .d {{ color:#475569; font-size:13px; }}
   .page {{ max-width:760px; margin:20px auto 60px; background:#fff; border:1px solid #e2e8f0;
            border-radius:10px; overflow:hidden; }}
+  body.has-site .page {{ max-width:none; margin:0; border:0; border-radius:0; }}
   .hdr {{ border-top:4px solid var(--brand); padding:16px 22px; display:flex;
           align-items:center; gap:12px; border-bottom:1px solid #eef2f7; }}
   .hdr img {{ max-height:34px; max-width:150px; }}
   .hdr .hdr-fallback {{ font-size:18px; color:var(--brand); }}
-  .body {{ padding:22px; }}
+  .body {{ padding:22px; max-width:760px; margin:0 auto; }}
+  body.has-site .body {{ max-width:1100px; padding:28px 22px 48px; }}
   .body h1 {{ font-size:28px; margin:0 0 12px; color:var(--brand); }}
   .body h2 {{ font-size:19px; margin:22px 0 6px; }}
   .body h3 {{ font-size:15px; margin:14px 0 4px; }}
-  .body p {{ line-height:1.6; color:#334155; }}
-  .body ul {{ margin:8px 0 12px 20px; line-height:1.6; color:#334155; }}
-  .body img {{ max-width:100%; height:auto; border-radius:6px; margin:12px 0; }}
+  .body p {{ line-height:1.6; }}
+  .body ul {{ margin:8px 0 12px 20px; line-height:1.6; }}
+  .body img {{ max-width:100%; height:auto; margin:12px 0; }}
   .body figure {{ margin:16px 0; }}
   .body figcaption {{ font-size:12px; color:#64748b; margin-top:6px; }}
   .body .draft-figure-placeholder {{
@@ -218,7 +329,7 @@ def render_preview_html(
   .sw {{ display:inline-block; width:16px; height:16px; border-radius:3px;
          border:1px solid rgba(0,0,0,.15); margin-right:3px; vertical-align:middle; }}
 </style></head>
-<body>
+<body class="preview-root{' has-site' if site_mode else ''} {kit_class}">
 <div class="bar"><span><strong>{_esc(banner_label)}</strong> — {_esc(banner_subtitle)}</span>
 <span>{_esc(client_name)} {swatches}</span></div>
 {f'<div class="warn"><strong>Preview caveats</strong><ul>{notice_html}</ul></div>' if notices else ''}
@@ -229,18 +340,16 @@ def render_preview_html(
   <div class="d">{_esc(meta)}</div>
 </div>
 
+<!--WP_HEADER-->
 <div class="page">
-  <div class="hdr">
-    {(
-        f'<img src="{_esc(logo)}" alt="" onerror="this.remove()">'
-        f'<strong class="hdr-fallback">{_esc(client_name)}</strong>'
-        if logo
-        else f'<strong>{_esc(client_name)}</strong>'
-    )}
-  </div>
-  <div class="body">{content_html}</div>
+  {'' if site_mode and chrome_header else f'<div class="hdr">{generic_header}</div>'}
+  {reference_shot}
+  <div class="body {kit_class}">{content_html}</div>
 </div>
+<!--WP_FOOTER-->
 </body></html>"""
+    html_doc = html_doc.replace("<!--WP_HEADER-->", chrome_header if site_mode else "")
+    return html_doc.replace("<!--WP_FOOTER-->", chrome_footer if site_mode else "")
 
 
 def build_page_preview(
@@ -253,6 +362,7 @@ def build_page_preview(
     target_status: str,
     slug: str,
     content_html: str | None = None,
+    site_design: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Preview + the exact CMS payload, so reviewer and publisher never diverge.
 
@@ -285,9 +395,12 @@ def build_page_preview(
             content_html=content_html,
             brand=brand,
             layout=layout,
+            site_design=site_design,
             target_status=target_status,
         ),
-        "brand_applied": _brand_style(brand)["brand_applied"] == "yes",
+        "brand_applied": _preview_style(brand, site_design)["brand_applied"] == "yes",
+        "design_source": _preview_style(brand, site_design)["source"],
+        "design_fallback": _preview_style(brand, site_design).get("fallback") or None,
         "has_written_copy": "data-placeholder" not in content_html,
     }
 
@@ -343,6 +456,7 @@ def markdown_to_content_html(
     image_queue: list[dict[str, Any]] = [
         i for i in (images or []) if isinstance(i, dict)
     ]
+    used_src: set[str] = set()
 
     def _abs_src(src: str | None) -> str:
         s = str(src or "").strip()
@@ -355,6 +469,9 @@ def markdown_to_content_html(
             return f"{base}{s}"
         return s
 
+    def _src_key(src: Any) -> str:
+        return str(src or "").strip().split("?")[0].rstrip("/")
+
     def _next_image(role_hint: str | None = None) -> dict[str, Any] | None:
         if not image_queue:
             return None
@@ -363,6 +480,17 @@ def markdown_to_content_html(
                 if str(img.get("role") or "").lower() == role_hint.lower():
                     return image_queue.pop(idx)
         return image_queue.pop(0)
+
+    def _consume_src(src: str) -> None:
+        key = _src_key(src)
+        if not key:
+            return
+        used_src.add(key)
+        for idx, img in enumerate(image_queue):
+            got = _src_key(img.get("src"))
+            if got and (got == key or got.endswith(key) or key.endswith(got)):
+                image_queue.pop(idx)
+                return
 
     def _figure_html(
         *,
@@ -445,6 +573,7 @@ def markdown_to_content_html(
             if i + 1 < len(lines) and lines[i + 1].strip().startswith("*") and lines[i + 1].strip().endswith("*"):
                 caption = lines[i + 1].strip().strip("*")
                 i += 1
+            _consume_src(src)
             parts.append(_figure_html(src=src, alt=alt, caption=caption))
             i += 1
             continue
@@ -455,6 +584,10 @@ def markdown_to_content_html(
             role = fig_m.group(1).strip()
             caption = fig_m.group(2).strip()
             matched = _next_image(role)
+            src = (matched or {}).get("src")
+            key = _src_key(src)
+            if key:
+                used_src.add(key)
             parts.append(
                 _figure_html(
                     src=(matched or {}).get("src"),
@@ -480,6 +613,11 @@ def markdown_to_content_html(
     # Leftover generated images (no FIGURE markers) — append after body.
     while image_queue:
         leftover = image_queue.pop(0)
+        key = _src_key(leftover.get("src"))
+        if key and key in used_src:
+            continue
+        if key:
+            used_src.add(key)
         parts.append(
             _figure_html(
                 src=leftover.get("src"),
@@ -515,14 +653,23 @@ async def build_draft_site_preview(
 ) -> dict[str, Any]:
     """Render a Phase 10 draft inside the client's brand frame (Brandfetch + Firecrawl)."""
     from app.integrations import brandfetch, firecrawl
+    from app.services.wp_site_design import fetch_wordpress_design
 
     brand = await brandfetch.fetch_brand(primary_url)
+    site_design = await fetch_wordpress_design(primary_url)
+    from app.services.design_capture import capture_page_design, design_source_url, merge_site_design
 
     page_url = str(draft.get("url") or "")
     if page_url and not page_url.startswith("http"):
         page_url = primary_url.rstrip("/") + (page_url if page_url.startswith("/") else f"/{page_url}")
-
+    existing = str(draft.get("existing_page_url") or "")
     ref_url = pick_reference_url(site_architecture, primary_url)
+    source_url = design_source_url(
+        existing_page_url=existing if existing.startswith("http") else "",
+        reference_design_source=ref_url,
+        client_website_url=primary_url,
+    )
+    site_design = merge_site_design(site_design, await capture_page_design(source_url))
     scrape: dict[str, Any] = {"available": False}
     for candidate in [page_url, ref_url, primary_url]:
         if not candidate:
@@ -544,21 +691,36 @@ async def build_draft_site_preview(
         images=draft.get("images") if isinstance(draft.get("images"), list) else None,
         media_base=str(draft.get("media_base") or "") or None,
     )
+    style = _preview_style(brand, site_design)
+    if style["source"] == "measured":
+        banner_subtitle = "Content Production — measured from the live page"
+    elif style["source"] == "wordpress" and style.get("fallback") == "brandfetch":
+        banner_subtitle = "Content Production — WordPress site design, Brandfetch filled the gaps"
+    elif style["source"] == "wordpress":
+        banner_subtitle = "Content Production — styled from the live WordPress site"
+    elif style["source"] == "brandfetch":
+        banner_subtitle = "Content Production — Brandfetch fallback"
+    else:
+        banner_subtitle = "Content Production — neutral styling"
     preview_html = render_preview_html(
         client_name=client_name,
         page=page,
         content_html=content_html,
         brand=brand,
         layout=layout,
+        site_design=site_design,
         target_status="draft",
         banner_label="SITE PREVIEW",
-        banner_subtitle="Content Production — styled with the client's brand (no CMS write)",
+        banner_subtitle=banner_subtitle,
     )
     return {
         "url": page_url,
         "reference_url": layout.get("reference_url") or ref_url,
         "preview_html": preview_html,
-        "brand_applied": _brand_style(brand)["brand_applied"] == "yes",
-        "layout_available": bool(layout.get("available")),
+        "brand_applied": style["brand_applied"] == "yes",
+        "design_source": style["source"],
+        "design_fallback": style.get("fallback") or None,
+        "wordpress_kit_id": site_design.get("kit_id") or None,
+        "layout_available": bool(layout.get("available") or site_design.get("chrome")),
         "has_written_copy": bool(content_html and "data-placeholder" not in content_html),
     }

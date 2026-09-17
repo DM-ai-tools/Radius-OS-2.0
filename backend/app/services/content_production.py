@@ -22,6 +22,13 @@ _SELECT_HINTS = (
     "select topic",
 )
 
+_CREATE_BASIS_OK = {
+    "new_content_gap",
+    "strategy_gap",
+    "url_map_create",
+    "audit_disposition",
+}
+
 
 def planning_gate_ok(planning_status: str | None, planning: dict[str, Any]) -> bool:
     if planning.get("locked") is False:
@@ -41,6 +48,7 @@ def planning_gate_ok(planning_status: str | None, planning: dict[str, Any]) -> b
 
 def _briefable_pages(planning: dict[str, Any]) -> list[dict[str, Any]]:
     pages = planning.get("pages") or planning.get("roadmap") or []
+    locked = planning.get("locked") is True
     rows = []
     for r in pages:
         if not isinstance(r, dict):
@@ -48,14 +56,15 @@ def _briefable_pages(planning: dict[str, Any]) -> list[dict[str, Any]]:
         action = str(r.get("action") or "").lower()
         if action not in ("create", "refresh"):
             continue
-        if action == "create":
+        # A locked/approved roadmap already decided create vs optimize. Don't drop
+        # those rows just because approve-time memory slimming stripped evidence fields.
+        if action == "create" and not locked:
             check = str(r.get("existing_content_check") or "").lower()
             basis = str(r.get("decision_basis") or "").lower()
-            if check not in ("no_match", "audit_not_available") or basis not in (
-                "new_content_gap",
-                "strategy_gap",
+            justified = bool(str(r.get("new_content_justification") or "").strip())
+            if check not in ("no_match", "audit_not_available") or (
+                basis not in _CREATE_BASIS_OK and not justified
             ):
-                # Existing-content-first: don't brief net-new pages without explicit gap evidence.
                 continue
         rows.append(r)
     rows.sort(key=lambda r: int(r.get("priority_rank") or 999))

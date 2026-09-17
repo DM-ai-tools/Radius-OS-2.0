@@ -139,6 +139,7 @@ def markdown_to_publish_html(
         return ""
 
     queue: list[dict[str, Any]] = [i for i in (images or []) if isinstance(i, dict)]
+    used_src: set[str] = set()
 
     def _abs_src(src: Any) -> str:
         s = str(src or "").strip()
@@ -158,13 +159,26 @@ def markdown_to_publish_html(
         # CMS can serve. Omit it rather than publishing a broken image.
         return ""
 
-    def _take(role: str | None) -> dict[str, Any] | None:
+    def _src_key(src: Any) -> str:
+        return str(src or "").strip().split("?")[0].rstrip("/")
+
+    def _take(role: str | None = None, src: str | None = None) -> dict[str, Any] | None:
         if not queue:
             return None
+        key = _src_key(src)
+        if key:
+            for idx, img in enumerate(queue):
+                got = _src_key(img.get("src"))
+                if got and (got == key or got.endswith(key) or key.endswith(got)):
+                    used_src.add(got)
+                    used_src.add(key)
+                    return queue.pop(idx)
         if role:
             for idx, img in enumerate(queue):
                 if str(img.get("role") or "").lower() == role.lower():
                     return queue.pop(idx)
+        if src:
+            return None
         return queue.pop(0)
 
     def _figure(src: Any, alt: str, caption: str) -> str:
@@ -258,6 +272,10 @@ def markdown_to_publish_html(
             if nxt.startswith("*") and nxt.endswith("*") and len(nxt) > 2:
                 caption = nxt.strip("*")
                 i += 1
+            _take(src=src)
+            key = _src_key(src)
+            if key:
+                used_src.add(key)
             fig = _figure(src, alt, caption)
             if fig:
                 parts.append(fig)
@@ -305,6 +323,11 @@ def markdown_to_publish_html(
     flush_all()
 
     for leftover in queue:
+        key = _src_key(leftover.get("src"))
+        if key and key in used_src:
+            continue
+        if key:
+            used_src.add(key)
         fig = _figure(
             leftover.get("src"),
             str(leftover.get("alt") or leftover.get("role") or "Figure"),

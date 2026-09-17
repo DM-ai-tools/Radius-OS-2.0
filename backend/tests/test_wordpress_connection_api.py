@@ -32,7 +32,7 @@ async def _make_client(db_session, name: str = "Test Co") -> str:
 
 
 def _mock_verify_ok(monkeypatch, *, user="editor", can_publish=True):
-    async def _verify(conn):
+    async def _verify(conn, **_kwargs):
         return {"ok": True, "user": user, "capabilities_publish": can_publish, "site": conn.base_url}
 
     # api/integrations.py calls wordpress.verify_connection(...) module-qualified, so
@@ -41,7 +41,7 @@ def _mock_verify_ok(monkeypatch, *, user="editor", can_publish=True):
 
 
 def _mock_verify_fail(monkeypatch, error="unauthorized"):
-    async def _verify(_conn):
+    async def _verify(_conn, **_kwargs):
         return {"ok": False, "error": error}
 
     monkeypatch.setattr(wordpress, "verify_connection", _verify)
@@ -117,6 +117,8 @@ async def test_connect_stores_encrypted_and_status_never_echoes_password(
     sbody = status.json()
     assert sbody["connected"] is True
     assert sbody["username"] == "editor"
+    assert sbody["gate"]["state"] == "ready"
+    assert sbody["gate"]["ok"] is True
     assert "app_password" not in sbody
     assert "correct-app-password-1234" not in str(sbody)
 
@@ -184,7 +186,9 @@ async def test_status_reports_not_connected_before_any_connect(api_client, db_se
         headers={"Authorization": f"Bearer {token}"},
     )
     assert status.status_code == 200
-    assert status.json() == {"connected": False}
+    body = status.json()
+    assert body["connected"] is False
+    assert body["gate"]["state"] == "not_connected"
 
 
 async def test_role_without_publish_trigger_cannot_connect(api_client, db_session, monkeypatch):
@@ -245,4 +249,5 @@ async def test_two_clients_have_independent_connections(api_client, db_session, 
         headers={"Authorization": f"Bearer {token}"},
     )
     assert status_a.json()["connected"] is True
-    assert status_b.json() == {"connected": False}
+    assert status_b.json()["connected"] is False
+    assert status_b.json()["gate"]["state"] == "not_connected"

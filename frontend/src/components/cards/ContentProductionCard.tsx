@@ -194,10 +194,16 @@ export default function ContentProductionCard({
                     <strong>Client site preview</strong>
                     <span className="site-preview-sub">
                       {previewLoading
-                        ? " · fetching brand + reference layout…"
-                        : previewMeta?.brand_applied === false
-                          ? " · neutral styling — brand assets unavailable"
-                          : " · styled with client brand"}
+                        ? " · measuring the live page, then Brandfetch only if that fails…"
+                        : previewMeta?.design_source === "measured"
+                          ? " · measured from the live page"
+                          : previewMeta?.design_source === "wordpress" && previewMeta?.design_fallback === "brandfetch"
+                          ? " · WordPress site, Brandfetch filled the gaps"
+                          : previewMeta?.design_source === "wordpress"
+                            ? " · styled from the live WordPress site"
+                            : previewMeta?.design_source === "brandfetch" || previewMeta?.brand_applied
+                              ? " · Brandfetch fallback"
+                              : " · neutral styling — site design unavailable"}
                       {previewMeta?.reference_url ? ` · ref ${String(previewMeta.reference_url)}` : ""}
                     </span>
                   </div>

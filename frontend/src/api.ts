@@ -291,6 +291,13 @@ export type Profile = {
   updated_at: string;
 };
 
+export type WordPressGate = {
+  state: "ready" | "limited" | "failed" | "not_connected";
+  label: string;
+  ok: boolean;
+  detail: string;
+};
+
 export type WordPressStatus = {
   connected: boolean;
   base_url?: string;
@@ -298,6 +305,7 @@ export type WordPressStatus = {
   wp_user?: string | null;
   can_publish?: boolean | null;
   error?: string | null;
+  gate?: WordPressGate;
 };
 
 export type ChatEvent = {
@@ -403,7 +411,9 @@ export const api = {
       preview_html: string;
       brand_applied: boolean;
       layout_available: boolean;
-      reference_url?: string;
+      design_source?: string;
+      design_fallback?: string | null;
+      wordpress_kit_id?: string | null;
     }>(`/api/v1/clients/${clientId}/content-production/site-preview`, {
       method: "POST",
       token,
@@ -598,6 +608,7 @@ export const api = {
       method: "POST",
       token,
       body: JSON.stringify(body),
+      timeoutMs: 90_000,
     }),
   wordpressDisconnect: (token: string, client_id: string) =>
     request<WordPressStatus>(`/api/v1/clients/${client_id}/integrations/wordpress`, {

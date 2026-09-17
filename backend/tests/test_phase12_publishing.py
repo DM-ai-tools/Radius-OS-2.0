@@ -470,6 +470,24 @@ def test_markdown_to_content_html_renders_figure_placeholders_and_images():
     assert "draft-figure-placeholder" in html_out
 
 
+def test_markdown_to_content_html_does_not_repeat_embedded_images():
+    md = (
+        "# Title\n\n"
+        "![Hero](/media/drafts/hero.png)\n"
+        "*Hero shot*\n\n"
+        "## Section\n\n"
+        "Body copy.\n"
+    )
+    html_out = markdown_to_content_html(
+        md,
+        images=[
+            {"role": "hero", "src": "/media/drafts/hero.png", "alt": "Hero", "caption": "Hero shot"},
+            {"role": "supporting", "src": "/media/drafts/hero.png", "alt": "Copy", "caption": "Same file"},
+        ],
+    )
+    assert html_out.count("/media/drafts/hero.png") == 1
+
+
 def test_display_meta_strips_stringified_audience_dict():
     from app.services.publish_preview import _display_meta
 
@@ -500,6 +518,11 @@ async def test_build_draft_site_preview_uses_client_brand(monkeypatch):
     monkeypatch.setattr("app.integrations.brandfetch.fetch_brand", fake_brand)
     monkeypatch.setattr("app.integrations.firecrawl.scrape_page", fake_scrape)
 
+    async def no_wp(_url):
+        return {"available": False, "source": "wordpress"}
+
+    monkeypatch.setattr("app.services.wp_site_design.fetch_wordpress_design", no_wp)
+
     out = await build_draft_site_preview(
         client_name="Acme",
         primary_url="https://acme.example",
@@ -510,3 +533,78 @@ async def test_build_draft_site_preview_uses_client_brand(monkeypatch):
     assert "SITE PREVIEW" in out["preview_html"]
     assert "Why it matters" in out["preview_html"]
     assert out["brand_applied"] is True
+
+
+@pytest.mark.asyncio
+async def test_site_preview_uses_wordpress_kit_over_brandfetch(monkeypatch):
+    draft = {
+        "title": "SEO Services",
+        "url": "/seo-services/",
+        "meta_description": "Professional SEO help.",
+        "markdown": "# SEO Services\n\nA real draft.",
+    }
+
+    async def fake_brand(_url):
+        return {"available": True, "primary_color": "#111111", "font": {"name": "Brandfetch Font"}, "palette": []}
+
+    async def fake_scrape(_url):
+        return {"available": False}
+
+    async def fake_wp(_url):
+        return {
+            "available": True,
+            "source": "wordpress",
+            "kit_id": "7",
+            "primary_color": "#6EC1E4",
+            "font": "Manrope",
+            "colors": {"primary": "#6EC1E4", "accent": "#61CE70"},
+            "stylesheets": ["https://clicktrends.com.au/wp-content/uploads/elementor/css/post-7.css"],
+            "header_html": '<header class="site-header">Click Trends</header>',
+            "footer_html": "<footer>Footer</footer>",
+            "chrome": True,
+        }
+
+    async def no_capture(_url):
+        return {"available": False, "reasons": ["context_dev_not_configured"], "design_md": ""}
+
+    monkeypatch.setattr("app.integrations.brandfetch.fetch_brand", fake_brand)
+    monkeypatch.setattr("app.integrations.firecrawl.scrape_page", fake_scrape)
+    monkeypatch.setattr("app.services.wp_site_design.fetch_wordpress_design", fake_wp)
+    monkeypatch.setattr("app.services.design_capture.capture_page_design", no_capture)
+
+    out = await build_draft_site_preview(
+        client_name="Click Trends",
+        primary_url="https://clicktrends.com.au",
+        draft=draft,
+    )
+    html = out["preview_html"]
+    assert out["design_source"] == "wordpress"
+    assert "#6EC1E4" in html
+    assert "#111111" not in html
+    assert "elementor-kit-7" in html
+    assert "post-7.css" in html
+    assert "site-header" in html
+    assert "<footer>" in html
+    assert "Manrope" in html
+    assert out["design_fallback"] is None
+
+
+def test_brandfetch_fills_missing_wordpress_tokens():
+    from app.services.publish_preview import render_preview_html
+
+    html = render_preview_html(
+        client_name="Click Trends",
+        page={"title": "SEO", "url": "https://clicktrends.com.au/seo/"},
+        content_html="<p>Draft</p>",
+        brand={
+            "available": True,
+            "primary_color": "#111111",
+            "font": {"name": "Brandfetch Font"},
+            "logo": {"url": "https://cdn.example/logo.svg"},
+            "palette": [],
+        },
+        site_design={"available": True, "kit_id": "7", "colors": {}, "chrome": False},
+    )
+    assert "Brandfetch Font" in html
+    assert "Brandfetch filled" in html
+    assert "cdn.example/logo.svg" in html

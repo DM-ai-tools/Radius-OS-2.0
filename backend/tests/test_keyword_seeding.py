@@ -2,6 +2,8 @@
 
 import pytest
 
+from app.integrations import ahrefs as _ahrefs
+from app.integrations import semrush as _semrush
 from app.services.keyword_seeding import (
     build_seed_clusters,
     classify_expansion,
@@ -11,6 +13,15 @@ from app.services.keyword_seeding import (
     flatten_dataset,
     run_multi_mode_seeding,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_ahrefs_explorer_block():
+    _ahrefs.reset_keywords_explorer_block()
+    _semrush.reset_keywords_explorer_block()
+    yield
+    _ahrefs.reset_keywords_explorer_block()
+    _semrush.reset_keywords_explorer_block()
 
 
 def test_build_coverage_expansions_reaches_twenty():
@@ -32,7 +43,7 @@ async def test_expand_uses_coverage_fallback_when_providers_fail(monkeypatch):
 
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
-    monkeypatch.setattr(settings, "ahrefs_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "semrush_api_key", "test-key", raising=False)
 
     async def _empty_matching(*args, **kwargs):
         return [], ["ahrefs_matching_terms_failed"]
@@ -43,8 +54,8 @@ async def test_expand_uses_coverage_fallback_when_providers_fail(monkeypatch):
     async def _empty_dfs(*args, **kwargs):
         return [], ["dataforseo_failed"]
 
-    monkeypatch.setattr(keyword_seeding.ahrefs, "matching_terms", _empty_matching)
-    monkeypatch.setattr(keyword_seeding.ahrefs, "related_terms", _empty_related)
+    monkeypatch.setattr(keyword_seeding.semrush, "matching_terms", _empty_matching)
+    monkeypatch.setattr(keyword_seeding.semrush, "related_terms", _empty_related)
     monkeypatch.setattr(keyword_seeding, "expand_seed_dataforseo", _empty_dfs)
 
     rows, errors = await expand_seed_ahrefs(
@@ -203,7 +214,7 @@ async def test_expand_falls_back_to_dataforseo_when_ahrefs_exhausted(monkeypatch
 
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
-    monkeypatch.setattr(settings, "ahrefs_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "semrush_api_key", "test-key", raising=False)
 
     async def _empty_matching(*args, **kwargs):
         return [], ["ahrefs_matching_terms_failed"]
@@ -222,8 +233,8 @@ async def test_expand_falls_back_to_dataforseo_when_ahrefs_exhausted(monkeypatch
             [],
         )
 
-    monkeypatch.setattr(keyword_seeding.ahrefs, "matching_terms", _empty_matching)
-    monkeypatch.setattr(keyword_seeding.ahrefs, "related_terms", _empty_related)
+    monkeypatch.setattr(keyword_seeding.semrush, "matching_terms", _empty_matching)
+    monkeypatch.setattr(keyword_seeding.semrush, "related_terms", _empty_related)
     monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _dfs_related)
 
     rows, errors = await expand_seed_ahrefs(
@@ -247,7 +258,7 @@ async def test_missing_classes_topped_up_from_dedicated_dfs_sources(monkeypatch)
 
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
-    monkeypatch.setattr(settings, "ahrefs_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "semrush_api_key", "test-key", raising=False)
 
     called: list[str] = []
 
@@ -272,8 +283,8 @@ async def test_missing_classes_topped_up_from_dedicated_dfs_sources(monkeypatch)
         called.append("related")
         return [{"keyword": "seo audit and services", "volume": 140, "difficulty": 18}], []
 
-    monkeypatch.setattr(keyword_seeding.ahrefs, "matching_terms", _matching)
-    monkeypatch.setattr(keyword_seeding.ahrefs, "related_terms", _related_terms)
+    monkeypatch.setattr(keyword_seeding.semrush, "matching_terms", _matching)
+    monkeypatch.setattr(keyword_seeding.semrush, "related_terms", _related_terms)
     monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _suggestions)
     monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_ideas", _ideas)
     monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _related_kw)
@@ -297,7 +308,7 @@ async def test_empty_class_filled_from_real_sub_threshold_keywords(monkeypatch):
 
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
-    monkeypatch.setattr(settings, "ahrefs_api_key", "test-key", raising=False)
+    monkeypatch.setattr(settings, "semrush_api_key", "test-key", raising=False)
 
     async def _matching(seed, **kwargs):
         if kwargs.get("match_mode") == "phrase":
@@ -308,8 +319,8 @@ async def test_empty_class_filled_from_real_sub_threshold_keywords(monkeypatch):
         # Only sub-threshold broad results exist
         return [{"keyword": "ppc management", "volume": 4}], []
 
-    monkeypatch.setattr(keyword_seeding.ahrefs, "matching_terms", _matching)
-    monkeypatch.setattr(keyword_seeding.ahrefs, "related_terms", _related_terms)
+    monkeypatch.setattr(keyword_seeding.semrush, "matching_terms", _matching)
+    monkeypatch.setattr(keyword_seeding.semrush, "related_terms", _related_terms)
 
     rows, _ = await expand_seed_ahrefs(
         "seo services", country="au", min_volume=10, location_code=None
@@ -369,3 +380,44 @@ async def test_run_multi_mode_seeding_mock(monkeypatch):
         assert row.get("match_class") in ("exact", "phrase", "related", "broad")
         assert row.get("seed")
         assert row.get("target_type") in ("service", "page", "keyword")
+
+
+@pytest.mark.asyncio
+async def test_ahrefs_insufficient_plan_disables_later_explorer_calls(monkeypatch):
+    from app.config import get_settings
+    from app.integrations import ahrefs
+
+    ahrefs.reset_keywords_explorer_block()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "use_mock_providers", False)
+    monkeypatch.setattr(settings, "ahrefs_api_key", "test-key", raising=False)
+
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code = 403
+        text = '{ "error":"Insufficient plan" }'
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, params=None, headers=None):
+            calls["n"] += 1
+            return _Resp()
+
+    monkeypatch.setattr(ahrefs.httpx, "AsyncClient", lambda timeout=None: _Client())
+
+    rows, errs = await ahrefs.matching_terms("seo")
+    assert rows == []
+    assert "ahrefs_insufficient_plan" in errs
+    assert ahrefs.keywords_explorer_blocked() == "ahrefs_insufficient_plan"
+
+    rows2, errs2 = await ahrefs.related_terms("web design")
+    assert rows2 == []
+    assert "ahrefs_insufficient_plan" in errs2
+    assert calls["n"] == 1
+    ahrefs.reset_keywords_explorer_block()

@@ -37,7 +37,7 @@ async def run_site_architecture(
             "site_architecture",
             pack_notes=[
                 f"demand={profile.search_demand_status}",
-                f"strategy={profile.seo_strategy_status}",
+                f"sitemap={bool((profile.website_situation_summary or {}).get('site_sitemap'))}",
             ],
         )
     )
@@ -55,23 +55,13 @@ async def run_site_architecture(
         )
         return events
 
-    if profile.seo_strategy_status != "complete":
-        events.extend(
-            blocked_events(
-                "site_architecture",
-                "Assigns URL/parent/depth to the approved Content Strategy queue.",
-                route_to="content_strategy",
-            )
-        )
-        return events
-
     profile.site_architecture_status = "in_progress"
     events.append(
         {
             "type": "system_notice",
             "content": (
-                "Auditing click depth and drafting site architecture blueprint "
-                "(hubs, URL tree, cluster ownership)…"
+                "Mapping each keyword cluster to a URL — optimize an existing page "
+                "or create a new one…"
             ),
         }
     )
@@ -186,7 +176,10 @@ async def run_site_architecture(
     events.extend(
         handoff_events(
             "site_architecture",
-            result_line=f"{len(summary.get('target_url_tree') or [])} URLs assigned from strategy queue.",
+            result_line=(
+                f"{len(summary.get('target_url_tree') or [])} URLs mapped. "
+                "Next: titles and calendar for pages marked create."
+            ),
         )
     )
     return events

@@ -497,4 +497,40 @@ async def test_write_one_page_meta_description_empty_when_brief_has_none():
     out = await write_one_page(
         brief=_ready_brief(meta_description=""), client_name="Acme", use_llm=False
     )
-    assert out.get("meta_description") == ""
+    assert not out.get("meta_description")
+
+
+def test_llm_figure_slots_are_not_kept_beside_generated_images():
+    from app.services.create_content import _build_markdown
+
+    body = (
+        "## Why it matters\n\n"
+        + ("This page explains the offer in enough detail for a full draft. " * 20)
+        + "\n\n[FIGURE hero] A hero photograph of the service\n\n"
+        "## How it works\n\n"
+        + ("The method is named and specific so the writer has substance. " * 16)
+        + "\n\n[FIGURE supporting] Process diagram\n"
+    )
+    out = _build_markdown(
+        brief=_ready_brief(),
+        client_name="Acme",
+        page_markdown=body,
+        images=[
+            {
+                "role": "hero",
+                "src": "/media/drafts/hero.png",
+                "alt": "Hero",
+                "caption": "Hero photograph",
+            },
+            {
+                "role": "supporting",
+                "src": "/media/drafts/diagram.png",
+                "alt": "Diagram",
+                "caption": "Process diagram",
+            },
+        ],
+    )
+    md = out.get("markdown") or ""
+    assert md.count("/media/drafts/hero.png") == 1
+    assert md.count("/media/drafts/diagram.png") == 1
+    assert "[FIGURE" not in md

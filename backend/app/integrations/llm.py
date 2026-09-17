@@ -275,6 +275,8 @@ async def route_agent(message: str, profile_statuses: dict[str, str]) -> str:
             "write the content for",
             "write content for",
             "draft this topic",
+            "draft the selected",
+            "show the preview",
             "phase 10",
         )
     ):
@@ -347,6 +349,8 @@ async def route_agent(message: str, profile_statuses: dict[str, str]) -> str:
     if any(
         k in lowered
         for k in (
+            "url mapping",
+            "optimize existing",
             "site architecture",
             "information architecture",
             "url hierarchy",
@@ -445,15 +449,15 @@ async def route_agent(message: str, profile_statuses: dict[str, str]) -> str:
         if profile_statuses.get(status_key, "not_started") != "complete":
             return agent
 
-    # After 1–4 complete: search demand → strategy → IA → technical → audit → P9–12
+    # After 1–4: keywords → URL mapping → titles/calendar → technical → draft → WordPress
     if profile_statuses.get("search_demand_status", "not_started") != "complete":
         if any(k in lowered for k in ("readiness", "score", "gate")):
             return "readiness_gate"
         return "search_demand"
-    if profile_statuses.get("seo_strategy_status", "not_started") != "complete":
-        return "content_strategy"
     if profile_statuses.get("site_architecture_status", "not_started") != "complete":
         return "site_architecture"
+    if profile_statuses.get("seo_strategy_status", "not_started") != "complete":
+        return "content_strategy"
     if profile_statuses.get("technical_seo_status", "not_started") != "complete":
         return "technical_seo"
     if profile_statuses.get("content_audit_status", "not_started") != "complete":
@@ -479,7 +483,7 @@ async def _claude_route(message: str, profile_statuses: dict[str, str]) -> str:
         prompt = (
             "Pick exactly one agent_key from: discovery_agent, tracking_access_agent, "
             "website_situation_agent, competitor_market_agent, readiness_gate, "
-            "search_demand, content_strategy, site_architecture, technical_seo, "
+            "search_demand, site_architecture, content_strategy, technical_seo, "
             "content_audit, content_planning, content_production, on_page_seo, publishing.\n"
             f"Profile statuses: {json.dumps(profile_statuses)}\n"
             f"User message: {message}\n"

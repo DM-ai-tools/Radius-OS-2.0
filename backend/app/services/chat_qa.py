@@ -44,7 +44,29 @@ _QUESTION_START = (
     "give me",
 )
 
-_RUN_PREFIX = ("run ", "re-run", "rerun", "refresh ", "approve ", "start ")
+_RUN_PREFIX = (
+    "run ",
+    "re-run",
+    "rerun",
+    "refresh ",
+    "approve ",
+    "start ",
+    "write ",
+    "draft ",
+    "create ",
+    "generate ",
+    "build ",
+)
+# Instructions to produce a draft or preview must not be answered from memory.
+_ACTION_PHRASES = (
+    "write the full draft",
+    "write the draft",
+    "write draft",
+    "show the preview",
+    "site preview",
+    "draft the next",
+    "next priority topic",
+)
 
 
 def looks_like_question(message: str) -> bool:
@@ -53,6 +75,8 @@ def looks_like_question(message: str) -> bool:
         return False
     lowered = text.lower()
     if lowered.startswith(_RUN_PREFIX):
+        return False
+    if any(phrase in lowered for phrase in _ACTION_PHRASES):
         return False
     if "?" in text:
         return True

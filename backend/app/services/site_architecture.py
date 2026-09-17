@@ -335,57 +335,20 @@ def build_blueprint(
             "count": 1,
         },
         {
-            "type": "Category / hub (pillar)",
-            "url_pattern": "/{hub}/",
-            "parent": "Home",
-            "breadcrumb": "Home > Hub",
-            "indexable": True,
-            "count": max(1, len(core_topics) or len([c for c in clusters if isinstance(c, dict)]) // 2),
-        },
-        {
-            "type": "Spoke / subtopic",
-            "url_pattern": "/{hub}/{spoke}/",
-            "parent": "Its hub",
-            "breadcrumb": "Home > Hub > Spoke",
-            "indexable": True,
-            "count": len(clusters) or len(topic_plan.get("topic_ideas") or []),
-        },
-        {
-            "type": "Service / product",
-            "url_pattern": "/{service}/",
+            "type": "Service page",
+            "url_pattern": "/services/{service}/",
             "parent": "Home",
             "breadcrumb": "Home > Service",
             "indexable": True,
-            "count": len(declared_services) or 3,
+            "count": len(declared_services) or len(clusters) or 3,
         },
         {
             "type": "Sub-service",
-            "url_pattern": "/{service}/{subservice}/",
+            "url_pattern": "/services/{service}/{subservice}/",
             "parent": "Its service",
             "breadcrumb": "Home > Service > Sub-service",
             "indexable": True,
             "count": "varies",
-        },
-        {
-            "type": "Comparison / alternative",
-            "url_pattern": "/compare/{slug}/",
-            "parent": "Service or resources",
-            "breadcrumb": "Home > Compare > Slug",
-            "indexable": True,
-            "count": sum(
-                1
-                for c in clusters
-                if isinstance(c, dict)
-                and ("vs" in str(c.get("name") or "").lower() or c.get("content_type") == "comparison")
-            ),
-        },
-        {
-            "type": "Resource / blog",
-            "url_pattern": "/blog/{post}/",
-            "parent": "/blog/",
-            "breadcrumb": "Home > Blog > Post",
-            "indexable": True,
-            "count": "many",
         },
         {
             "type": "Utility",

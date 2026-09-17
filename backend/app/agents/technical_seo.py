@@ -62,9 +62,31 @@ async def run_technical_seo(
     events.extend(
         consume_events(
             "technical_seo",
-            pack_notes=[f"architecture={profile.site_architecture_status}"],
+            pack_notes=[
+                f"architecture={profile.site_architecture_status}",
+                f"calendar={profile.seo_strategy_status}",
+            ],
         )
     )
+
+    if profile.site_architecture_status != "complete":
+        events.extend(
+            blocked_events(
+                "technical_seo",
+                "URL mapping must decide optimize-versus-create before the technical audit.",
+                route_to="site_architecture",
+            )
+        )
+        return events
+    if profile.seo_strategy_status != "complete":
+        events.extend(
+            blocked_events(
+                "technical_seo",
+                "New-page titles and the content calendar come before technical SEO.",
+                route_to="content_strategy",
+            )
+        )
+        return events
 
     ia = dict(profile.site_architecture_summary or {})
     ia_status = str(profile.site_architecture_status or "not_started")

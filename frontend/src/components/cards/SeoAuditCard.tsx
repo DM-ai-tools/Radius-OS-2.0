@@ -78,6 +78,11 @@ function avgScore(rows: PageReport[]): number | null {
 
 export default function SeoAuditCard({ payload, canAct, onAction }: Props) {
   const pages = (payload.pages || []) as PageReport[];
+  const measured =
+    pages.length > 0 ||
+    Number(payload.pages_analyzed) > 0 ||
+    (payload.overall_score != null && payload.overall_score !== "");
+  const failed = Boolean(payload.audit_failed) || Boolean(payload.error) || !measured;
   const payloadClusters = Array.isArray(payload.page_clusters)
     ? (payload.page_clusters as ClusterRow[])
     : [];
@@ -85,7 +90,7 @@ export default function SeoAuditCard({ payload, canAct, onAction }: Props) {
     ? (payload.page_hierarchy as HierarchyRow[])
     : [];
   const [selected, setSelected] = useState(ALL);
-  const showActions = canAct && Array.isArray(payload.actions) && payload.actions.length > 0;
+  const showActions = canAct && Array.isArray(payload.actions) && payload.actions.length > 0 && !failed;
   const focusNote = String(payload.audit_focus_note || "");
   const cddPages = Number(payload.cdd_pages_count ?? pages.filter((p) => p.cdd_focus).length);
   const gaps = Array.isArray(payload.cdd_coverage_gaps)
@@ -172,23 +177,35 @@ export default function SeoAuditCard({ payload, canAct, onAction }: Props) {
       <h3 className="card-title">{String(payload.title || "SEO Audit Report")}</h3>
       <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
         Site: <strong>{String(payload.site || "—")}</strong> · Pages analyzed:{" "}
-        {String(payload.pages_analyzed ?? pages.length ?? "—")}
+        {failed ? "0" : String(payload.pages_analyzed ?? pages.length ?? "—")}
         {cddPages > 0 ? ` · CDD money pages: ${cddPages}` : ""}
       </p>
+      {failed ? (
+        <p style={{ fontSize: 13, color: "var(--danger, #9b2c2c)", marginTop: 0 }}>
+          {String(
+            payload.error ||
+              "This audit did not measure any pages, so it cannot be approved. Re-run the website audit.",
+          )}
+        </p>
+      ) : null}
       {focusNote ? (
         <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>{focusNote}</p>
       ) : null}
 
-      <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 4 }}>
-        Site overall: {String(payload.overall_score ?? "—")}
-        <span style={{ fontSize: 14, fontWeight: 500, color: "var(--muted)" }}>/100</span>
-      </div>
-      <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
-        {String(payload.score_band || "")}
-        {payload.business_weighted_score != null
-          ? ` · Business-weighted ${String(payload.business_weighted_score)}`
-          : ""}
-      </p>
+      {failed ? null : (
+        <>
+          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 4 }}>
+            Site overall: {String(payload.overall_score ?? "—")}
+            <span style={{ fontSize: 14, fontWeight: 500, color: "var(--muted)" }}>/100</span>
+          </div>
+          <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
+            {String(payload.score_band || "")}
+            {payload.business_weighted_score != null
+              ? ` · Business-weighted ${String(payload.business_weighted_score)}`
+              : ""}
+          </p>
+        </>
+      )}
 
       {clusters.length ? (
         <div className="cs-funnel-strip seo-cluster-strip">
@@ -350,9 +367,13 @@ export default function SeoAuditCard({ payload, canAct, onAction }: Props) {
         </div>
       ) : null}
 
-      <IssueList title="Critical issues (must fix)" items={view.critical} tone="critical" />
-      <IssueList title="Warnings (should fix)" items={view.warnings} tone="warning" />
-      <IssueList title="Opportunities (nice to have)" items={view.opportunities} tone="info" />
+      {failed ? null : (
+        <>
+          <IssueList title="Critical issues (must fix)" items={view.critical} tone="critical" />
+          <IssueList title="Warnings (should fix)" items={view.warnings} tone="warning" />
+          <IssueList title="Opportunities (nice to have)" items={view.opportunities} tone="info" />
+        </>
+      )}
 
       {view.passing.length > 0 && (
         <>

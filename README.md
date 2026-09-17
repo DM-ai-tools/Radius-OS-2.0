@@ -2,7 +2,7 @@
 
 Chat-based agentic application that walks Traffic Radius specialists from Business Discovery through Publishing & Indexation. Human-approved **Client Digital Profile** summaries feed each later phase via shared memory.
 
-**Shipped phases:** 01 Discovery → 02 Tracking → 03 Website → 04 Competitor → 05 Keywords → 06a Strategy / 06b Architecture → 07 Technical SEO → 08 Content Audit → 09 Page Planning → 10 Briefs & Drafts → 11 On-Page → 12 Publishing (mock CMS / IndexNow preview).
+**Shipped phases:** 01 Discovery → 02 Tracking → 03 Website audit + sitemap → 04 Competitors → 05 Keywords → 06a URL mapping (optimize existing or create new) → 06b Titles & content calendar → 07 Technical SEO → 08 Existing content audit → 09 Content planning → 10 Draft, keyword cluster, preview → 11 On-page & internal linking → 12 Publish through the connected WordPress account.
 
 ## Repository layout
 

@@ -114,6 +114,8 @@ async def scan_live_site(
     *,
     max_pages: int | None = None,
     seed_urls: list[str] | None = None,
+    use_playwright: bool | None = None,
+    discover_more: bool = True,
 ) -> dict[str, Any]:
     """Fresh crawl of the client's current site, HTTP-first with fallbacks.
 
@@ -126,6 +128,7 @@ async def scan_live_site(
     settings = get_settings()
     cap = max_pages or settings.live_site_scan_max_pages
     source_counts = {"http": 0, "playwright": 0, "perplexity": 0}
+    render = settings.enable_playwright_rendering if use_playwright is None else bool(use_playwright)
 
     urls: list[str] = []
     seen: set[str] = set()
@@ -138,7 +141,7 @@ async def scan_live_site(
         if len(urls) >= cap:
             break
 
-    if len(urls) < cap:
+    if discover_more and len(urls) < cap:
         try:
             discovered = await discover_site_urls(primary_url, max_pages=cap)
         except Exception as exc:  # noqa: BLE001
@@ -168,7 +171,7 @@ async def scan_live_site(
                 return None
             html = fetched.get("text") or ""
             source = "http"
-            if not html or _looks_thin_or_js_shell(html):
+            if render and (not html or _looks_thin_or_js_shell(html)):
                 rendered = await _render_with_playwright(url)
                 if rendered and not _looks_thin_or_js_shell(rendered):
                     html, source = rendered, "playwright"

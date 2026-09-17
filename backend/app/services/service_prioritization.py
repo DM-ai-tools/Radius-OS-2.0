@@ -171,7 +171,10 @@ async def discover_competitor_service_trees(
             return None
         start = comp.get("url") or f"https://{domain}"
         try:
-            urls = await discover_site_urls(start, max_pages=max_urls_each)
+            urls = await asyncio.wait_for(
+                discover_site_urls(start, max_pages=max_urls_each),
+                timeout=20,
+            )
         except Exception:  # noqa: BLE001
             urls = []
         nodes = _paths_to_service_nodes(urls)

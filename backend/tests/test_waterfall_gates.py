@@ -9,7 +9,9 @@ import pytest
 
 from app.agents.competitor import run_competitor
 from app.agents.content_audit import run_content_audit
+from app.agents.content_strategy import run_content_strategy
 from app.agents.search_demand import run_search_demand
+from app.agents.site_architecture import run_site_architecture
 from app.agents.tracking import run_tracking
 from app.agents.website import run_website
 
@@ -137,51 +139,30 @@ async def test_search_demand_blocked_without_competitor_approve():
 
 
 @pytest.mark.asyncio
-async def test_search_demand_cancels_live_scan_task_when_blocked_at_discovery():
-    """The live-site scan is kicked off before the discovery/CDD gate check
-    runs. If that gate blocks, the scan must be cancelled, not left running
-    unawaited in the background burning crawl/Playwright/Perplexity work for
-    a turn that already returned "blocked"."""
+async def test_search_demand_does_not_start_live_scan_when_blocked_at_discovery():
+    """Keyword research must not recrawl the live site before Discovery is ready."""
     profile = _profile(competitor_status="complete", discovery_status="not_started")
     db = AsyncMock()
-
-    async def _slow_scan(url, **kwargs):
-        await asyncio.sleep(30)
-        return {"pages": []}
-
-    created_tasks: list[asyncio.Task] = []
-    real_ensure_future = asyncio.ensure_future
-
-    def _capturing_ensure_future(coro_or_future, **kwargs):
-        task = real_ensure_future(coro_or_future, **kwargs)
-        created_tasks.append(task)
-        return task
+    scan = AsyncMock()
 
     with patch("app.agents.search_demand.get_profile", AsyncMock(return_value=profile)):
         with patch("app.agents.search_demand.load_skill", return_value=""):
             with patch("app.agents.search_demand.load_skill_file", return_value=""):
-                with patch("app.agents.search_demand.scan_live_site", _slow_scan):
+                with patch("app.agents.search_demand.scan_live_site", scan):
                     with patch(
                         "app.agents.search_demand._load_cdd_fields",
                         AsyncMock(return_value={}),
                     ):
-                        with patch("asyncio.ensure_future", _capturing_ensure_future):
-                            events = await run_search_demand(
-                                db,
-                                client=_client(),
-                                session_id=uuid4(),
-                                user_id=uuid4(),
-                                message="Run keyword research",
-                            )
+                        events = await run_search_demand(
+                            db,
+                            client=_client(),
+                            session_id=uuid4(),
+                            user_id=uuid4(),
+                            message="Run keyword research",
+                        )
 
     assert _has_block_route(events, "discovery_agent")
-    assert len(created_tasks) == 1
-    task = created_tasks[0]
-    for _ in range(20):
-        if task.done():
-            break
-        await asyncio.sleep(0.01)
-    assert task.cancelled()
+    scan.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -235,3 +216,48 @@ def test_priority_queue_carries_phase5_secondaries():
     assert hit["from_phase5_topic"] is True
     assert "meta ads manager" in hit["secondary_keywords"]
     assert hit["supporting_keywords"] == hit["secondary_keywords"]
+
+
+@pytest.mark.asyncio
+async def test_url_mapping_does_not_wait_for_the_calendar():
+    profile = _profile(
+        search_demand_status="complete",
+        seo_strategy_status="not_started",
+        search_demand_summary={"cluster_report": {"clusters": [{"label": "seo"}]}},
+    )
+    plan = AsyncMock(return_value={"blocked": True, "reason": "stop"})
+    db = AsyncMock()
+    with patch("app.agents.site_architecture.get_profile", AsyncMock(return_value=profile)):
+        with patch("app.agents.site_architecture.load_skill", return_value=""):
+            with patch("app.agents.site_architecture.run_site_architecture_plan", plan):
+                events = await run_site_architecture(
+                    db,
+                    client=_client(),
+                    session_id=uuid4(),
+                    user_id=uuid4(),
+                    message="Map clusters to URLs",
+                )
+    assert plan.await_count == 1
+    assert not any((e.get("payload") or {}).get("route_to") == "content_strategy" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_titles_and_calendar_wait_for_url_mapping():
+    profile = _profile(
+        search_demand_status="complete",
+        site_architecture_status="not_started",
+        search_demand_summary={"cluster_report": {"clusters": [{"label": "seo"}]}},
+    )
+    db = AsyncMock()
+    with patch("app.agents.content_strategy.get_profile", AsyncMock(return_value=profile)):
+        with patch("app.agents.content_strategy.load_skill", return_value=""):
+            with patch("app.agents.content_strategy.skill_system_preamble", return_value=""):
+                events = await run_content_strategy(
+                    db,
+                    client=_client(),
+                    session_id=uuid4(),
+                    user_id=uuid4(),
+                    message="Decide titles and calendar",
+                )
+    assert _has_block_route(events, "site_architecture")
+    assert profile.seo_strategy_status != "in_progress"

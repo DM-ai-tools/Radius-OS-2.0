@@ -1,0 +1,26 @@
+---
+description: Context.dev is server-side only. All calls go through one wrapper.
+globs: backend/app/integrations/context_dev.py,backend/app/services/design_capture.py
+alwaysApply: true
+---
+
+# Context.dev
+
+SEO agent design capture and page reads use Context.dev. One key covers every endpoint.
+
+- Env var: `CONTEXT_DEV_API_KEY` in `.env` only. SDK reads it as a Bearer token. Never hardcode it, log it, or ship it to the frontend.
+- Wrapper: `backend/app/integrations/context_dev.py`. Nothing else constructs `AsyncContextDev`.
+- SDK: `context.dev` (`requirements.txt`). Prefer the SDK over raw HTTP.
+- On 429 the SDK honors `Retry-After`. It retries 408/5xx with bounded backoff (`max_retries=2`). Do not retry 400 validation errors.
+- Tests mock `app.integrations.context_dev`. Do not call the live API from pytest.
+
+## Endpoints this app uses
+
+| Call | Method | Credits | Docs |
+| --- | --- | --- | --- |
+| `extract_styleguide` | `GET /web/styleguide` | 10 | https://docs.context.dev/api-reference/brand-intelligence/styleguide |
+| `extract_fonts` | `GET /web/fonts` | 5 | https://docs.context.dev/api-reference/brand-intelligence/fonts |
+| `screenshot` | `GET /web/screenshot` | 1 | https://docs.context.dev/api-reference/web-scraping/screenshot |
+| `scrape_markdown` | `GET /web/scrape/markdown` | 1 | https://docs.context.dev/api-reference/web-scraping/markdown |
+
+Design capture (`backend/app/services/design_capture.py`) fires styleguide, fonts, and two screenshots together. A miss is `NOT AVAILABLE`. Never invent a palette. Pass `maxAgeMs=0` only when the page must be fresh; cached results are the default.

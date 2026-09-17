@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 
 from pydantic import field_validator, model_validator
@@ -63,6 +64,7 @@ class Settings(BaseSettings):
     live_site_scan_max_pages: int = 40
 
     ahrefs_api_key: str = ""
+    semrush_api_key: str = ""
     dataforseo_login: str = ""
     dataforseo_password: str = ""
     moz_api_key: str = ""
@@ -84,6 +86,9 @@ class Settings(BaseSettings):
     # --- Phase 12: design fetch, preview, and CMS publish -------------------------
     brandfetch_api_key: str = ""
     firecrawl_api_key: str = ""
+    # Context.dev computed styles + screenshots for the publish preview.
+    # Blank means the local CSS walk still runs; paid readers are skipped.
+    context_dev_api_key: str = ""
 
     # Each client connects their own WordPress site + Application Password from the
     # app (stored encrypted per-client, see app.api.integrations) — there is no
@@ -106,6 +111,7 @@ class Settings(BaseSettings):
     # Default chat-turn budget; heavy phases override below
     agent_timeout_seconds: int = 480
     technical_seo_agent_timeout_seconds: int = 900
+    search_demand_agent_timeout_seconds: int = 720
     # Phase 3 is intentionally bounded for interactive chat. A larger crawl can
     # be requested later through the dedicated crawl/audit tools.
     website_situation_max_pages: int = 40
@@ -191,6 +197,36 @@ class Settings(BaseSettings):
                 "SECRET_KEY is set to a known placeholder value. "
                 "Generate a real one: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
             )
+        return self
+
+    @model_validator(mode="after")
+    def _use_railway_public_origin_when_urls_are_local(self) -> "Settings":
+        """Railway injects RAILWAY_PUBLIC_DOMAIN. Use it only when public URLs are still localhost.
+
+        Local development has no Railway domain, so this does not change local URLs.
+        An explicitly set production FRONTEND_URL / CORS / OAuth redirect is left alone.
+        """
+        if self.environment != "production":
+            return self
+        domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip().rstrip("/")
+        if not domain or "://" in domain:
+            return self
+        origin = f"https://{domain}"
+
+        def _local(url: str) -> bool:
+            return "localhost" in url or "127.0.0.1" in url
+
+        if _local(self.frontend_url):
+            self.frontend_url = origin
+        if _local(self.oauth_redirect_uri):
+            self.oauth_redirect_uri = f"{origin}/api/v1/oauth/callback"
+        if _local(self.cors_origins):
+            kept = [
+                item.strip()
+                for item in self.cors_origins.split(",")
+                if item.strip() and not _local(item)
+            ]
+            self.cors_origins = ",".join([origin, *kept])
         return self
 
     @model_validator(mode="after")

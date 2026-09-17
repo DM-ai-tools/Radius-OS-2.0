@@ -123,6 +123,17 @@ def _parse_scope(message: str) -> set[str]:
     return {"crawl", "seo_audit", "backlink", "anomaly", "broken_links"}
 
 
+def _seo_audit_measured(report: dict | None) -> bool:
+    """True only when pages were actually scored. A timeout stub is not a pass."""
+    if not isinstance(report, dict):
+        return False
+    if report.get("status") in {"timeout", "error"} or report.get("audit_failed"):
+        return False
+    pages = report.get("pages") or []
+    analyzed = report.get("pages_analyzed")
+    return bool(pages) or (isinstance(analyzed, int) and analyzed > 0)
+
+
 async def run_website(
     db: AsyncSession,
     *,
@@ -263,6 +274,25 @@ async def run_website(
             ),
             "Comprehensive SEO audit",
         )
+        if not _seo_audit_measured(seo_audit_report):
+            seo_audit_report = {
+                **(seo_audit_report or {}),
+                "site": (seo_audit_report or {}).get("site") or client.primary_url,
+                "pages_analyzed": 0,
+                "overall_score": None,
+                "score_band": "Not measured",
+                "audit_failed": True,
+                "error": (
+                    (seo_audit_report or {}).get("error")
+                    or (seo_audit_report or {}).get("note")
+                    or "SEO audit did not measure any pages."
+                ),
+                "pages": [],
+                "critical": [],
+                "warnings": [],
+                "opportunities": [],
+                "severity": "warning",
+            }
         sa = WebsiteAudit(
             client_id=client.id,
             audit_type="seo_audit",
@@ -550,7 +580,7 @@ async def run_website(
         events.append(
             {
                 "type": "system_notice",
-                "content": "Pulling backlink profile (Ahrefs → Moz fallback if needed)…",
+                "content": "Pulling backlink profile (SEMrush → Ahrefs → Moz)…",
             }
         )
         domain = extract_domain(client.primary_url)
@@ -832,7 +862,11 @@ async def run_website(
         },
     )
     await recompute_readiness(db, client.id)
-    profile.website_status = "pending_signoff"
+    seo_failed = "seo_audit" in scope and not _seo_audit_measured(seo_audit_report)
+    if seo_failed and scope == {"seo_audit"}:
+        profile.website_status = "not_started"
+    else:
+        profile.website_status = "pending_signoff"
 
     if broken_report is not None:
         link_card = {
@@ -922,15 +956,21 @@ async def run_website(
             events.append({"type": "checkpoint", "payload": tech_card})
 
     if seo_audit_report is not None:
+        measured = _seo_audit_measured(seo_audit_report)
         sa_card = {
             "card_type": "seo_audit_report",
             "title": "SEO Audit Report",
-            "site": seo_audit_report.get("site"),
-            "pages_analyzed": seo_audit_report.get("pages_analyzed"),
-            "overall_score": seo_audit_report.get("overall_score"),
-            "score_band": seo_audit_report.get("score_band"),
+            "site": seo_audit_report.get("site") or client.primary_url,
+            "pages_analyzed": seo_audit_report.get("pages_analyzed") if measured else 0,
+            "overall_score": seo_audit_report.get("overall_score") if measured else None,
+            "score_band": seo_audit_report.get("score_band") or ("Not measured" if not measured else None),
             "business_weighted_score": seo_audit_report.get("business_weighted_score"),
             "audit_focus_note": seo_audit_report.get("audit_focus_note"),
+            "audit_failed": not measured,
+            "error": None if measured else (
+                seo_audit_report.get("error")
+                or "The audit did not measure any pages, so it cannot be approved."
+            ),
             "cdd_pages_count": seo_audit_report.get("cdd_pages_count"),
             "cdd_coverage_gaps": seo_audit_report.get("cdd_coverage_gaps") or [],
             "critical": seo_audit_report.get("critical") or [],
@@ -940,29 +980,38 @@ async def run_website(
             "pages": seo_audit_report.get("pages") or [],
             "page_clusters": seo_audit_report.get("page_clusters") or [],
             "page_hierarchy": seo_audit_report.get("page_hierarchy") or [],
+            "sitemap_url_count": (draft_summary or {}).get("sitemap_url_count"),
             "agent_key": "website_situation_agent",
             "skill": "seo-audit",
-            "actions": ["approve", "edit", "reject"] if scope == {"seo_audit"} else [],
+            "actions": ["approve", "edit", "reject"] if measured and scope == {"seo_audit"} else (["reject"] if not measured else []),
             "required_role": required_role_for("website_situation_agent"),
         }
         cdd_n = int(seo_audit_report.get("cdd_pages_count") or 0)
         gap_n = len(seo_audit_report.get("cdd_coverage_gaps") or [])
+        if not measured:
+            message = (
+                f"SEO audit for {sa_card.get('site')} did not measure any pages"
+                + (f" ({sa_card.get('error')}). " if sa_card.get("error") else ". ")
+                + "It was not sent for approval. Re-run the website audit."
+            )
+        else:
+            message = (
+                f"SEO Audit for {seo_audit_report.get('site')}: "
+                f"{seo_audit_report.get('overall_score')}/100 "
+                f"({seo_audit_report.get('score_band')}) across "
+                f"{seo_audit_report.get('pages_analyzed')} page(s). "
+                f"Hierarchy: Home → hubs → services → sub-services "
+                f"({len(seo_audit_report.get('page_clusters') or [])} tiers). "
+                f"{cdd_n} CDD-matched money page(s)"
+                + (f"; {gap_n} CDD coverage gap(s) flagged" if gap_n else "")
+                + f". {len(seo_audit_report.get('critical') or [])} critical, "
+                f"{len(seo_audit_report.get('warnings') or [])} warnings."
+            )
         events.append(
             {
                 "type": "agent_message",
                 "agent_key": "website_situation_agent",
-                "content": (
-                    f"SEO Audit for {seo_audit_report.get('site')}: "
-                    f"{seo_audit_report.get('overall_score')}/100 "
-                    f"({seo_audit_report.get('score_band')}) across "
-                    f"{seo_audit_report.get('pages_analyzed')} page(s). "
-                    f"Hierarchy: Home → hubs → services → sub-services "
-                    f"({len(seo_audit_report.get('page_clusters') or [])} tiers). "
-                    f"{cdd_n} CDD-matched money page(s)"
-                    + (f"; {gap_n} CDD coverage gap(s) flagged" if gap_n else "")
-                    + f". {len(seo_audit_report.get('critical') or [])} critical, "
-                    f"{len(seo_audit_report.get('warnings') or [])} warnings."
-                ),
+                "content": message,
             }
         )
         events.append({"type": "structured_card", "payload": sa_card})
@@ -1034,6 +1083,10 @@ async def run_website(
     elif scope == {"technical_seo"}:
         next_msg = "Next: tackle Critical/High fixes (or Approve), then continue Phase 3 / competitor analysis."
     elif scope == {"seo_audit"}:
-        next_msg = "Next: fix Critical issues first (or Approve), then continue Phase 3 / competitor analysis."
+        next_msg = (
+            "SEO audit measured no pages, so it was not sent for approval. Re-run the website audit."
+            if seo_failed
+            else "Next: fix Critical issues first (or Approve), then continue Phase 3 / competitor analysis."
+        )
     events.append({"type": "system_notice", "content": next_msg})
     return events

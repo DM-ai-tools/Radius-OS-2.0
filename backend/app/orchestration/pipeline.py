@@ -27,8 +27,8 @@ _STATUS_AGENT_PAIRS = (
     ("website_status", "website_situation_agent"),
     ("competitor_status", "competitor_market_agent"),
     ("search_demand_status", "search_demand"),
-    ("seo_strategy_status", "content_strategy"),
     ("site_architecture_status", "site_architecture"),
+    ("seo_strategy_status", "content_strategy"),
     ("technical_seo_status", "technical_seo"),
     ("content_audit_status", "content_audit"),
     ("content_planning_status", "content_planning"),
@@ -78,7 +78,27 @@ def agent_timeout_seconds(agent_key: str) -> int:
     settings = get_settings()
     if agent_key == "technical_seo":
         return int(getattr(settings, "technical_seo_agent_timeout_seconds", 900) or 900)
+    if agent_key == "search_demand":
+        return int(getattr(settings, "search_demand_agent_timeout_seconds", 720) or 720)
     return int(getattr(settings, "agent_timeout_seconds", AGENT_TIMEOUT_SECONDS) or AGENT_TIMEOUT_SECONDS)
+
+
+def _timeout_notice(agent_key: str) -> str:
+    budget_min = agent_timeout_seconds(agent_key) // 60
+    if agent_key == "search_demand":
+        return (
+            f"Keyword research was stopped after {budget_min} minutes. "
+            "It reuses the Phase 3 sitemap instead of recrawling the live site — try again."
+        )
+    if agent_key == "website_situation_agent":
+        return (
+            f"Website audit was stopped after {budget_min} minutes. "
+            "Try again, or narrow the request (crawl only / SEO audit only)."
+        )
+    return (
+        f"{agent_key} is taking longer than expected and was stopped after "
+        f"{budget_min} minutes. Try again."
+    )
 
 
 async def process_chat_turn(
@@ -261,6 +281,7 @@ async def process_chat_turn(
 
     session.active_agent_key = agent_key
     runner = AGENT_RUNNERS[agent_key]
+    runner_task: asyncio.Task | None = None
     try:
         from app.services.api_meter import api_meter_context
         from app.services.phase_validation import run_phase_with_validation
@@ -270,7 +291,7 @@ async def process_chat_turn(
             session_id=session.id,
             agent_key=agent_key,
         ):
-            events = await asyncio.wait_for(
+            runner_task = asyncio.create_task(
                 run_phase_with_validation(
                     db,
                     runner=runner,
@@ -280,19 +301,23 @@ async def process_chat_turn(
                     user_id=user.id,
                     agent_key=agent_key,
                     message=content,
-                ),
+                )
+            )
+            events = await asyncio.wait_for(
+                runner_task,
                 timeout=agent_timeout_seconds(agent_key),
             )
     except asyncio.TimeoutError:
-        budget_min = agent_timeout_seconds(agent_key) // 60
+        if runner_task is not None and not runner_task.done():
+            runner_task.cancel()
+            try:
+                await runner_task
+            except (asyncio.CancelledError, Exception):
+                pass
         events = [
             {
                 "type": "error",
-                "content": (
-                    f"{agent_key} is taking longer than expected and was stopped after "
-                    f"{budget_min} minutes. Try again, or narrow the "
-                    "request (e.g. crawl only / SEO audit only)."
-                ),
+                "content": _timeout_notice(agent_key),
             }
         ]
     await _persist_agent_events(db, session, client.id, events)

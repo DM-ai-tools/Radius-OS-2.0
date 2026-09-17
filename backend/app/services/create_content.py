@@ -295,9 +295,11 @@ def resolve_page_type(src: dict[str, Any] | None) -> str:
         return "landing"
     if intent == "commercial":
         return "service"
+    if weak and "/blog/" not in url and "/guides/" not in url:
+        return "service"
     if weak:
         return weak[0]
-    return "article"
+    return "service"
 
 
 # Phase 5 (create_topic._ANGLE_CYCLE) assigns each topic one of these angles so a
@@ -733,6 +735,35 @@ def _figure_markdown(img: dict[str, Any]) -> str:
     if src:
         return f"![{alt}]({src})\n*{cap[:220]}*"
     return f"[FIGURE {img.get('role') or 'image'}] {cap[:220]}"
+
+
+_FIGURE_MARKER = re.compile(r"(?im)^\s*\[FIGURE\s+[^\]]+\][^\n]*\n?")
+_MD_IMAGE = re.compile(r"^!\[[^\]]*\]\(([^)]+)\)\s*$")
+
+
+def _strip_figure_markers(md: str, figures: list[dict[str, Any]] | None = None) -> str:
+    """Drop LLM [FIGURE role] slots (and matching ![src] copies) so images render once."""
+    srcs = [str(f.get("src") or "").strip() for f in (figures or []) if f.get("src")]
+    lines = (md or "").split("\n")
+    out: list[str] = []
+    skip_caption = False
+    for line in lines:
+        if skip_caption:
+            skip_caption = False
+            stripped_cap = line.strip()
+            if stripped_cap.startswith("*") and stripped_cap.endswith("*") and len(stripped_cap) > 2:
+                continue
+        stripped = line.strip()
+        if re.match(r"(?i)^\[FIGURE\s+", stripped):
+            continue
+        m = _MD_IMAGE.match(stripped)
+        if m:
+            src = m.group(1).strip()
+            if any(src == s or src.endswith(s) or s.endswith(src) for s in srcs):
+                skip_caption = True
+                continue
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
 
 
 def _inject_supporting_into_markdown(md: str, figures: list[dict[str, Any]]) -> str:
@@ -1285,7 +1316,9 @@ def _build_markdown(
 
     has_full = len(full_page) >= 500 and "## " in full_page
     if has_full:
-        body_md = _inject_supporting_into_markdown(full_page, supporting)
+        body_md = _inject_supporting_into_markdown(
+            _strip_figure_markers(full_page, figures), supporting
+        )
         supporting = []
         lines.extend([body_md, ""])
         a_n, v_n = _count_placeholders(full_page)

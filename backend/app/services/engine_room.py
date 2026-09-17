@@ -206,6 +206,16 @@ async def build_engine_room(db: AsyncSession, *, days: int = 7) -> dict[str, Any
             "mock": settings.use_mock_providers,
         },
         {
+            "provider": "semrush",
+            "configured": bool(settings.semrush_api_key),
+            "mock": settings.use_mock_providers,
+        },
+        {
+            "provider": "context_dev",
+            "configured": bool(settings.context_dev_api_key),
+            "mock": settings.use_mock_providers,
+        },
+        {
             "provider": "redis_cache",
             "configured": bool(settings.redis_url),
             "mock": False,

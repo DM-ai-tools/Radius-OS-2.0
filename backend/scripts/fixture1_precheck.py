@@ -59,7 +59,7 @@ CLUSTERS: dict[str, list[str]] = {
 
 
 async def main() -> int:
-    from app.integrations import ahrefs, dataforseo
+    from app.integrations import dataforseo, semrush
 
     out: dict = {"clusters": {}, "sources": {}}
     print(f"{'cluster':<44}{'source':<12}{'total/mo':>10}  keywords with volume")
@@ -70,11 +70,11 @@ async def main() -> int:
         source = None
         errors: list[str] = []
 
-        a_rows, a_err = await ahrefs.keyword_overview(keywords, country="us")
+        a_rows, a_err = await semrush.keyword_overview(keywords, country="us")
         if a_rows:
-            rows, source = a_rows, "ahrefs"
+            rows, source = a_rows, "semrush"
         else:
-            errors.extend(a_err or ["ahrefs_no_rows"])
+            errors.extend(a_err or ["semrush_no_rows"])
             # NOTE: dataforseo.search_volume() is broken — _task_items expects the
             # Labs shape result[0].items[], but google_ads/search_volume returns
             # rows directly in result[], so it silently returns ([], []). Ledgered

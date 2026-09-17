@@ -52,8 +52,8 @@ export default function PublishingCard({
           {wordpressStatus?.connected ? (
             <>
               <span className="cs-chip" style={{ background: "var(--secondary-bg)" }}>
-                Connected as {wordpressStatus.wp_user || wordpressStatus.username} to{" "}
-                {wordpressStatus.base_url}
+                {wordpressStatus.gate?.label || "Connected"} as{" "}
+                {wordpressStatus.wp_user || wordpressStatus.username} to {wordpressStatus.base_url}
               </span>
               {onDisconnectWordPress ? (
                 <button type="button" className="btn btn-ghost" onClick={onDisconnectWordPress}>

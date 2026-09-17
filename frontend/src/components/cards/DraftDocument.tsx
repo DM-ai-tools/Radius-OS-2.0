@@ -341,15 +341,23 @@ export default function DraftDocument({
   const reviewItems = review?.blocks.flatMap((b) => (b.type === "ul" ? b.items : b.type === "p" ? [b.text] : [])) || [];
   const noteItems = notes?.blocks.flatMap((b) => (b.type === "ul" ? b.items : b.type === "p" ? [b.text] : [])) || [];
   const coverageTable = coverage?.blocks.find((b) => b.type === "table");
-  const generated = (images || []).filter((i) => i.src);
-  const allImages = images || [];
-  const heroImg =
-    generated.find((i) => i.role === "hero") || generated[0];
-  const shownSrc = new Set<string>(heroImg?.src ? [heroImg.src] : []);
-  const failedPlaceholders =
-    !heroImg && allImages.length
-      ? allImages
-      : [];
+  const unusedImages = [...(images || [])];
+  const takeImage = (opts: { src?: string; role?: string }): DraftImage | undefined => {
+    const src = String(opts.src || "").split("?")[0].replace(/\/$/, "");
+    const role = String(opts.role || "").toLowerCase();
+    if (src) {
+      const i = unusedImages.findIndex((img) => {
+        const got = String(img.src || "").split("?")[0].replace(/\/$/, "");
+        return Boolean(got) && (got === src || got.endsWith(src) || src.endsWith(got));
+      });
+      if (i >= 0) return unusedImages.splice(i, 1)[0];
+    }
+    if (role) {
+      const i = unusedImages.findIndex((img) => String(img.role || "").toLowerCase() === role);
+      if (i >= 0) return unusedImages.splice(i, 1)[0];
+    }
+    return undefined;
+  };
 
   return (
     <div className="draft-document">
@@ -362,30 +370,6 @@ export default function DraftDocument({
       <SerpPreview title={title} url={url} metaDescription={resolvedMetaDescription} />
 
       {Object.keys(meta).length ? <FieldGrid data={meta} /> : null}
-
-      {heroImg ? (
-        <DraftFigure
-          src={heroImg.src}
-          alt={heroImg.alt}
-          caption={heroImg.caption || heroImg.prompt}
-          role={heroImg.role}
-          status={heroImg.status}
-        />
-      ) : failedPlaceholders.length ? (
-        <div className="cs-pillar-block">
-          <div className="present-key">Images</div>
-          {failedPlaceholders.map((img, i) => (
-            <DraftFigure
-              key={`failed-${i}`}
-              src={img.src}
-              alt={img.alt}
-              caption={img.caption || img.prompt}
-              role={img.role}
-              status={img.status || "failed"}
-            />
-          ))}
-        </div>
-      ) : null}
 
       {diffText ? (
         <div className="cs-pillar-block">
@@ -432,14 +416,30 @@ export default function DraftDocument({
               );
             }
             if (b.type === "img") {
-              if (heroImg?.src && b.src === heroImg.src) return null;
-              shownSrc.add(b.src);
+              const taken = takeImage({ src: b.src });
               return (
-                <DraftFigure key={j} src={b.src} alt={b.alt} caption={b.caption} />
+                <DraftFigure
+                  key={j}
+                  src={b.src}
+                  alt={taken?.alt || b.alt}
+                  caption={b.caption || taken?.caption || taken?.prompt}
+                  role={taken?.role}
+                  status={taken?.status}
+                />
               );
             }
             if (b.type === "figure") {
-              return <DraftFigure key={j} role={b.role} caption={b.caption} />;
+              const taken = takeImage({ role: b.role });
+              return (
+                <DraftFigure
+                  key={j}
+                  src={taken?.src}
+                  alt={taken?.alt}
+                  caption={b.caption || taken?.caption || taken?.prompt}
+                  role={b.role}
+                  status={taken?.status}
+                />
+              );
             }
             if (b.type === "p") {
               return (
@@ -488,8 +488,8 @@ export default function DraftDocument({
         </div>
       ))}
 
-      {(images || [])
-        .filter((img) => Boolean(img.src) && img.src !== heroImg?.src && !shownSrc.has(String(img.src)))
+      {unusedImages
+        .filter((img) => Boolean(img.src))
         .map((img, i) => (
           <DraftFigure
             key={`extra-${i}`}

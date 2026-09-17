@@ -12,25 +12,26 @@ from app.services.technical_seo_schemas import (
     CategoryScore,
     TechnicalSEOIssue,
     TechnicalSEOPage,
+    normalize_category,
 )
 
-# Ahrefs issue category → internal category
+# Ahrefs issue category → Phase 7 targeting group
 _AHREFS_CATEGORY_MAP: dict[str, str] = {
-    "Internal pages": "Status Codes",
-    "Indexability": "Indexability",
-    "Links": "Internal Linking",
-    "Redirects": "Crawlability",
-    "Content": "Content",
-    "Duplicates": "Metadata",
-    "Sitemaps": "Crawlability",
-    "Localization": "Indexability",
-    "Social tags": "Metadata",
+    "Internal pages": "URL structure",
+    "Indexability": "Indexation",
+    "Links": "Internal linking",
+    "Redirects": "URL structure",
+    "Content": "On-page technical SEO",
+    "Duplicates": "Canonicalisation",
+    "Sitemaps": "Sitemap",
+    "Localization": "Indexation",
+    "Social tags": "On-page technical SEO",
     "Usability and performance": "Performance",
-    "Images": "Metadata",
-    "JavaScript": "Crawlability",
-    "CSS": "Crawlability",
+    "Images": "On-page technical SEO",
+    "JavaScript": "JavaScript/rendering",
+    "CSS": "Performance",
     "External pages": "Crawlability",
-    "AI Discoverability": "Indexability",
+    "AI Discoverability": "Structured data",
     "Other": "Crawlability",
 }
 
@@ -101,7 +102,7 @@ def issues_from_ahrefs(
         name = str(row.get("name") or "Unknown issue").strip()
         if not issue_id:
             continue
-        category = _map_category(str(row.get("category") or "Other"))
+        category = normalize_category(_map_category(str(row.get("category") or "Other")))
         importance = str(row.get("importance") or "Warning")
         count = int(row.get("crawled") or 0)
         severity = _severity_for_issue(name, importance)
@@ -173,7 +174,7 @@ def issues_from_pages(pages: list[TechnicalSEOPage]) -> list[TechnicalSEOIssue]:
 
     _add(
         "HTTP_5XX",
-        "Status Codes",
+        "URL structure",
         "Pages returning 5xx errors",
         "Critical",
         status_5xx,
@@ -181,15 +182,15 @@ def issues_from_pages(pages: list[TechnicalSEOPage]) -> list[TechnicalSEOIssue]:
     )
     _add(
         "HTTP_4XX",
-        "Status Codes",
+        "Sitemap",
         "Pages returning 4xx errors",
         "High",
         status_4xx,
-        "Fix or redirect 4xx URLs; remove broken internal links.",
+        "Fix or redirect 4xx URLs; remove them from the sitemap and internal links.",
     )
     _add(
         "MISSING_TITLE",
-        "Metadata",
+        "On-page technical SEO",
         "Missing title tag",
         "Medium",
         missing_title,
@@ -197,7 +198,7 @@ def issues_from_pages(pages: list[TechnicalSEOPage]) -> list[TechnicalSEOIssue]:
     )
     _add(
         "MISSING_H1",
-        "Metadata",
+        "On-page technical SEO",
         "Missing H1",
         "Medium",
         missing_h1,
@@ -205,7 +206,7 @@ def issues_from_pages(pages: list[TechnicalSEOPage]) -> list[TechnicalSEOIssue]:
     )
     _add(
         "DUPLICATE_TITLE",
-        "Metadata",
+        "On-page technical SEO",
         "Duplicate title tags",
         "Medium",
         dup_titles,
@@ -213,7 +214,7 @@ def issues_from_pages(pages: list[TechnicalSEOPage]) -> list[TechnicalSEOIssue]:
     )
     _add(
         "DEEP_CLICK_DEPTH",
-        "Internal Linking",
+        "Crawlability",
         "Important pages at click depth 4+",
         "Medium",
         deep_pages,
@@ -221,7 +222,7 @@ def issues_from_pages(pages: list[TechnicalSEOPage]) -> list[TechnicalSEOIssue]:
     )
     _add(
         "ORPHAN_PAGE",
-        "Internal Linking",
+        "Internal linking",
         "Orphan indexable pages",
         "High",
         orphans,
@@ -229,7 +230,7 @@ def issues_from_pages(pages: list[TechnicalSEOPage]) -> list[TechnicalSEOIssue]:
     )
     _add(
         "REDIRECT_LOOP",
-        "Crawlability",
+        "URL structure",
         "Redirect loops",
         "Critical",
         redirect_loops,
@@ -237,7 +238,7 @@ def issues_from_pages(pages: list[TechnicalSEOPage]) -> list[TechnicalSEOIssue]:
     )
     _add(
         "THIN_CONTENT",
-        "Content",
+        "On-page technical SEO",
         "Thin content pages",
         "Low",
         thin,
@@ -270,15 +271,16 @@ def compute_category_scores(
     scores: dict[str, dict[str, Any]] = {}
     by_cat: dict[str, list[TechnicalSEOIssue]] = {c: [] for c in ALL_CATEGORIES}
     for issue in issues:
-        by_cat.setdefault(issue.category, []).append(issue)
+        by_cat.setdefault(normalize_category(issue.category), []).append(issue)
 
     for category in ALL_CATEGORIES:
         cat_issues = by_cat.get(category, [])
         if not pages_available and category in (
-            "Metadata",
-            "Internal Linking",
-            "Content",
-            "Canonicalization",
+            "On-page technical SEO",
+            "JavaScript/rendering",
+            "Structured data",
+            "Internal linking",
+            "Canonicalisation",
         ):
             scores[category] = CategoryScore(
                 category=category,

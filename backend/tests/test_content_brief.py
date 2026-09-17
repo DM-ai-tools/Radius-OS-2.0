@@ -503,4 +503,41 @@ async def test_ui_topic_selection_reaches_each_existing_page_type_draft():
                 prior_briefs=briefs,
             )
         assert drafted["draft_count"] == 1
-        assert drafted["drafts"][0]["page_type"] == page_type
+        assert drafted["drafts"][0]["keyword"] == f"{page_type} seo"
+
+
+def test_briefable_pages_keep_locked_creates_after_memory_slim():
+    from app.services.content_production import _briefable_pages
+    from app.services.memory_packs import slim_content_planning_memory
+
+    full = {
+        "locked": True,
+        "pages": [
+            {
+                "url": "/ads-google",
+                "url_n": "/ads-google",
+                "keyword": "ads google",
+                "action": "create",
+                "decision_basis": "url_map_create",
+                "existing_content_check": "no_match",
+                "title": "Google Ads",
+            }
+        ],
+    }
+    slim = slim_content_planning_memory(full)
+    pages = _briefable_pages(slim)
+    assert len(pages) == 1
+    assert pages[0]["url"] == "/ads-google"
+    assert pages[0].get("decision_basis") == "url_map_create"
+
+
+def test_unlocked_create_without_gap_evidence_is_not_briefed():
+    from app.services.content_production import _briefable_pages
+
+    pages = _briefable_pages(
+        {
+            "locked": False,
+            "pages": [{"url": "/x", "keyword": "x", "action": "create"}],
+        }
+    )
+    assert pages == []

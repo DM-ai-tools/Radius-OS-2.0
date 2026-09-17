@@ -4,6 +4,7 @@ import { api, ChatEvent, Client, Profile, WordPressStatus } from "../api";
 import { useAuth } from "../auth";
 import ThinkingIndicator from "../components/ThinkingIndicator";
 import WordPressConnectModal from "../components/WordPressConnectModal";
+import WordPressWorkspace from "../components/WordPressWorkspace";
 import DiscoveryCard from "../components/cards/DiscoveryCard";
 import TrackingCard from "../components/cards/TrackingCard";
 import WebsiteCard from "../components/cards/WebsiteCard";
@@ -101,40 +102,55 @@ const CONTROL_PHASES: Array<{
   { key: "tracking", label: "02. Tracking", agent: "tracking_access_agent", prompt: "Run tracking check" },
   {
     key: "website",
-    label: "03. Website",
+    label: "03. Website audit + sitemap",
     agent: "website_situation_agent",
-    prompt: "Run website situation analysis  -  SEO audit every page",
+    prompt: "Run website audit and sitemap",
   },
-  { key: "competitor", label: "04. Competitors", agent: "competitor_market_agent", prompt: "Refresh competitor scan" },
-  { key: "search_demand", label: "05. Search demand", agent: "search_demand", prompt: "Run keyword research / search demand" },
+  { key: "competitor", label: "04. Competitors", agent: "competitor_market_agent", prompt: "Fetch competitors" },
   {
-    key: "seo_strategy",
-    label: "06a. Content strategy",
-    agent: "content_strategy",
-    prompt: "Run content strategy and content calendar",
+    key: "search_demand",
+    label: "05. Keywords",
+    agent: "search_demand",
+    prompt: "Find, classify, and cluster keywords",
   },
   {
     key: "site_architecture",
-    label: "06b. Site architecture",
+    label: "06a. URL mapping",
     agent: "site_architecture",
-    prompt: "Run site architecture and click-depth audit",
+    prompt: "Map clusters to URLs — optimize existing or create new",
+  },
+  {
+    key: "seo_strategy",
+    label: "06b. Titles & calendar",
+    agent: "content_strategy",
+    prompt: "Decide titles for new pages and build the content calendar",
   },
   { key: "technical_seo", label: "07. Technical SEO", agent: "technical_seo", prompt: "Run technical SEO audit" },
-  { key: "content_audit", label: "08. Content audit", agent: "content_audit", prompt: "Run existing content audit" },
+  { key: "content_audit", label: "08. Existing content audit", agent: "content_audit", prompt: "Score existing pages marked for optimization" },
   {
     key: "content_planning",
     label: "09. Content planning",
     agent: "content_planning",
-    prompt: "Merge strategy, architecture, and audit into a locked page roadmap",
+    prompt: "Lock the selected page before drafting",
   },
   {
     key: "content_production",
-    label: "10. Content production",
+    label: "10. Draft & preview",
     agent: "content_production",
-    prompt: "Run content production briefs and drafts",
+    prompt: "Write the full draft for the next priority topic and show the preview",
   },
-  { key: "on_page_seo", label: "11. On-page SEO", agent: "on_page_seo", prompt: "Run on-page SEO package" },
-  { key: "publishing", label: "12. Publishing", agent: "publishing", prompt: "Run publishing checklist and IndexNow preview" },
+  {
+    key: "on_page_seo",
+    label: "11. On-page & linking",
+    agent: "on_page_seo",
+    prompt: "Build the on-page package and internal linking plan",
+  },
+  {
+    key: "publishing",
+    label: "12. Publish to WordPress",
+    agent: "publishing",
+    prompt: "Publish through the connected WordPress account using the internal linking plan",
+  },
 ];
 
 const PHASE_OWNER: Record<string, string> = {
@@ -447,28 +463,29 @@ function phaseStatusLabel(status: string): string {
 }
 
 const START_OPERATIONS: Array<{ label: string; prompt: string; agent: string }> = [
-  { label: "Complete SEO Audit", prompt: "Run website situation analysis  -  SEO audit every page", agent: "website_situation_agent" },
-  { label: "Analyse Competitors", prompt: "Refresh competitor scan", agent: "competitor_market_agent" },
-  { label: "Find Keyword Opportunities", prompt: "Run keyword research / search demand", agent: "search_demand" },
-  { label: "Build Content Strategy", prompt: "Run content strategy and content calendar", agent: "content_strategy" },
-  { label: "Improve Technical SEO", prompt: "Run technical SEO audit", agent: "technical_seo" },
-  { label: "Create & Publish Content", prompt: "Run content production briefs and drafts", agent: "content_production" },
+  { label: "Website audit + sitemap", prompt: "Run website audit and sitemap", agent: "website_situation_agent" },
+  { label: "Fetch competitors", prompt: "Fetch competitors", agent: "competitor_market_agent" },
+  { label: "Find & cluster keywords", prompt: "Find, classify, and cluster keywords", agent: "search_demand" },
+  { label: "Map URLs", prompt: "Map clusters to URLs — optimize existing or create new", agent: "site_architecture" },
+  { label: "Titles & calendar", prompt: "Decide titles for new pages and build the content calendar", agent: "content_strategy" },
+  { label: "Technical SEO", prompt: "Run technical SEO audit", agent: "technical_seo" },
+  { label: "Draft & publish", prompt: "Write the full draft for the next priority topic and show the preview", agent: "content_production" },
 ];
 
 const AGENT_PURPOSE: Record<string, string> = {
   discovery: "Understand business, audience and market",
   tracking: "Verify analytics, GTM and conversion access",
-  website: "Audit crawlability, indexation and page health",
-  competitor: "Map landscape, gaps and SERP overlap",
-  search_demand: "Find demand, keywords and SERP opportunities",
-  seo_strategy: "Lock pillars, calendar and content queue",
-  site_architecture: "Click-depth, URL tree and IA",
-  technical_seo: "CWV, indexation and technical debt",
-  content_audit: "Score existing pages for refresh vs retire",
-  content_planning: "Merge strategy + IA + audit into a roadmap",
-  content_production: "Briefs, drafts and production QA",
-  on_page_seo: "Titles, schema and on-page packages",
-  publishing: "CMS checklist, IndexNow and go-live",
+  website: "Audit every page and build the sitemap in the same pass",
+  competitor: "Fetch competitors and where they rank",
+  search_demand: "Find, classify, and cluster keywords",
+  site_architecture: "Map each cluster: optimize an existing page or create a new one",
+  seo_strategy: "Titles for new pages, then the content calendar",
+  technical_seo: "Technical SEO after the calendar is locked",
+  content_audit: "Score pages the URL map marked for optimization",
+  content_planning: "Lock the selected page before drafting",
+  content_production: "Write the full draft, then show the preview",
+  on_page_seo: "On-page package and the internal linking plan",
+  publishing: "Publish through the connected WordPress account",
 };
 
 function monitorStatusLabel(status: string): string {
@@ -630,7 +647,7 @@ export default function ChatPage() {
   const [thinkingStatus, setThinkingStatus] = useState("Routing your request...");
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const [sidebarNav, setSidebarNav] = useState<
-    "command" | "operations" | "reports" | "memory" | "agents" | "engine_room" | "cost_tracker"
+    "command" | "operations" | "reports" | "memory" | "agents" | "engine_room" | "cost_tracker" | "wordpress"
   >("command");
   const [kpiDetail, setKpiDetail] = useState<null | "issues" | "opportunities">(null);
   const [reportFocusKey, setReportFocusKey] = useState<string | null>(null);
@@ -642,6 +659,7 @@ export default function ChatPage() {
   const [playgroundLoading, setPlaygroundLoading] = useState(true);
   const [exportingReports, setExportingReports] = useState(false);
   const [wordpressStatus, setWordpressStatus] = useState<WordPressStatus | null>(null);
+  const [wordpressChecking, setWordpressChecking] = useState(false);
   const [wordpressModalOpen, setWordpressModalOpen] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() =>
     typeof document !== "undefined" && document.documentElement.classList.contains("theme-light")
@@ -698,11 +716,14 @@ export default function ChatPage() {
 
   const refreshWordpressStatus = useCallback(async () => {
     if (!token || !clientId) return;
+    setWordpressChecking(true);
     try {
       setWordpressStatus(await api.wordpressStatus(token, clientId));
     } catch {
-      // Not fatal  -  the Publishing card just shows "not connected" until this succeeds.
+      // Not fatal — the WordPress section just shows "not connected" until this succeeds.
       setWordpressStatus(null);
+    } finally {
+      setWordpressChecking(false);
     }
   }, [token, clientId]);
 
@@ -1377,40 +1398,40 @@ export default function ChatPage() {
           action === "flag_for_client"
             ? "Tracking flagged  -  fix with client, then re-check before trusting Phase 3 anomalies."
             : "Handoff: Tracking  ->  Website. Next: run website situation analysis.",
-        website_situation_agent: "Handoff: Website  ->  Competitors. Next: run competitor analysis.",
-        competitor_market_agent: "Handoff: Competitors  ->  Search Demand. Next: run keyword research.",
-        search_demand: "Handoff: Search Demand  ->  Content Strategy. Approve then continue.",
-        content_strategy: "Handoff: Strategy  ->  Site Architecture. Assign URLs to the queue.",
-        site_architecture: "Handoff: Architecture  ->  Technical SEO.",
-        technical_seo: "Handoff: Technical SEO  ->  Content Audit, then Planning.",
-        content_audit: "Handoff: Audit  ->  Content Planning.",
-        content_planning: "Handoff: Planning  ->  Production. Brief locked create/refresh pages.",
-        content_production: "Handoff: Production  ->  On-Page SEO.",
-        on_page_seo: "Handoff: On-Page  ->  Publishing.",
-        publishing: "Pipeline complete  -  publish package is in shared memory (mock CMS only).",
+        website_situation_agent: "Handoff: Website audit + sitemap → Competitors.",
+        competitor_market_agent: "Handoff: Competitors → Keywords. Find, classify, and cluster.",
+        search_demand: "Handoff: Keywords → URL mapping. Decide optimize existing or create new.",
+        site_architecture: "Handoff: URL mapping → Titles & calendar for new pages.",
+        content_strategy: "Handoff: Titles & calendar → Technical SEO.",
+        technical_seo: "Handoff: Technical SEO → existing-page scoring, then lock a page.",
+        content_audit: "Handoff: Existing pages → lock the selected page.",
+        content_planning: "Handoff: Locked page → write the full draft and show the preview.",
+        content_production: "Handoff: Draft & preview → internal linking plan.",
+        on_page_seo: "Handoff: Linking plan → publish through WordPress.",
+        publishing: "Published through the connected WordPress account, following the internal linking plan.",
       };
       const nextPrompts: Record<string, string> = {
         discovery_agent: "Run tracking check",
         tracking_access_agent: "Run website situation analysis  -  SEO audit every page",
-        website_situation_agent: "Refresh competitor scan",
-        competitor_market_agent: "Run keyword research / search demand",
-        search_demand: "Run content strategy and content calendar",
-        content_strategy: "Run site architecture and click-depth audit",
-        site_architecture: "Run technical SEO audit",
-        technical_seo: "Run existing content audit",
-        content_audit: "Merge strategy, architecture, and audit into a locked page roadmap",
-        content_planning: "Run content production briefs and drafts",
-        content_production: "Run on-page SEO package",
-        on_page_seo: "Run publishing checklist and IndexNow preview",
+        website_situation_agent: "Fetch competitors",
+        competitor_market_agent: "Find, classify, and cluster keywords",
+        search_demand: "Map clusters to URLs — optimize existing or create new",
+        site_architecture: "Decide titles for new pages and build the content calendar",
+        content_strategy: "Run technical SEO audit",
+        technical_seo: "Score existing pages marked for optimization",
+        content_audit: "Lock the selected page before drafting",
+        content_planning: "Write the full draft for the next priority topic and show the preview",
+        content_production: "Build the on-page package and internal linking plan",
+        on_page_seo: "Publish through the connected WordPress account using the internal linking plan",
       };
       const nextAgent: Record<string, string> = {
         discovery_agent: "tracking_access_agent",
         tracking_access_agent: "website_situation_agent",
         website_situation_agent: "competitor_market_agent",
         competitor_market_agent: "search_demand",
-        search_demand: "content_strategy",
-        content_strategy: "site_architecture",
-        site_architecture: "technical_seo",
+        search_demand: "site_architecture",
+        site_architecture: "content_strategy",
+        content_strategy: "technical_seo",
         technical_seo: "content_audit",
         content_audit: "content_planning",
         content_planning: "content_production",
@@ -1582,50 +1603,50 @@ export default function ChatPage() {
     }
     if (statuses.search_demand !== "complete") {
       return statuses.search_demand === "pending_signoff"
-        ? "Next: Approve Search Demand, then run content strategy."
-        : "Next: run keyword research / search demand (Phase 5).";
-    }
-    if (statuses.seo_strategy !== "complete") {
-      return statuses.seo_strategy === "pending_signoff"
-        ? "Next: Strategist Approve content strategy."
-        : "Next: run content strategy / SEO calendar (Phase 6).";
+        ? "Next: Approve the keyword clusters, then map each cluster to a URL."
+        : "Next: find, classify, and cluster keywords.";
     }
     if (statuses.site_architecture !== "complete") {
       return statuses.site_architecture === "pending_signoff"
-        ? "Next: SEO Strategist Approve site architecture blueprint."
-        : "Next: run site architecture / click-depth audit.";
+        ? "Next: Approve URL mapping, then write titles and the calendar for new pages."
+        : "Next: map clusters to URLs — optimize an existing page or create a new one.";
+    }
+    if (statuses.seo_strategy !== "complete") {
+      return statuses.seo_strategy === "pending_signoff"
+        ? "Next: Approve titles and the content calendar, then run technical SEO."
+        : "Next: decide titles for new pages and build the content calendar.";
     }
     if (statuses.technical_seo !== "complete") {
       return statuses.technical_seo === "pending_signoff"
-        ? "Next: Technical SEO Specialist Approve technical SEO report."
-        : "Next: run technical SEO audit (Phase 7).";
+        ? "Next: Approve the technical SEO report, then score pages marked for optimization."
+        : "Next: run technical SEO.";
     }
     if (statuses.content_audit !== "complete") {
       return statuses.content_audit === "pending_signoff"
-        ? "Next: Approve content audit, then run content planning."
-        : "Next: run existing content audit (Phase 8).";
+        ? "Next: Approve existing-page scores, then lock the page to draft."
+        : "Next: score the pages URL mapping marked for optimization.";
     }
     if (statuses.content_planning !== "complete") {
       return statuses.content_planning === "pending_signoff"
-        ? "Next: Approve content roadmap, then run content production."
-        : "Next: merge strategy + architecture + audit into a locked roadmap (Phase 9).";
+        ? "Next: Approve the locked page, then draft it and show the preview."
+        : "Next: lock the selected page before drafting.";
     }
     if (statuses.content_production !== "complete") {
       return statuses.content_production === "pending_signoff"
-        ? "Next: Approve the draft, then run on-page SEO."
-        : "Next: pick a priority topic and draft the full page (Phase 10).";
+        ? "Next: Approve the draft preview, then build the internal linking plan."
+        : "Next: write the full draft for the next priority topic and show the preview.";
     }
     if (statuses.on_page_seo !== "complete") {
       return statuses.on_page_seo === "pending_signoff"
-        ? "Next: Approve on-page package, then run publishing."
-        : "Next: run on-page SEO package (Phase 11).";
+        ? "Next: Approve the linking plan, then publish through WordPress."
+        : "Next: build the on-page package and internal linking plan.";
     }
     if (statuses.publishing !== "complete") {
       return statuses.publishing === "pending_signoff"
-        ? "Next: Approve publishing package to finish Phases 7-12."
-        : "Next: run publishing checklist (Phase 12).";
+        ? "Next: Approve the WordPress publish package."
+        : "Next: publish through the connected WordPress account, following the linking plan.";
     }
-    return "Phases 1-12 complete  -  strategy through publish package are in shared memory.";
+    return "Pipeline complete — published through WordPress using the internal linking plan.";
   }
 
   function renderCard(card: Record<string, unknown>) {
@@ -1870,6 +1891,16 @@ export default function ChatPage() {
             <button type="button" className={sidebarNav === "operations" ? "is-active" : ""} onClick={() => setSidebarNav("operations")}>
               <span className="cc-nav-ico">03</span> Operations
             </button>
+            <button
+              type="button"
+              className={sidebarNav === "wordpress" ? "is-active" : ""}
+              onClick={() => {
+                setSidebarNav("wordpress");
+                void refreshWordpressStatus();
+              }}
+            >
+              <span className="cc-nav-ico">WP</span> WordPress
+            </button>
             <button type="button" className={sidebarNav === "reports" ? "is-active" : ""} onClick={() => { setReportFocusKey(null); setSidebarNav("reports"); }}>
               <span className="cc-nav-ico">04</span> Reports
             </button>
@@ -1926,7 +1957,9 @@ export default function ChatPage() {
                 ? "Engine room"
                 : sidebarNav === "cost_tracker"
                   ? "Cost tracker"
-                  : client?.name || "Radius OS"}
+                  : sidebarNav === "wordpress"
+                    ? "WordPress"
+                    : client?.name || "Radius OS"}
             </h1>
           </div>
           <div className="cc-topbar-meta">
@@ -1990,6 +2023,15 @@ export default function ChatPage() {
               onError={setError}
             />
           </div>
+        ) : sidebarNav === "wordpress" ? (
+          <WordPressWorkspace
+            clientName={client?.name}
+            status={wordpressStatus}
+            checking={wordpressChecking}
+            onConnect={() => setWordpressModalOpen(true)}
+            onDisconnect={() => void onDisconnectWordpress()}
+            onRecheck={() => void refreshWordpressStatus()}
+          />
         ) : sidebarNav === "reports" ? (
           <div className="cc-workspace cc-report-pane" ref={reportPaneRef}>
             <div className="cc-report-heading">
@@ -2411,6 +2453,7 @@ export default function ChatPage() {
         open={wordpressModalOpen}
         token={token}
         clientId={clientId ?? null}
+        defaultSiteUrl={client?.primary_url}
         onClose={() => setWordpressModalOpen(false)}
         onConnected={setWordpressStatus}
       />

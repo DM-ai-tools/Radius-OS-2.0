@@ -693,7 +693,18 @@ def slim_content_planning_memory(full: dict[str, Any] | None) -> dict[str, Any]:
             "keyword": r.get("keyword") or r.get("primary_keyword"),
             "primary_keyword": r.get("primary_keyword") or r.get("keyword"),
             "action": r.get("action"),
+            "title": r.get("title"),
             "disposition": r.get("disposition"),
+            "decision_basis": r.get("decision_basis"),
+            "existing_content_check": r.get("existing_content_check"),
+            "new_content_justification": r.get("new_content_justification"),
+            "funnel": r.get("funnel"),
+            "intent": r.get("intent"),
+            "page_type": r.get("page_type"),
+            "content_type": r.get("content_type") or r.get("content_type_label"),
+            "supporting_keywords": list(
+                r.get("supporting_keywords") or r.get("secondary_keywords") or []
+            )[:8],
             "depth": r.get("depth"),
             "parent": r.get("parent") or r.get("parent_url_n"),
             "priority_tier": r.get("priority_tier"),

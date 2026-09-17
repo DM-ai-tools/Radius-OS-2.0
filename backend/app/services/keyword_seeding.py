@@ -14,7 +14,7 @@ import re
 from typing import Any
 
 from app.config import get_settings
-from app.integrations import ahrefs, dataforseo
+from app.integrations import dataforseo, semrush
 from app.services.keyword_opportunity import (
     detect_funnel,
     detect_intent,
@@ -177,7 +177,7 @@ def _mock_expansions(seed: str, *, min_volume: int) -> list[dict[str, Any]]:
                 **row,
                 "cpc": 2.5,
                 "traffic_potential": int(row["volume"]) * 2,
-                "source": "ahrefs",
+                "source": "semrush",
                 "ahrefs_endpoint": endpoint,
                 "seed": s,
                 "intent": kw_intent,
@@ -501,25 +501,25 @@ async def expand_seed_ahrefs(
             if not prev or (row.get("volume") or 0) > (prev.get("volume") or 0):
                 target[key] = row
 
-    if settings.ahrefs_api_key:
-        # Three Ahrefs feeds concurrently. The endpoint is provenance only —
-        # classification comes from the keyword/seed relationship.
+    if settings.semrush_api_key and not semrush.keywords_explorer_blocked():
+        # Phrase match + related keywords. Classification comes from the
+        # keyword/seed relationship, not which SEMrush report returned the row.
         phrase_res, terms_res, broad_res = await asyncio.gather(
-            ahrefs.matching_terms(
+            semrush.matching_terms(
                 seed,
                 country=country,
                 limit=limit_per_mode,
                 match_mode="phrase",
                 min_volume=min_volume,
             ),
-            ahrefs.matching_terms(
+            semrush.matching_terms(
                 seed,
                 country=country,
                 limit=limit_per_mode,
                 match_mode="terms",
                 min_volume=min_volume,
             ),
-            ahrefs.related_terms(
+            semrush.related_terms(
                 seed,
                 country=country,
                 limit=limit_per_mode,
@@ -533,15 +533,21 @@ async def expand_seed_ahrefs(
             (broad_res, "related-terms"),
         ):
             errors.extend(errs)
-            _ingest(rows, endpoint=endpoint, source="ahrefs")
+            _ingest(rows, endpoint=endpoint, source="semrush")
+            if "semrush_units_exhausted" in errs or "semrush_auth_failed" in errs:
+                break
     else:
-        errors.append("ahrefs_unavailable")
+        errors.append("semrush_unavailable")
 
-    # Top up only the classes Ahrefs left empty, each from its dedicated
+    # Top up only the classes SEMrush left empty, each from its dedicated
     # DataForSEO source, so every seed can report all four classes.
     if enable_dataforseo_fallback and location_code is not None:
         present = {str(r.get("match_class")) for r in by_kw.values()}
         missing = tuple(c for c in ("phrase", "related", "broad") if c not in present)
+        # After SEMrush units are exhausted, skip the slowest
+        # DataForSEO endpoint so Phase 5 can still finish inside the chat budget.
+        if missing and semrush.keywords_explorer_blocked():
+            missing = tuple(c for c in missing if c in ("phrase", "related"))
         if missing:
             df_rows, df_errs = await expand_seed_dataforseo(
                 seed,
@@ -576,7 +582,7 @@ async def expand_seed_ahrefs(
             "intent": "",
             "funnel": detect_funnel(seed, ""),
             "parent_topic": seed,
-            "source": "ahrefs" if settings.ahrefs_api_key else "dataforseo",
+            "source": "semrush" if settings.semrush_api_key else "dataforseo",
             "ahrefs_endpoint": "seed",
             "seed": seed,
             "match_class": "exact",
@@ -588,7 +594,7 @@ async def expand_seed_ahrefs(
     live_classes = {
         str(r.get("match_class"))
         for r in by_kw.values()
-        if str(r.get("source") or "") in ("ahrefs", "dataforseo")
+        if str(r.get("source") or "") in ("semrush", "ahrefs", "dataforseo")
         and str(r.get("ahrefs_endpoint") or "") != "seed"
     }
     if not (live_classes & {"phrase", "related", "broad"}):
@@ -674,7 +680,7 @@ def build_seed_clusters(
             "parent_topic": row.get("parent_topic"),
             "traffic_potential": row.get("traffic_potential"),
             "match_class": cls,
-            "source": row.get("source") or "ahrefs",
+            "source": row.get("source") or "semrush",
             "ahrefs_endpoint": row.get("ahrefs_endpoint"),
             "below_volume_floor": bool(row.get("below_volume_floor")),
         }
@@ -790,6 +796,7 @@ async def run_multi_mode_seeding(
     each seed root can be a targeted service / page (not only CDD keywords).
     """
     errors: list[str] = []
+    settings = get_settings()
     seed_targets = seed_targets or {}
     all_rows: list[dict[str, Any]] = []
     used_seeds: list[str] = []
@@ -800,7 +807,7 @@ async def run_multi_mode_seeding(
         used_seeds.append(s)
 
     # Expand every seed concurrently (bounded) — each seed itself fans out 3 calls
-    sem = asyncio.Semaphore(5)
+    sem = asyncio.Semaphore(3)
 
     async def _expand(s: str) -> tuple[list[dict[str, Any]], list[str]]:
         async with sem:
@@ -819,8 +826,12 @@ async def run_multi_mode_seeding(
         all_rows.extend(rows)
 
     # Overview metrics for seeds (fill exact volumes)
-    overview, oerrs = await ahrefs.keyword_overview(used_seeds[:12], country=country)
-    errors.extend(oerrs)
+    if settings.semrush_api_key and not semrush.keywords_explorer_blocked():
+        overview, oerrs = await semrush.keyword_overview(used_seeds[:12], country=country)
+        errors.extend(oerrs)
+    else:
+        overview, oerrs = [], ["semrush_unavailable"]
+        errors.extend(oerrs)
     overview_by = {_norm(str(r.get("keyword") or "")): r for r in overview}
     for row in all_rows:
         key = _norm(str(row.get("keyword") or ""))
@@ -903,7 +914,7 @@ async def run_multi_mode_seeding(
         )
 
     source_set = {str(row.get("source") or "").strip() for row in dataset}
-    providers = [p for p in ("ahrefs", "dataforseo", "fallback") if p in source_set]
+    providers = [p for p in ("semrush", "ahrefs", "dataforseo", "fallback") if p in source_set]
     used_fallback = "fallback" in source_set or any(
         "provider_coverage_fallback" in str(e) for e in errors
     )

@@ -17,6 +17,27 @@ BASE = "https://api.ahrefs.com/v3"
 # Kept well under the per-agent turn budget so one slow endpoint cannot stall a phase.
 REQUEST_TIMEOUT = 35
 
+# Keywords Explorer 403 "Insufficient plan" is plan-wide. After the first hit,
+# skip every later explorer call in this process instead of retrying per seed.
+_keywords_explorer_blocked: str | None = None
+
+
+def keywords_explorer_blocked() -> str | None:
+    return _keywords_explorer_blocked
+
+
+def reset_keywords_explorer_block() -> None:
+    global _keywords_explorer_blocked
+    _keywords_explorer_blocked = None
+
+
+def _mark_keywords_explorer_blocked(reason: str) -> None:
+    global _keywords_explorer_blocked
+    if _keywords_explorer_blocked:
+        return
+    _keywords_explorer_blocked = reason
+    log.warning("ahrefs_keywords_explorer_disabled", reason=reason)
+
 
 def _configured() -> bool:
     settings = get_settings()
@@ -49,6 +70,8 @@ async def _get_with_error(
         return None, "ahrefs_unavailable"
     if settings.use_mock_providers:
         return None, "ahrefs_unavailable"
+    if _keywords_explorer_blocked and path.startswith("/keywords-explorer"):
+        return None, _keywords_explorer_blocked
     clean = {k: v for k, v in params.items() if v is not None}
 
     for attempt in range(max_attempts):
@@ -111,6 +134,8 @@ async def _get_with_error(
             )
             lowered = body.lower()
             if resp.status_code == 403 and "insufficient plan" in lowered:
+                if path.startswith("/keywords-explorer"):
+                    _mark_keywords_explorer_blocked("ahrefs_insufficient_plan")
                 return None, "ahrefs_insufficient_plan"
             if resp.status_code in (401, 403):
                 return None, "ahrefs_forbidden"
@@ -145,7 +170,7 @@ async def keyword_overview(
     if not batch:
         return [], errors
 
-    data = await _get(
+    data, err = await _get_with_error(
         "/keywords-explorer/overview",
         {
             "country": country.lower(),
@@ -154,7 +179,7 @@ async def keyword_overview(
         },
     )
     if data is None:
-        errors.append("ahrefs_overview_failed")
+        errors.append(err or "ahrefs_overview_failed")
         return [], errors
 
     rows = data.get("keywords") or data.get("data") or []
@@ -252,9 +277,9 @@ async def matching_terms(
         "match_mode": mode,
     }
 
-    data = await _get("/keywords-explorer/matching-terms", params)
+    data, err = await _get_with_error("/keywords-explorer/matching-terms", params)
     if data is None:
-        errors.append("ahrefs_matching_terms_failed")
+        errors.append(err or "ahrefs_matching_terms_failed")
         return [], errors
 
     out = _parse_keyword_rows(data, source_endpoint="matching-terms", match_mode=mode)
@@ -289,9 +314,9 @@ async def related_terms(
         "terms": terms_mode,
     }
 
-    data = await _get("/keywords-explorer/related-terms", params)
+    data, err = await _get_with_error("/keywords-explorer/related-terms", params)
     if data is None:
-        errors.append("ahrefs_related_terms_failed")
+        errors.append(err or "ahrefs_related_terms_failed")
         return [], errors
 
     out = _parse_keyword_rows(data, source_endpoint="related-terms")

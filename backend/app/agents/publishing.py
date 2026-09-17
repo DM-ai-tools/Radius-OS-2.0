@@ -207,7 +207,7 @@ async def run_publishing(
     events.extend(
         handoff_events(
             "publishing",
-            result_line=f"{len(summary.get('publish_queue') or [])} URLs in mock publish queue.",
+            result_line=f"{len(summary.get('publish_queue') or [])} URLs queued for WordPress using the internal linking plan.",
         )
     )
     return events

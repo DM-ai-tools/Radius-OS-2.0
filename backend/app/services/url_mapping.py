@@ -922,7 +922,7 @@ def map_cluster_to_url(
     best = real[0] if real else None
     best_score = float((best or {}).get("url_score") or 0)
     band = band_from_score(best_score)
-    create_url = str(suggested or cluster.get("recommended_url") or f"/blog/{_slug(primary)}")
+    create_url = str(suggested or cluster.get("recommended_url") or f"/services/{_slug(primary)}")
 
     existing_page_url = str((best or {}).get("path") or "") or None
     # Prefer Phase 5 topic classification when present
@@ -1326,8 +1326,8 @@ def apply_url_map_to_architecture(
                 "cluster": cluster_name,
                 "primary_keyword": entry.get("primary_keyword"),
                 "keyword": entry.get("primary_keyword"),
-                "page_type": "article",
-                "type": "article",
+                "page_type": "service",
+                "type": "service",
                 "from_url_map": True,
                 "url_map_action": action,
                 "url_score": entry.get("url_score"),

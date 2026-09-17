@@ -5,6 +5,8 @@ type Props = {
   open: boolean;
   token: string | null;
   clientId: string | null;
+  /** Client's public site, so the form is not left blank to be mistyped as /wp-admin. */
+  defaultSiteUrl?: string;
   onClose: () => void;
   /** Fires after a successful connect so the caller can refresh the Publishing card. */
   onConnected: (status: WordPressStatus) => void;
@@ -15,6 +17,7 @@ export default function WordPressConnectModal({
   open,
   token,
   clientId,
+  defaultSiteUrl,
   onClose,
   onConnected,
 }: Props) {
@@ -26,12 +29,12 @@ export default function WordPressConnectModal({
 
   useEffect(() => {
     if (!open) return;
-    setBaseUrl("");
+    setBaseUrl(defaultSiteUrl || "");
     setUsername("");
     setAppPassword("");
     setError("");
     setBusy(false);
-  }, [open]);
+  }, [open, defaultSiteUrl]);
 
   if (!open) return null;
 
@@ -67,7 +70,7 @@ export default function WordPressConnectModal({
         <h2>Connect WordPress</h2>
         <p className="auth-modal-sub">
           This site's own credentials — not a shared account. We test the connection
-          before saving anything.
+          before saving anything. Use the public site URL, not /wp-admin or /wp-json.
         </p>
 
         {error ? <div className="error-banner">{error}</div> : null}
@@ -102,8 +105,9 @@ export default function WordPressConnectModal({
               autoComplete="new-password"
             />
             <p className="field-hint">
-              Not the account password. Create one in WordPress under Users → Profile →
-              Application Passwords, then paste it here.
+              WordPress username, not the display name. Paste the same password the
+              WordPress app accepted — an Application Password, or the account password
+              if that is what the app used.
             </p>
           </div>
           <button className="btn btn-primary" type="submit" disabled={busy}>

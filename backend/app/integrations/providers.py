@@ -60,8 +60,17 @@ def _payload_shape(payload: Any) -> str:
 
 
 async def pull_backlinks(domain: str) -> tuple[dict[str, Any], str]:
-    """Returns (payload, provider_used). Ahrefs primary, Moz fallback, else live site signals."""
+    """Returns (payload, provider_used). SEMrush, then Ahrefs, then Moz, else live site signals."""
     settings = get_settings()
+
+    async def semrush() -> dict[str, Any]:
+        from app.integrations import semrush as semrush_api
+
+        if settings.use_mock_providers:
+            return _mock_backlinks(domain, "semrush")
+        if not settings.semrush_api_key:
+            raise RuntimeError("SEMrush API key not configured")
+        return await semrush_api.backlinks_overview(domain)
 
     async def ahrefs() -> dict[str, Any]:
         if settings.use_mock_providers:
@@ -188,7 +197,7 @@ async def pull_backlinks(domain: str) -> tuple[dict[str, Any], str]:
             "top_anchor_text": {"outbound_sample": min(40, len(external))},
             "sample_links": [{"from": u, "anchor": "outbound", "spammy": False} for u in external[:8]],
             "note": (
-                "Ahrefs/Moz keys not set — authority estimated from live page signals only; "
+                "SEMrush/Ahrefs/Moz keys not set — authority estimated from live page signals only; "
                 "referring_domains unavailable."
             ),
             "live_fetch_status": fetched.get("status_code"),
@@ -196,6 +205,13 @@ async def pull_backlinks(domain: str) -> tuple[dict[str, Any], str]:
 
     if settings.use_mock_providers:
         return _mock_backlinks(domain, "ahrefs"), "ahrefs"
+
+    try:
+        if settings.semrush_api_key:
+            data = await with_retry(semrush, attempts=2, label="semrush")
+            return data, "semrush"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("semrush_failed", error=str(exc), domain=domain)
 
     try:
         if settings.ahrefs_api_key:

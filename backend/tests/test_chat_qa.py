@@ -6,6 +6,9 @@ from app.services.chat_revisions import looks_like_revision
 
 def test_run_is_not_a_question():
     assert not looks_like_question("Run keyword research / search demand")
+    assert not looks_like_question(
+        "Write the full draft for the next priority topic and show the preview"
+    )
     assert not looks_like_question("Refresh competitor scan")
 
 

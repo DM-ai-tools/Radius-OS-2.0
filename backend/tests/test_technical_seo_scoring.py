@@ -20,7 +20,10 @@ def test_compute_priority_scales_with_severity_and_urls():
 
 def test_category_scores_marks_missing_pages_not_available():
     scores = compute_category_scores([], pages_available=False, ahrefs_health_score=None)
-    assert scores["Metadata"]["status"] == "NOT_AVAILABLE"
+    assert scores["On-page technical SEO"]["status"] == "NOT_AVAILABLE"
+    assert scores["Crawlability"]["status"] == "available"
+    assert "Indexation" in scores
+    assert "Security" in scores
 
 
 def test_overall_score_prefers_ahrefs_health():

@@ -136,12 +136,13 @@ def test_slim_ia_keeps_redirect_map_and_tree_depth():
     assert node.get("parent") == "/"
 
 
-def test_suggested_path_not_all_blog():
+def test_suggested_path_is_a_service_page():
     assert _suggested_path("buy seo software", "transactional", "landing").startswith(
         "/services/"
     )
-    assert "/blog/" in _suggested_path("what is seo", "informational", "blog")
-    assert "/guides/" in _suggested_path("seo checklist", "commercial", "guide")
+    assert _suggested_path("what is seo", "informational", "blog").startswith("/services/")
+    assert _suggested_path("seo checklist", "commercial", "guide").startswith("/services/")
+    assert "/blog/" not in _suggested_path("what is seo", "informational", "blog")
 
 
 def test_priority_queue_reads_slim_cluster_volume_keys():

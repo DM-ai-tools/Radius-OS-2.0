@@ -191,6 +191,7 @@ async def run_technical_seo_plan(
 
     from app.config import get_settings
     from app.services.technical_seo_ahrefs import fetch_ahrefs_technical_seo
+    from app.services.technical_seo_checklist import build_audit_coverage
     from app.services.technical_seo_companion import (
         build_internal_linking_snapshot,
         build_score_comparison,
@@ -708,6 +709,18 @@ async def run_technical_seo_plan(
     elif score_comparison:
         audit_comparison = score_comparison
 
+    audit_coverage = build_audit_coverage(
+        issues=all_issues if isinstance(all_issues, list) else [],
+        pages_available=bool(
+            (ahrefs_data or {}).get("pages_fetched") or (seo or {}).get("pages_audited")
+        ),
+        gsc_available=gsc.get("status") == "available",
+        cwv_available=bool(cwv_field),
+        rendering_available=rendering.get("status") == "available",
+        sitemap_available=bool(gsc.get("sitemap_count")),
+        homepage_checked=bool(seo or tech),
+    )
+
     return {
         "client_name": client_name,
         "primary_url": primary_url,
@@ -726,6 +739,7 @@ async def run_technical_seo_plan(
         ),
         "issues": all_issues if all_issues else (ahrefs_data or {}).get("issues") if use_ahrefs else [],
         "issues_by_category": issues_by_category,
+        "audit_coverage": audit_coverage,
         "suggestion_items": suggestion_items,
         "category_scores": (ahrefs_data or {}).get("category_scores") if use_ahrefs else {},
         "severity_summary": (ahrefs_data or {}).get("severity_summary") if use_ahrefs else {},

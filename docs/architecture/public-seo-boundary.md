@@ -22,4 +22,4 @@ Those documents describe the **agentic SEO workflow** Traffic Radius runs *for c
 
 ## What this does *not* solve
 
-Client-site SEO (canonicals, sitemaps, CWV, IA) remains the job of Phases 5–12 inside the product. This boundary only makes the **Radius OS application** itself crawl-safe and truthful for search engines.
+Client-site SEO follows the v1.9 sequential band in [`TR_SEO_Architecture_v1_9.html`](TR_SEO_Architecture_v1_9.html): Phase 3 website audit and sitemap together, Phase 4 competitors, Phase 5 keywords, Phase 6 URL mapping then titles and calendar, Phase 7 technical SEO, Phases 8–10 audit then draft and preview, Phase 11 internal linking plan, Phase 12 publish through the connected WordPress account. This boundary only makes the **Radius OS application** itself crawl-safe and truthful for search engines.

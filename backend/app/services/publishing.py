@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 from app.integrations import brandfetch, firecrawl, wordpress
 from app.integrations.wordpress import WordPressConnection
 from app.logging_config import get_logger
-from app.services.publish_preview import build_content_html, build_page_preview
+from app.services.publish_preview import build_content_html, build_page_preview, preview_design_meta
 from app.services.wp_content import validate_publish_payload
 from app.services.wp_publish_strategy import PublishTarget, publish_to_wordpress
 
@@ -105,7 +105,7 @@ def platform_capability_check(
             {
                 "blocker": "wordpress_not_connected",
                 "detail": "No WordPress site connected for this client.",
-                "resolution": "Connect WordPress from the Publishing card, then re-run.",
+                "resolution": "Connect WordPress from Workspace → WordPress, then re-run.",
             }
         )
         return blockers
@@ -118,7 +118,7 @@ def platform_capability_check(
             }
         )
         return blockers
-    if mode == MODE_PUBLISH and not connection.get("capabilities_publish", False):
+    if mode == MODE_PUBLISH and connection.get("capabilities_publish") is False:
         blockers.append(
             {
                 "blocker": "insufficient_cms_rights",
@@ -169,7 +169,19 @@ async def run_publishing_plan(
 
     # --- design fetch (brand + live reference layout) ---------------------------------
     brand = await brandfetch.fetch_brand(primary_url)
+    from app.services.wp_site_design import fetch_wordpress_design
+
+    site_design = await fetch_wordpress_design(primary_url)
+    from app.services.design_capture import capture_page_design, design_source_url, merge_site_design
+
     ref_url = reference_url or _pick_reference_url(ia, primary_url)
+    source_url = design_source_url(
+        existing_page_url=str((pages[0] if pages else {}).get("existing_page_url") or ""),
+        parent_pillar_page_url=str(ia.get("parent_pillar_page_url") or ""),
+        reference_design_source=ref_url,
+        client_website_url=primary_url,
+    )
+    site_design = merge_site_design(site_design, await capture_page_design(source_url))
     scrape = await firecrawl.scrape_page(ref_url) if ref_url else {"available": False}
     layout = firecrawl.layout_hints(scrape)
 
@@ -232,6 +244,7 @@ async def run_publishing_plan(
             brief=brief,
             brand=brand,
             layout=layout,
+            site_design=site_design,
             target_status=target_status,
             slug=slug,
             content_html=content_html,
@@ -329,6 +342,7 @@ async def run_publishing_plan(
         "note": "Preview only — IndexNow is never submitted from this build.",
     }
 
+    design = preview_design_meta(brand, site_design)
     summary: dict[str, Any] = {
         "client_name": client_name,
         "primary_url": primary_url,
@@ -344,9 +358,14 @@ async def run_publishing_plan(
             "brand_error": brand.get("error"),
             "brand_name": brand.get("name"),
             "logo_url": (brand.get("logo") or {}).get("url"),
-            "primary_color": brand.get("primary_color"),
+            "primary_color": site_design.get("primary_color") or brand.get("primary_color"),
             "palette": brand.get("palette"),
-            "font": brand.get("font"),
+            "font": site_design.get("font") or brand.get("font"),
+            "design_source": design["source"],
+            "design_fallback": design.get("fallback") or None,
+            "wordpress_kit_id": site_design.get("kit_id") or None,
+            "design_md": ((site_design.get("design_capture") or {}).get("design_md") or "")[:8000],
+            "screenshots": (site_design.get("design_capture") or {}).get("screenshots") or [],
             "reference_url": layout.get("reference_url") or ref_url,
             "reference_available": bool(layout.get("available")),
             "reference_error": scrape.get("error") if not layout.get("available") else None,
