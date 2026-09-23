@@ -1,5 +1,6 @@
 # Backend image (API-only or Compose). Prefer root Dockerfile for Railway SPA+API.
-FROM python:3.12-slim
+# Bookworm matches the root image so Playwright's Debian package names still resolve.
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 

@@ -11,7 +11,9 @@ COPY frontend/ ./
 ENV VITE_API_URL=
 RUN npm run build
 
-FROM python:3.12-slim AS runtime
+# Bookworm, not floating slim: Playwright 1.48 still installs ttf-unifont and
+# ttf-ubuntu-font-family, which Debian Trixie (current python:3.12-slim) removed.
+FROM python:3.12-slim-bookworm AS runtime
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
