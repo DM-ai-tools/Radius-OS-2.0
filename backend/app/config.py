@@ -248,6 +248,24 @@ class Settings(BaseSettings):
         return self
 
 
+    @model_validator(mode="after")
+    def _live_providers_when_production_flags_unset(self) -> "Settings":
+        """Production must not inherit the dev mock defaults.
+
+        Unset USE_MOCK_* is True in this model. On Railway that blanks competitor
+        discovery: mock domains are rejected as placeholders, so the phase stays
+        on an empty card. An explicit true/false in the environment is kept.
+        """
+        if self.environment != "production":
+            return self
+        if os.environ.get("USE_MOCK_PROVIDERS") is None:
+            self.use_mock_providers = False
+        if os.environ.get("USE_MOCK_LLM") is None:
+            self.use_mock_llm = False
+        return self
+
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()

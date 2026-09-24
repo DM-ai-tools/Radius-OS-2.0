@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -72,6 +73,36 @@ def _is_placeholder_competitor(item: dict) -> bool:
     }:
         return True
     return False
+
+
+_CHUNK_URL_RE = re.compile(r"https?://\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}", re.I)
+
+
+def _discovery_competitor_inputs(raw: object) -> tuple[list[dict], list[str]]:
+    """Split a Phase 1 competitors answer into URL seeds and name hints."""
+    if isinstance(raw, list):
+        text = "\n".join(str(item) for item in raw if str(item).strip())
+    elif isinstance(raw, dict):
+        text = str(raw.get("value") or raw.get("text") or "")
+    else:
+        text = str(raw or "")
+    seeds: list[dict] = []
+    hints: list[str] = []
+    for chunk in re.split(r"[\n;]+", text):
+        chunk = chunk.strip(" -•*\t")
+        if not chunk:
+            continue
+        match = _CHUNK_URL_RE.search(chunk)
+        if match:
+            token = match.group(0).strip(".,)")
+            name = chunk[: match.start()].strip(" -–—:|,") or token
+            url = _usable_competitor_url({"name": name, "url": token})
+            if url:
+                seeds.append({"name": name[:120], "url": url, "source": "discovery"})
+                continue
+        if len(chunk) > 1:
+            hints.append(chunk[:80])
+    return seeds, hints
 
 
 def _cache_looks_placeholder(cached: dict) -> bool:
@@ -293,6 +324,28 @@ async def run_competitor(
             continue
         carried.append(item)
 
+    discovery_hints: list[str] = []
+    discovery_row = (
+        await db.execute(
+            select(DiscoveryResponse)
+            .where(
+                DiscoveryResponse.client_id == client.id,
+                DiscoveryResponse.field_key == "competitors",
+            )
+            .order_by(DiscoveryResponse.created_at.desc())
+        )
+    ).scalars().first()
+    if discovery_row and isinstance(discovery_row.field_value, dict):
+        seeds, discovery_hints = _discovery_competitor_inputs(
+            discovery_row.field_value.get("value")
+        )
+        seen_urls = {_usable_competitor_url(item) for item in carried}
+        for seed in seeds:
+            if _is_placeholder_competitor(seed) or seed["url"] in seen_urls:
+                continue
+            carried.append(seed)
+            seen_urls.add(seed["url"])
+
     domain = extract_domain(client.primary_url)
     industry = (client.industry or "").strip() or None
     if not industry:
@@ -346,6 +399,7 @@ async def run_competitor(
                 client.display_name,
                 domain,
                 industry=industry,
+                hints=discovery_hints or None,
             )
         except Exception as exc:  # noqa: BLE001
             discover_error = str(exc)[:280]
@@ -426,6 +480,10 @@ async def run_competitor(
             "competitors": [],
             "tier_overview": [],
             "empty": True,
+            "empty_reason": (
+                discover_error
+                or "Automated discovery returned no usable websites. Add competitor URLs below, then refresh the scan."
+            ),
             "invite_manual": True,
             "agent_key": "competitor_market_agent",
             # Keep the gate actionable so Phase 4 cannot soft-lock the pipeline

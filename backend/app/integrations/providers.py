@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from typing import Any
 
@@ -2405,6 +2406,93 @@ async def run_seo_audit(
     })
 
 
+_MD_LINK_RE = re.compile(r"\[([^\]]{2,80})\]\((https?://[^)\s]+)\)", re.I)
+_BARE_URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.I)
+
+
+def _json_values(text: str) -> list[Any]:
+    """Every valid JSON object or array in a model reply, in order."""
+    decoder = json.JSONDecoder()
+    found: list[Any] = []
+    index = 0
+    while index < len(text):
+        if text[index] not in "{[":
+            index += 1
+            continue
+        try:
+            value, consumed = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index += 1
+            continue
+        found.append(value)
+        index += max(consumed, 1)
+    return found
+
+
+def _row_from_competitor_item(item: Any) -> dict[str, str] | None:
+    if isinstance(item, str):
+        match = _BARE_URL_RE.search(item)
+        if not match:
+            return None
+        name = item[: match.start()].strip(" -–—:|,") or match.group(0)
+        return {"name": name[:120], "url": match.group(0)}
+    if not isinstance(item, dict):
+        return None
+    url = ""
+    for key in ("url", "website", "domain", "homepage", "site", "link"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            url = value.strip()
+            break
+    name = str(item.get("name") or item.get("company") or item.get("title") or "").strip()
+    if not url:
+        return None
+    return {"name": (name or url)[:120], "url": url}
+
+
+def _rows_from_json_value(value: Any) -> list[dict[str, str]]:
+    if isinstance(value, list):
+        rows: list[dict[str, str]] = []
+        for item in value:
+            row = _row_from_competitor_item(item)
+            if row:
+                rows.append(row)
+        return rows
+    if not isinstance(value, dict):
+        return []
+    for key in ("competitors", "items", "results", "companies", "peers"):
+        nested = value.get(key)
+        if isinstance(nested, list):
+            return _rows_from_json_value(nested)
+    row = _row_from_competitor_item(value)
+    return [row] if row else []
+
+
+def extract_competitor_rows(text: str | None) -> list[dict[str, str]]:
+    """Pull competitor name/url rows out of a skill reply.
+
+    The ads skill asks for a markdown report. Models often wrap the JSON,
+    use `website` instead of `url`, or only mention links in prose. A strict
+    `{"competitors": ...}` parse then looks like "no competitors found".
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return []
+    rows: list[dict[str, str]] = []
+    for value in _json_values(raw):
+        rows.extend(_rows_from_json_value(value))
+    if rows:
+        return rows
+    for match in _MD_LINK_RE.finditer(raw):
+        rows.append({"name": match.group(1).strip()[:120], "url": match.group(2).strip()})
+    if rows:
+        return rows
+    for url in _BARE_URL_RE.findall(raw):
+        host = url.split("//", 1)[-1].split("/", 1)[0].removeprefix("www.")
+        rows.append({"name": host[:120] or url, "url": url})
+    return rows
+
+
 async def discover_competitors(
     display_name: str,
     domain: str,
@@ -2425,8 +2513,7 @@ async def discover_competitors(
             {"name": f"{vertical} Category Leader", "url": f"https://leader-{slug}.example", "source": "skill"},
         ]
 
-    from app.agents.prompts import skill_system_preamble
-    from app.integrations.llm import synthesize_json
+    from app.integrations.llm import _skill_chat
     from app.integrations.web_fetch import fetch_url, page_text_excerpt, parse_html
 
     client_host = domain.lower().removeprefix("www.")
@@ -2453,10 +2540,8 @@ async def discover_competitors(
         if host in seen:
             return
         seen.add(host)
-        # Prefer www host when apex often fails for agencies; scoring fetch has www fallback
-        comps.append({"name": name, "url": f"https://www.{host}", "source": "ads-category-competitors"})
+        comps.append({"name": name, "url": f"https://{host}", "source": "ads-category-competitors"})
 
-    skill_preamble = skill_system_preamble("competitor_market_agent")
     fetched = await fetch_url(f"https://{domain}")
     parser = parse_html(fetched.get("text") or "")
     excerpt = page_text_excerpt(parser, 3500)
@@ -2470,29 +2555,16 @@ async def discover_competitors(
             + "; ".join(str(h) for h in hints if str(h).strip())[:400]
             + "\n"
         )
+    # The full skill tells the model to write a markdown report. That reply
+    # does not parse as a competitor list, so this step asks for JSON only.
     system = (
-        f"{skill_preamble}\n\n"
-        "For this step only: identify 8–10 real competing businesses for tiered analysis. "
-        "Follow the skill Identify competitors workflow. "
-        "Adapt dynamically to ANY industry — never default to digital-marketing agencies "
-        "unless the client themselves is an agency in that category. "
-        "Only real organizations with real public domains. Never invent *.example domains. "
-        "Cover a MIX in the SAME vertical: local peers, direct alternatives, category leaders, "
-        "and aspirational leaders one level above. "
-        "You MUST return at least 8 competitors with distinct domains."
+        "Identify 8–10 real competing businesses in the SAME industry as the client. "
+        "Never default to marketing agencies unless the client is an agency. "
+        "Only real public websites. Never invent example.com domains. "
+        "Cover local peers, direct alternatives, and one level of aspirational leaders. "
+        "Return JSON only, no markdown. "
+        '{"competitors":[{"name":"Company","url":"https://company.com"}]}'
     )
-
-    def _ingest(payload: dict | None) -> None:
-        if not payload:
-            return
-        rows = payload.get("competitors")
-        if not isinstance(rows, list) and isinstance(payload.get("items"), list):
-            rows = payload["items"]
-        if not isinstance(rows, list):
-            return
-        for c in rows:
-            if isinstance(c, dict):
-                _add(str(c.get("name") or ""), str(c.get("url") or c.get("domain") or ""))
 
     passes = [
         (
@@ -2532,38 +2604,39 @@ async def discover_competitors(
     ]
 
     last_error = ""
+    last_text = ""
     for i, user_prompt in enumerate(passes):
         if len(comps) >= 8 and i > 0:
             break
         # Always run pass 0; later passes only if thin
         if i > 0 and len(comps) >= 6:
             break
-        payload = None
-        models_to_try = [settings.skill_model]
-        for model_name in models_to_try:
-            try:
-                payload = await synthesize_json(
-                    system,
-                    user_prompt,
-                    model=model_name,
-                    raise_on_error=True,
-                    max_tokens=4096,
-                )
-                last_error = ""
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_error = str(exc)[:300]
-                log.warning(
-                    "discover_competitors_skill_failed",
-                    pass_n=i,
-                    model=model_name,
-                    error=last_error,
-                    domain=client_host,
-                )
-        if not payload:
+        text = None
+        try:
+            text = await _skill_chat(
+                system=system,
+                user=user_prompt,
+                model=settings.skill_model,
+                max_tokens=4096,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)[:300]
+            log.warning(
+                "discover_competitors_skill_failed",
+                pass_n=i,
+                model=settings.skill_model,
+                error=last_error,
+                domain=client_host,
+            )
+        if not text:
+            if not last_error:
+                last_error = "LLM returned empty content (check ANTHROPIC_API_KEY and SKILL_MODEL)"
             continue
+        last_text = text
+        last_error = ""
         before = len(comps)
-        _ingest(payload)
+        for row in extract_competitor_rows(text):
+            _add(row["name"], row["url"])
         log.info(
             "discover_competitors_skill_pass",
             pass_n=i,
@@ -2573,6 +2646,10 @@ async def discover_competitors(
         )
 
     log.info("discover_competitors_skill", count=len(comps), domain=client_host, error=last_error or None)
-    if not comps and last_error:
-        raise RuntimeError(last_error)
+    if not comps:
+        snippet = " ".join((last_text or "").split())[:180]
+        detail = last_error or (
+            f"model reply was not a competitor list ({snippet})" if snippet else "model reply was empty"
+        )
+        raise RuntimeError(detail)
     return comps[:10]

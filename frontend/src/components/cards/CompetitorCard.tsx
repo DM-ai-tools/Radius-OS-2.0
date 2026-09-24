@@ -109,8 +109,10 @@ export default function CompetitorCard({ payload, canAct, onAction, onAddManual 
       <div className="structured-card checkpoint competitor">
         <h3 className="card-title">Tiered Competitor Parameter Analysis</h3>
         <p style={{ fontSize: 13, color: "var(--muted)" }}>
-          No competitors found automatically yet. Add Discovery competitors or re-run after
-          industry context is set (Architecture v1.9 operator override).
+          {String(
+            payload.empty_reason ||
+              "No competitors found automatically yet. Add a competitor URL below, then refresh the scan."
+          )}
         </p>
         {inviteManual && onAddManual ? (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
