@@ -35,8 +35,8 @@ html.theme-classy:not(:has(.landing)) {
   --ai: #8b5cf6;
   --text-primary: #f8fafc;
   --text-secondary: #cbd5e1;
-  --text-muted: #64748b;
-  --text-disabled: #475569;
+  --text-muted: #94a3b8;
+  --text-disabled: #64748b;
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 10px;
@@ -58,6 +58,13 @@ html.theme-classy:not(:has(.landing)) {
   --amber-bg: var(--warning-bg);
   --coral: var(--critical);
   --coral-bg: var(--critical-bg);
+  --gray-bg: var(--surface-2);
+  --secondary: var(--brand-blue-bright);
+  --secondary-bg: var(--brand-blue-soft);
+  --purple: #a5b4fc;
+  --purple-bg: rgba(139, 92, 246, 0.14);
+  --dash: var(--border-strong);
+  --shadow-soft: var(--shadow-card);
 }
 
 html.theme-classy:not(:has(.landing)),
@@ -197,6 +204,13 @@ html.theme-classy.theme-light:not(:has(.landing)) {
   --amber-bg: var(--warning-bg);
   --coral: var(--critical);
   --coral-bg: var(--critical-bg);
+  --gray-bg: #e8eef3;
+  --secondary: #1d4ed8;
+  --secondary-bg: rgba(37, 99, 235, 0.08);
+  --purple: #4338ca;
+  --purple-bg: #eef2ff;
+  --dash: rgba(15, 23, 42, 0.16);
+  --shadow-soft: var(--shadow-card);
 }
 
 html.theme-classy.theme-light:not(:has(.landing)) .btn-primary {
@@ -208,4 +222,111 @@ html.theme-classy.theme-light:not(:has(.landing)) .btn-ghost {
   background: var(--surface-1);
   color: var(--text-secondary);
   border: 1px solid var(--border-strong);
+}
+
+/* Dark theme: styles.css still paints many panels #fff. Those stay white while
+   --ink flips to near-white, so text vanishes. Remap the leftover surfaces. */
+html.theme-classy:not(.theme-light):not(:has(.landing)) .field input,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .field select,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .field textarea,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .input-row textarea,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .create-form,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .bubble,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .structured-card,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .scorecard-body,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .field-row,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .prompt-chip,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .nested-field,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .present-field,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .metric-tile,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .pv-obj-item,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .playground-phase-card,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .playground-card,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .playground-role-pill,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .pg-report-table-wrap,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .auth-modal,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .role-picker-menu,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-wrap,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-menu,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .site-preview-modal,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .control-room-phase,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .tracking-conv-list li {
+  background: var(--surface-1);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .msg.user .bubble {
+  background: var(--brand-blue-dark);
+  color: #f8fafc;
+  border-color: var(--brand-blue-dark);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .msg.system .bubble {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .structured-card.checkpoint,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .present-field.has-discrepancy,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .metric-tile.tone-warn {
+  background: var(--warning-bg);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .metric-tile.tone-ok {
+  background: var(--success-bg);
+  border-color: var(--border-success);
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .metric-tile.tone-bad {
+  background: var(--critical-bg);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .pg-report-table th,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .site-preview-toolbar,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .draft-figure img,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .draft-figure-placeholder {
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .commercial-scope .scope-hero {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .playground-phase-card.status-waiting,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .playground-card.status-waiting {
+  background: var(--surface-2);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .scorecard-toggle,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .schema-block,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .anomaly-banner {
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .role-picker-menu button,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-menu button {
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .role-picker-menu button:hover,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .role-picker-menu button.selected,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-menu button:hover,
+html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-menu button.selected {
+  background: var(--brand-blue-soft);
+  color: var(--text-primary);
+}
+
+html.theme-classy:not(.theme-light):not(:has(.landing)) .btn-secondary {
+  background: var(--brand-blue-soft);
+  color: var(--brand-blue-bright);
+  border-color: var(--border-active);
 }
