@@ -407,10 +407,10 @@ async def run_competitor(
                 "agent_key": "competitor_market_agent",
                 "content": (
                     (
-                        "Competitor discovery failed via OpenRouter"
+                        "Competitor discovery failed"
                         + (f": {discover_error}" if discover_error else ".")
                         + " Add competitors manually below, then refresh the scan — "
-                        "or retry after checking OpenRouter credits / COMPETITOR_MODEL."
+                        "or retry after checking the Anthropic API key and SKILL_MODEL."
                     )
                     if discover_error
                     else (

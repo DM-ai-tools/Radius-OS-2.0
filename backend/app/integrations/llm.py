@@ -39,12 +39,27 @@ def _anthropic_client(api_key: str):
 
 
 def _skill_provider_ready() -> bool:
+    """Skills always require a direct Anthropic key (OpenRouter is research/images only)."""
     settings = get_settings()
     if settings.use_mock_llm:
         return False
-    if settings.llm_provider == "openrouter":
-        return bool(settings.openrouter_api_key)
     return bool(settings.anthropic_api_key)
+
+
+def _normalize_anthropic_model(model: str | None) -> str:
+    """Map OpenRouter-style ids to Anthropic Messages API model ids."""
+    settings = get_settings()
+    fallback = (settings.skill_model or "claude-sonnet-5").strip()
+    raw = (model or fallback).strip() or fallback
+    if raw.startswith("anthropic/"):
+        raw = raw[len("anthropic/") :].strip() or fallback
+    # Non-Claude overrides (Gemini / GPT / Perplexity) are not valid on Anthropic.
+    lowered = raw.lower()
+    if not lowered.startswith("claude"):
+        if fallback.startswith("anthropic/"):
+            fallback = fallback[len("anthropic/") :].strip() or "claude-sonnet-5"
+        return fallback
+    return raw
 
 
 def _gemini_reasoning_budget(max_tokens: int) -> int:
@@ -147,6 +162,29 @@ async def _openrouter_chat(
         raise
 
 
+def _anthropic_message_text(resp: Any) -> str | None:
+    """Extract assistant text from an Anthropic Messages response.
+
+    Claude Sonnet 5 can return a ``thinking`` block before the ``text`` block.
+    Reading ``content[0].text`` alone often yields an empty string even when the
+    model returned a full answer in a later block.
+    """
+    blocks = list(getattr(resp, "content", None) or [])
+    parts: list[str] = []
+    for block in blocks:
+        if getattr(block, "type", None) == "text":
+            text = getattr(block, "text", None)
+            if text:
+                parts.append(str(text))
+    if parts:
+        return "\n".join(parts)
+    for block in blocks:
+        text = getattr(block, "text", None)
+        if text:
+            return str(text)
+    return None
+
+
 async def _anthropic_chat(
     *,
     system: str,
@@ -161,10 +199,11 @@ async def _anthropic_chat(
         return None
 
     client = _anthropic_client(settings.anthropic_api_key)
+    anthropic_model = _normalize_anthropic_model(model)
     t0 = time.perf_counter()
     try:
         resp = await client.messages.create(
-            model=model,
+            model=anthropic_model,
             max_tokens=max_tokens,
             system=system,
             messages=[{"role": "user", "content": user}],
@@ -175,18 +214,18 @@ async def _anthropic_chat(
         await record_api_call(
             provider="anthropic",
             operation="messages.create",
-            model=model,
+            model=anthropic_model,
             prompt_tokens=int(pt) if pt is not None else None,
             completion_tokens=int(ct) if ct is not None else None,
             latency_ms=int((time.perf_counter() - t0) * 1000),
             status="success",
         )
-        return resp.content[0].text
+        return _anthropic_message_text(resp)
     except Exception as exc:
         await record_api_call(
             provider="anthropic",
             operation="messages.create",
-            model=model,
+            model=anthropic_model,
             latency_ms=int((time.perf_counter() - t0) * 1000),
             status="error",
             error_detail=str(exc)[:500],
@@ -201,20 +240,12 @@ async def _skill_chat(
     max_tokens: int = 2500,
     model: str | None = None,
 ) -> str | None:
-    """Skill-model completion via OpenRouter or Anthropic.
+    """Skill completion via Anthropic Claude (skill_model) only.
 
-    Architecture v1.9: cheap Haiku for routing (elsewhere), Sonnet for reasoning,
-    Gemini 2.5 Pro forced for Competitor Research via ``model=``.
+    OpenRouter remains for research (Perplexity) and image generation.
+    Non-Claude ``model`` overrides are remapped to ``settings.skill_model``.
     """
-    settings = get_settings()
-    chosen = model or settings.skill_model
-    if settings.llm_provider == "openrouter":
-        return await _openrouter_chat(
-            system=system,
-            user=user,
-            model=chosen,
-            max_tokens=max_tokens,
-        )
+    chosen = _normalize_anthropic_model(model)
     return await _anthropic_chat(
         system=system,
         user=user,
@@ -494,7 +525,7 @@ async def _claude_route(message: str, profile_statuses: dict[str, str]) -> str:
             max_tokens=40,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = resp.content[0].text.strip()
+        text = (_anthropic_message_text(resp) or "").strip()
         for key in (
             "discovery_agent",
             "tracking_access_agent",

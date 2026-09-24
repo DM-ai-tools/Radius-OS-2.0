@@ -2539,9 +2539,7 @@ async def discover_competitors(
         if i > 0 and len(comps) >= 6:
             break
         payload = None
-        models_to_try = [settings.competitor_model]
-        if settings.skill_model and settings.skill_model != settings.competitor_model:
-            models_to_try.append(settings.skill_model)
+        models_to_try = [settings.skill_model]
         for model_name in models_to_try:
             try:
                 payload = await synthesize_json(
@@ -2549,7 +2547,7 @@ async def discover_competitors(
                     user_prompt,
                     model=model_name,
                     raise_on_error=True,
-                    max_tokens=8192 if "gemini" in model_name.lower() else 4096,
+                    max_tokens=4096,
                 )
                 last_error = ""
                 break
