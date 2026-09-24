@@ -26,6 +26,36 @@ async def _make_active_user(db_session, *, email: str, password: str, role_name:
     return user
 
 
+async def test_head_of_department_stays_available_until_five_accounts(api_client, db_session):
+    open_roles = (await api_client.get("/api/v1/auth/roles")).json()
+    assert any(r["name"] == "head_of_department" for r in open_roles)
+
+    for i in range(5):
+        resp = await api_client.post(
+            "/api/v1/auth/signup",
+            json={
+                "email": f"hod-{i}@example.com",
+                "password": "correct-horse-1",
+                "full_name": f"Hod {i}",
+                "role_name": "head_of_department",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    closed = (await api_client.get("/api/v1/auth/roles")).json()
+    assert all(r["name"] != "head_of_department" for r in closed)
+    blocked = await api_client.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "hod-6@example.com",
+            "password": "correct-horse-1",
+            "full_name": "Hod 6",
+            "role_name": "head_of_department",
+        },
+    )
+    assert blocked.status_code == 400
+
+
 async def test_login_succeeds_with_correct_credentials(api_client, db_session):
     await _make_active_user(
         db_session, email="login-ok@example.com", password="correct-horse-1", role_name="seo_qa_lead"

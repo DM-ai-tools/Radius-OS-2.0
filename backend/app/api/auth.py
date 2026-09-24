@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,6 +19,7 @@ from app.schemas.auth import (
 from app.security import create_access_token, hash_password, verify_password
 from app.services.role_skills import (
     BOOTSTRAP_ADMIN_ROLE,
+    HOD_SIGNUP_LIMIT,
     SELF_SERVICE_ROLES,
     SEO_ROLES,
     permissions_for_role,
@@ -41,23 +42,24 @@ def _user_out(user: User) -> UserOut:
     )
 
 
-async def _hod_exists(db: AsyncSession) -> bool:
+async def _hod_count(db: AsyncSession) -> int:
     result = await db.execute(
-        select(User.id).join(Role).where(Role.name == BOOTSTRAP_ADMIN_ROLE).limit(1)
+        select(func.count())
+        .select_from(User)
+        .join(Role)
+        .where(Role.name == BOOTSTRAP_ADMIN_ROLE)
     )
-    return result.scalar_one_or_none() is not None
+    return int(result.scalar_one() or 0)
 
 
 @router.get("/roles", response_model=list[RoleOut])
 async def list_roles(db: AsyncSession = Depends(get_db)):
     """SEO roles available for self-service signup.
 
-    Head of Department is only offered while no Head of Department account
-    exists yet (first-run org bootstrap) — once one exists, it drops out of
-    this list and can no longer be self-assigned.
+    Head of Department stays on the list until HOD_SIGNUP_LIMIT accounts exist.
     """
     allowed = set(SELF_SERVICE_ROLES)
-    if not await _hod_exists(db):
+    if await _hod_count(db) < HOD_SIGNUP_LIMIT:
         allowed.add(BOOTSTRAP_ADMIN_ROLE)
     return [
         RoleOut(name=r["name"], label=r["label"], description=r["description"])
@@ -69,8 +71,11 @@ async def list_roles(db: AsyncSession = Depends(get_db)):
 @router.post("/signup", response_model=TokenResponse)
 async def signup(body: SignupRequest, db: AsyncSession = Depends(get_db)):
     if body.role_name == BOOTSTRAP_ADMIN_ROLE:
-        if await _hod_exists(db):
-            raise HTTPException(400, "This role can't be self-assigned — ask an admin to invite you")
+        if await _hod_count(db) >= HOD_SIGNUP_LIMIT:
+            raise HTTPException(
+                400,
+                f"Head of Department is limited to {HOD_SIGNUP_LIMIT} accounts.",
+            )
     elif body.role_name not in SELF_SERVICE_ROLES:
         raise HTTPException(400, "This role can't be self-assigned — ask an admin to invite you")
 

@@ -16,7 +16,7 @@ const FALLBACK_ROLES: SeoRole[] = [
   {
     name: "head_of_department",
     label: "Head of Department",
-    description: "Full access — can run and approve every skill across all phases.",
+    description: "Full access — up to 5 accounts. Can run and approve every skill across all phases.",
   },
   {
     name: "client_success_manager",

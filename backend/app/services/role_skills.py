@@ -30,7 +30,7 @@ SEO_ROLES: list[dict[str, str]] = [
     {
         "name": "head_of_department",
         "label": "Head of Department",
-        "description": "Full access — can run and approve every skill across all phases.",
+        "description": "Full access — up to 5 accounts. Can run and approve every skill across all phases.",
     },
     {
         "name": "client_success_manager",
@@ -69,14 +69,12 @@ SEO_ROLES: list[dict[str, str]] = [
     },
 ]
 
-# Head of Department is deliberately excluded from unconditional self-service:
-# it grants full trigger+approve access across every phase for every client, and
-# there is no per-client ownership model to scope that down. It is only ever
-# self-assignable for first-run org bootstrap on Railway (see auth.py's
-# `_hod_exists` gate) — once one Head of Department account exists, further HoD
-# accounts must be created/promoted by an existing admin, not self-registered.
+# Head of Department grants full trigger+approve on every phase. Signup may
+# create up to HOD_SIGNUP_LIMIT of these accounts; after that the role leaves
+# the public list.
 SELF_SERVICE_ROLES: set[str] = {r["name"] for r in SEO_ROLES if r["name"] != "head_of_department"}
 BOOTSTRAP_ADMIN_ROLE = "head_of_department"
+HOD_SIGNUP_LIMIT = 5
 
 
 # Phase / skill ownership from coverage doc (all phases). implemented=False → future.
