@@ -8,9 +8,12 @@ from urllib.parse import urlparse
 
 from app.services.create_topic import format_audience_label
 from app.services.create_topic import funnel_balance as _funnel_balance
+from app.logging_config import get_logger
 from app.services.create_topic import (
     funnel_balance_warnings as _funnel_balance_warnings,
 )
+
+log = get_logger("content_production")
 
 _SELECT_HINTS = (
     "write the full draft",
@@ -131,9 +134,17 @@ def pick_brief(
 
 def topic_choices(briefs: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
     ready = [b for b in briefs if isinstance(b, dict) and b.get("writer_ready")]
-    ready.sort(key=lambda r: int(r.get("priority_rank") or r.get("wave") or 999))
+    ready.sort(
+        key=lambda r: (
+            0 if r.get("from_selected_service") else 1,
+            int(r.get("priority_rank") or r.get("wave") or 999),
+        )
+    )
+    selected = [b for b in ready if b.get("from_selected_service")]
+    others = [b for b in ready if not b.get("from_selected_service")]
+    ordered = selected + others
     rows: list[dict[str, Any]] = []
-    for i, b in enumerate(ready[:limit]):
+    for i, b in enumerate(ordered[: max(limit, len(selected))]):
         kw = str(b.get("keyword") or b.get("title") or "topic")
         url = str(b.get("url") or b.get("path") or "")
         rows.append(
@@ -142,7 +153,9 @@ def topic_choices(briefs: list[dict[str, Any]], *, limit: int = 8) -> list[dict[
                 "keyword": kw,
                 "title": b.get("title") or kw,
                 "url": url,
-                "action": b.get("action"),
+                "action": b.get("action") or b.get("recommended_action"),
+                "work_label": b.get("work_label"),
+                "from_selected_service": b.get("from_selected_service"),
                 "funnel": b.get("funnel"),
                 "intent": b.get("search_intent"),
                 "prompt": f"Write the full draft for: {kw} ({url})" if url else f"Write the full draft for: {kw}",
@@ -178,17 +191,28 @@ async def run_content_production_plan(
     content_audit: dict[str, Any] | None = None,
     website: dict[str, Any] | None = None,
     search_demand: dict[str, Any] | None = None,
+    on_page_seo: dict[str, Any] | None = None,
     marketing: dict[str, Any] | None = None,
+    content_context_builder: Any | None = None,
     industry: str | None = None,
     limit: int = 8,
     write_all: bool = False,
     selected_url: str | None = None,
     selected_keyword: str | None = None,
     prior_briefs: list[dict[str, Any]] | None = None,
+    google_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Brief the locked queue; wait for a topic click; write **one** full draft."""
     planning = dict(content_planning or {})
     site = dict(website or {})
+    demand = dict(search_demand or {})
+    topic_plan = (
+        demand.get("topic_plan")
+        if isinstance(demand.get("topic_plan"), dict)
+        else demand.get("create_topic")
+        if isinstance(demand.get("create_topic"), dict)
+        else {}
+    )
     if planning.get("locked") is False:
         return {
             "blocked": True,
@@ -332,9 +356,27 @@ async def run_content_production_plan(
                     or (seo_strategy or {}).get("location")
                     or ""
                 ).strip() or None
+                content_context = None
+                if content_context_builder is not None:
+                    from app.services.create_content import resolve_page_type
+
+                    try:
+                        content_context = await content_context_builder(
+                            keyword=str(chosen.get("keyword") or chosen.get("title") or ""),
+                            page_type=resolve_page_type(chosen),
+                            service_id=str(
+                                chosen.get("service_id")
+                                or chosen.get("service")
+                                or ""
+                            ).strip() or None,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Signals are an enhancement; losing them must not stop the draft.
+                        log.warning("content_context_failed", error=str(exc)[:240])
                 written = await write_one_page(
                     brief=chosen,
                     client_name=client_name,
+                    content_context=content_context,
                     existing_excerpt=excerpt,
                     use_llm=True,
                     seo_strategy=seo_strategy,
@@ -342,6 +384,7 @@ async def run_content_production_plan(
                     industry=industry,
                     location=location,
                     search_demand=search_demand,
+                    google_policy=google_policy,
                 )
                 if written.get("ok"):
                     from app.services.publish_preview import build_draft_site_preview
@@ -352,6 +395,9 @@ async def run_content_production_plan(
                             primary_url=primary_url,
                             draft=written,
                             site_architecture=site_architecture,
+                            on_page_seo=on_page_seo,
+                            content_planning=planning,
+                            topic_plan=topic_plan if isinstance(topic_plan, dict) else {},
                         )
                     except Exception:  # noqa: BLE001
                         # Preview is additive — never block the draft write.

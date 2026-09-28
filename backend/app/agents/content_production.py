@@ -20,6 +20,80 @@ from app.services.content_production import (
 from app.services.role_skills import required_role_for
 
 
+def _content_context_builder(db, client, profile):
+    """A per-brief content-context factory.
+
+    The signal bundle depends on the brief's keyword and page type, which are
+    only known once a topic is chosen, so the writer is handed a factory rather
+    than a finished context. Settings come from the operator's saved
+    ``commercial_scope.content_settings`` (see PUT /clients/{id}/content-settings).
+    """
+    from app.services.content_signals.context import build_content_context
+
+    commercial = dict(profile.commercial_scope or {})
+    settings = dict(commercial.get("content_settings") or {})
+
+    async def _build(
+        *, keyword: str, page_type: str | None, service_id: str | None = None
+    ) -> dict:
+        competitors = await _stored_competitors(db, client.id)
+        # Feature 1: a service's own competitor picks take precedence over the
+        # client-wide set, so content for that service is briefed against the
+        # competitors the operator chose for it.
+        if service_id:
+            from app.services.service_competitors import resolve_service_competitors
+
+            scoped = resolve_service_competitors(
+                commercial, service_id=service_id, competitor_rows=competitors
+            )
+            if scoped:
+                competitors = scoped
+        return build_content_context(
+            keyword=keyword,
+            page_type=page_type,
+            commercial=commercial,
+            marketing=dict(profile.marketing_context or {}),
+            competitive=dict(profile.competitive_landscape_summary or {}),
+            search_demand=dict(profile.search_demand_summary or {}),
+            production=dict(profile.content_production_summary or {}),
+            publishing=dict(profile.publishing_summary or {}),
+            audit=dict(profile.content_audit_summary or {}),
+            architecture=dict(profile.site_architecture_summary or {}),
+            competitors=competitors,
+            preset=settings.get("preset"),
+            weight_overrides=settings.get("weight_overrides"),
+            skill_override=settings.get("skill_override"),
+            framework_choice=settings.get("framework_choice"),
+            selected_competitors_only=bool(settings.get("selected_competitors_only")),
+            creative_mode=bool(settings.get("creative_mode")),
+        )
+
+    return _build
+
+
+async def _stored_competitors(db, client_id) -> list[dict]:
+    """CompetitorProfile rows as plain dicts — source/confirmed drive the AI vs
+    operator-selected split inside the competitors signal."""
+    from sqlalchemy import select
+
+    from app.models import CompetitorProfile
+
+    rows = (
+        await db.execute(
+            select(CompetitorProfile).where(CompetitorProfile.client_id == client_id)
+        )
+    ).scalars().all()
+    return [
+        {
+            "name": row.name,
+            "url": row.url,
+            "source": row.source,
+            "confirmed": bool(row.confirmed),
+        }
+        for row in rows
+    ]
+
+
 async def run_content_production(
     db: AsyncSession,
     *,
@@ -83,6 +157,7 @@ async def run_content_production(
         content_audit=dict(profile.content_audit_summary or {}),
         website=dict(profile.website_situation_summary or {}),
         search_demand=dict(profile.search_demand_summary or {}),
+        on_page_seo=dict(profile.on_page_seo_summary or {}),
         marketing=merge_brief_memory(
             marketing=dict(profile.marketing_context or {}),
             commercial=dict(profile.commercial_scope or {}),
@@ -92,6 +167,8 @@ async def run_content_production(
         selected_url=(selection or {}).get("url") or None,
         selected_keyword=(selection or {}).get("keyword") or None,
         prior_briefs=list(prior.get("briefs") or []) if selection else None,
+        google_policy=dict((profile.commercial_scope or {}).get("content_settings") or {}),
+        content_context_builder=_content_context_builder(db, client, profile),
     )
     summary["generated_at"] = datetime.now(timezone.utc).isoformat()
 
