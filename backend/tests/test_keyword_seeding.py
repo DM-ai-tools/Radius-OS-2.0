@@ -9,7 +9,7 @@ from app.services.keyword_seeding import (
     classify_expansion,
     classify_vs_seed,
     clean_provider_seed,
-    expand_seed_ahrefs,
+    expand_seed,
     flatten_dataset,
     run_multi_mode_seeding,
 )
@@ -24,50 +24,40 @@ def _reset_ahrefs_explorer_block():
     _semrush.reset_keywords_explorer_block()
 
 
-def test_build_coverage_expansions_reaches_twenty():
-    from app.services.keyword_seeding import build_coverage_expansions
+def test_no_generator_fabricates_coverage_keywords():
+    """build_coverage_expansions invented keywords and volumes to pad a thin
+    pool. Every metric must come from a provider, so it is gone."""
+    from app.services import keyword_seeding
 
-    rows = build_coverage_expansions("Email Marketing", min_count=20)
-    assert len(rows) >= 20
-    classes = {r["match_class"] for r in rows}
-    assert "exact" in classes
-    assert "phrase" in classes
-    assert "related" in classes or "broad" in classes
-    assert all(r.get("provider_fallback") for r in rows)
+    assert not hasattr(keyword_seeding, "build_coverage_expansions")
 
 
 @pytest.mark.asyncio
-async def test_expand_uses_coverage_fallback_when_providers_fail(monkeypatch):
+async def test_expand_reports_the_outage_instead_of_padding(monkeypatch):
+    """DataForSEO is the only provider. When it fails the seed yields almost
+    nothing and says so — it does not invent keywords to hit min_keywords."""
     from app.config import get_settings
     from app.services import keyword_seeding
 
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
-    monkeypatch.setattr(settings, "semrush_api_key", "test-key", raising=False)
-
-    async def _empty_matching(*args, **kwargs):
-        return [], ["ahrefs_matching_terms_failed"]
-
-    async def _empty_related(*args, **kwargs):
-        return [], ["ahrefs_related_terms_failed"]
 
     async def _empty_dfs(*args, **kwargs):
         return [], ["dataforseo_failed"]
 
-    monkeypatch.setattr(keyword_seeding.semrush, "matching_terms", _empty_matching)
-    monkeypatch.setattr(keyword_seeding.semrush, "related_terms", _empty_related)
     monkeypatch.setattr(keyword_seeding, "expand_seed_dataforseo", _empty_dfs)
 
-    rows, errors = await expand_seed_ahrefs(
+    rows, errors = await expand_seed(
         "Email Marketing",
         country="au",
         min_volume=10,
         location_code=2036,
         min_keywords=20,
     )
-    assert "provider_coverage_fallback" in errors
-    assert len(rows) >= 20
-    assert sum(1 for r in rows if r.get("match_class") != "exact") >= 15
+    assert "provider_expansion_unavailable" in errors
+    assert len(rows) < 20
+    assert not [r for r in rows if r.get("provider_fallback")]
+    assert all(r.get("volume") is None for r in rows)
 
 
 def test_clean_provider_seed_strips_rejected_chars():
@@ -206,23 +196,16 @@ def test_flat_dataset_preserves_keyword_under_each_seed():
     assert {row["seed"] for row in rows} == {"seo services", "ppc agency"}
 
 
-async def test_expand_falls_back_to_dataforseo_when_ahrefs_exhausted(monkeypatch):
-    """When Ahrefs is quota-limited (no expansions), DataForSEO must populate
-    related/broad keyword sets so each seed still yields a full set."""
+async def test_dataforseo_supplies_the_full_class_set(monkeypatch):
+    """One provider now covers every class — nothing is conditional on a second
+    provider having failed first."""
     from app.config import get_settings
     from app.services import keyword_seeding
 
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
-    monkeypatch.setattr(settings, "semrush_api_key", "test-key", raising=False)
 
-    async def _empty_matching(*args, **kwargs):
-        return [], ["ahrefs_matching_terms_failed"]
-
-    async def _empty_related(*args, **kwargs):
-        return [], ["ahrefs_related_terms_failed"]
-
-    async def _dfs_related(seed, **kwargs):
+    async def _dfs_rows(seed, **kwargs):
         return (
             [
                 {"keyword": seed, "volume": 1200, "difficulty": 40, "cpc": 3.0},
@@ -233,11 +216,11 @@ async def test_expand_falls_back_to_dataforseo_when_ahrefs_exhausted(monkeypatch
             [],
         )
 
-    monkeypatch.setattr(keyword_seeding.semrush, "matching_terms", _empty_matching)
-    monkeypatch.setattr(keyword_seeding.semrush, "related_terms", _empty_related)
-    monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _dfs_related)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _dfs_rows)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _dfs_rows)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_ideas", _dfs_rows)
 
-    rows, errors = await expand_seed_ahrefs(
+    rows, errors = await expand_seed(
         "seo services",
         country="au",
         min_volume=10,
@@ -246,58 +229,55 @@ async def test_expand_falls_back_to_dataforseo_when_ahrefs_exhausted(monkeypatch
 
     classes = {r["match_class"] for r in rows}
     assert "related" in classes or "broad" in classes
+    assert "provider_coverage_fallback" not in errors
     assert any(r.get("source") == "dataforseo" for r in rows)
     assert any((r.get("volume") or 0) > 10 for r in rows)
 
 
-async def test_missing_classes_topped_up_from_dedicated_dfs_sources(monkeypatch):
-    """Ahrefs returning only 'terms' data must not leave phrase/broad empty — each
-    missing class is topped up from the DataForSEO endpoint built for it."""
+async def test_every_class_comes_from_its_dedicated_dataforseo_source(monkeypatch):
+    """DataForSEO is the only provider, so one pass must fill every class.
+
+    Was: SEMrush ran first and DataForSEO only topped up whatever SEMrush left
+    empty. With no SEMrush subscription that left every class empty.
+    """
     from app.config import get_settings
     from app.services import keyword_seeding
 
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
-    monkeypatch.setattr(settings, "semrush_api_key", "test-key", raising=False)
 
     called: list[str] = []
-
-    async def _matching(seed, **kwargs):
-        # Only the 'terms' feed works; the phrase feed is quota-blocked
-        if kwargs.get("match_mode") == "phrase":
-            return [], ["ahrefs_http_error"]
-        return [{"keyword": "services for seo", "volume": 300, "difficulty": 30}], []
-
-    async def _related_terms(seed, **kwargs):
-        return [], ["ahrefs_http_error"]
 
     async def _suggestions(seed, **kwargs):
         called.append("suggestions")
         return [{"keyword": "seo services melbourne", "volume": 260, "difficulty": 25}], []
 
-    async def _ideas(seed, **kwargs):
-        called.append("ideas")
-        return [{"keyword": "ppc management", "volume": 180, "difficulty": 20}], []
-
     async def _related_kw(seed, **kwargs):
         called.append("related")
         return [{"keyword": "seo audit and services", "volume": 140, "difficulty": 18}], []
 
-    monkeypatch.setattr(keyword_seeding.semrush, "matching_terms", _matching)
-    monkeypatch.setattr(keyword_seeding.semrush, "related_terms", _related_terms)
-    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _suggestions)
-    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_ideas", _ideas)
-    monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _related_kw)
+    async def _ideas(seed, **kwargs):
+        called.append("ideas")
+        return [{"keyword": "ppc management", "volume": 180, "difficulty": 20}], []
 
-    rows, _ = await expand_seed_ahrefs(
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _suggestions)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _related_kw)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_ideas", _ideas)
+
+    rows, _ = await expand_seed(
         "seo services", country="au", min_volume=10, location_code=2036
     )
 
     classes = {r["match_class"] for r in rows}
     assert classes == {"exact", "phrase", "related", "broad"}
-    # 'related' already came from Ahrefs terms, so only the empty classes are fetched
-    assert "suggestions" in called and "ideas" in called
-    assert "related" not in called
+    # All three sources are queried in a single pass — nothing is conditional
+    # on another provider having failed first.
+    assert set(called) == {"suggestions", "related", "ideas"}
+    assert all(
+        r.get("source") == "dataforseo"
+        for r in rows
+        if r.get("ahrefs_endpoint") != "seed"
+    )
 
 
 async def test_empty_class_filled_from_real_sub_threshold_keywords(monkeypatch):
@@ -308,28 +288,31 @@ async def test_empty_class_filled_from_real_sub_threshold_keywords(monkeypatch):
 
     settings = get_settings()
     monkeypatch.setattr(settings, "use_mock_providers", False)
-    monkeypatch.setattr(settings, "semrush_api_key", "test-key", raising=False)
 
-    async def _matching(seed, **kwargs):
-        if kwargs.get("match_mode") == "phrase":
-            return [{"keyword": "seo services melbourne", "volume": 400}], []
+    async def _suggestions(seed, **kwargs):
+        return [{"keyword": "seo services melbourne", "volume": 400}], []
+
+    async def _related_kw(seed, **kwargs):
         return [{"keyword": "services for seo", "volume": 300}], []
 
-    async def _related_terms(seed, **kwargs):
+    async def _ideas(seed, **kwargs):
         # Only sub-threshold broad results exist
         return [{"keyword": "ppc management", "volume": 4}], []
 
-    monkeypatch.setattr(keyword_seeding.semrush, "matching_terms", _matching)
-    monkeypatch.setattr(keyword_seeding.semrush, "related_terms", _related_terms)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _suggestions)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _related_kw)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_ideas", _ideas)
 
-    rows, _ = await expand_seed_ahrefs(
-        "seo services", country="au", min_volume=10, location_code=None
+    rows, _ = await expand_seed(
+        "seo services", country="au", min_volume=10, location_code=2036
     )
 
     broad = [r for r in rows if r["match_class"] == "broad"]
     assert broad, "broad class should be filled from sub-threshold results"
     assert all(r.get("below_volume_floor") for r in broad)
     assert broad[0]["keyword"] == "ppc management"
+    # Real provider rows, not fabricated coverage.
+    assert not any(r.get("provider_fallback") for r in broad)
 
 
 async def test_seeding_reports_per_seed_class_coverage(monkeypatch):

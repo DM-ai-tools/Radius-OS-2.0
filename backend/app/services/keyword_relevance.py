@@ -17,7 +17,16 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.services.keyword_exclusions import is_commercially_targetable
 from app.services.keyword_opportunity import is_stale_year_keyword
+
+__all__ = [
+    "RelevanceContext",
+    "build_relevance_context",
+    "evaluate_keyword",
+    "filter_relevant_keywords",
+    "is_commercially_targetable",
+]
 
 _STOP = {
     "the",
@@ -34,6 +43,76 @@ _STOP = {
     "vs",
     "versus",
 }
+# Tokens too generic to be evidence on their own. They appear in real service
+# names ("AI-Powered SEO", "app development", "digital marketing"), so they are
+# not stopwords — they just cannot be the ONLY thing tying a keyword to this
+# business. Click Trends' catalog made "ai" distinctive, and one shared
+# three-letter token then admitted "google ai", "ai mode", "ai girlfriend" and
+# the rest of the consumer-AI category into a B2B email-marketing pool.
+_NON_DISTINCTIVE = {
+    "ai",
+    "app",
+    "apps",
+    "tool",
+    "tools",
+    "online",
+    "digital",
+    "platform",
+    "platforms",
+    "software",
+    "system",
+    "systems",
+    "tech",
+    "service",
+    "services",
+    "solution",
+    "solutions",
+    "powered",
+    "focus",
+    "primary",
+    "secondary",
+    "management",
+    "web",
+    "site",
+    "data",
+    "cloud",
+    # Platform brands: real service names carry them ("Google Ads/PPC
+    # Management"), but the brand alone is not the service. "google ai" is not a
+    # Google Ads query — it needs the platform's service head ("ads", "ppc",
+    # "adwords"), which stays distinctive, exactly as the paid-media family
+    # logic below already assumes for shared heads.
+    "google",
+    "meta",
+    "facebook",
+    "instagram",
+    "microsoft",
+    "linkedin",
+    "tiktok",
+    # Business-entity nouns. CDD keywords routinely read "email marketing
+    # company" / "email marketing agency", which made "company" and "agency"
+    # distinctive — so "fujifilm company" (11,105/mo) topped a real client's head
+    # terms on one shared word. These name a KIND of business, never which one.
+    "company",
+    "companies",
+    "agency",
+    "agencies",
+    "consultant",
+    "consultants",
+    "consultancy",
+    "firm",
+    "firms",
+    "specialist",
+    "specialists",
+    "expert",
+    "experts",
+    "provider",
+    "providers",
+    "freelancer",
+    "freelancers",
+    "partner",
+    "partners",
+}
+
 _WEAK = {
     "best",
     "top",
@@ -95,6 +174,18 @@ _GENERIC_BRAND = {
     "the",
     "and",
 }
+
+# Paid-media platform families. Shared heads like "ads" are not distinctive —
+# "google ads" expanded from a Meta Ads seed must not inherit Meta lineage.
+_PLATFORM_FAMILIES: dict[str, frozenset[str]] = {
+    "meta": frozenset({"meta", "facebook", "fb", "instagram", "ig"}),
+    # Include singularized forms ("gads" → "gad" via _singular).
+    "google": frozenset({"google", "adwords", "adword", "gads", "gad", "gadwords", "gadword"}),
+    "linkedin": frozenset({"linkedin"}),
+    "tiktok": frozenset({"tiktok"}),
+    "youtube": frozenset({"youtube"}),
+}
+
 _URL_RE = re.compile(r"(https?://|www\.|[a-z0-9-]+\.(com|net|org|io|co|au|uk)(/|\b))", re.IGNORECASE)
 
 KEEP_REASONS = (
@@ -122,7 +213,24 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def _deamericanise(tok: str) -> str:
+    """Fold -ize/-ization onto -ise/-isation so spellings match.
+
+    A CDD written in British English ("conversion optimisation") otherwise fails
+    to match the American keyword ("conversion optimization"), which cost a real
+    client its "conversion optimization agency" term. Applied to both sides, so
+    the direction of the fold does not matter.
+    """
+    if len(tok) > 5:
+        if "izatio" in tok:
+            tok = tok.replace("izatio", "isatio")
+        elif tok.endswith(("ize", "izes", "ized", "izing", "izer", "izers")):
+            tok = tok.replace("iz", "is", 1) if "iz" in tok else tok
+    return tok
+
+
 def _singular(tok: str) -> str:
+    tok = _deamericanise(tok)
     if tok.endswith("ies") and len(tok) > 4:
         return tok[:-3] + "y"
     if tok.endswith("ses") and len(tok) > 4:
@@ -138,6 +246,82 @@ def _token_list(text: str) -> list[str]:
 
 def _tokens(text: str) -> set[str]:
     return set(_token_list(text))
+
+
+def _platform_families(text: str) -> set[str]:
+    """Return platform family keys present in ``text`` (e.g. {'meta'}, {'google'})."""
+    toks = _tokens(text)
+    if not toks:
+        return set()
+    found: set[str] = set()
+    for family, aliases in _PLATFORM_FAMILIES.items():
+        if toks & aliases:
+            found.add(family)
+    return found
+
+
+def _platform_mismatch(keyword: str, *, seed: str | None, services: Iterable[str]) -> bool:
+    """True when keyword's platform family conflicts with seed / selected services."""
+    kw_fam = _platform_families(keyword)
+    if not kw_fam:
+        return False
+    seed_text = str(seed or "").strip()
+    if seed_text:
+        seed_fam = _platform_families(seed_text)
+        if seed_fam and seed_fam.isdisjoint(kw_fam):
+            return True
+        if seed_fam:
+            return False
+    svc_fam: set[str] = set()
+    for svc in services or []:
+        svc_fam |= _platform_families(str(svc or ""))
+    return bool(svc_fam) and svc_fam.isdisjoint(kw_fam)
+
+
+# Derivational families the plural-only stemmer cannot connect. Without these,
+# "baker salary" matched no evidence at all for a bakery, and "dentistry" missed
+# a "dental" service — the gate looked stricter than it was, for the wrong reason.
+# Kept deliberately short and explicit: no stemming library, no embeddings.
+LEMMA_ROOTS: dict[str, str] = {
+    "dentist": "dent",
+    "dental": "dent",
+    "dentistry": "dent",
+    "bake": "bake",
+    "baker": "bake",
+    "bakery": "bake",
+    "bakeri": "bake",
+    "baked": "bake",
+    "baking": "bake",
+    "bread": "bread",
+    "plumber": "plumb",
+    "plumbing": "plumb",
+    "electrician": "electric",
+    "electrical": "electric",
+    "roofer": "roof",
+    "roofing": "roof",
+    "builder": "build",
+    "building": "build",
+    "cleaner": "clean",
+    "cleaning": "clean",
+    "painter": "paint",
+    "painting": "paint",
+    "legal": "law",
+    "lawyer": "law",
+    "accountant": "account",
+    "accounting": "account",
+    "pastry": "pastry",
+    "pastries": "pastry",
+}
+
+
+def _lemma(token: str) -> str:
+    """Singularize, then fold known derivational families to one root."""
+    tok = _singular(token)
+    return LEMMA_ROOTS.get(tok, LEMMA_ROOTS.get(token, tok))
+
+
+def _lemmas(text: str) -> set[str]:
+    return {_lemma(t) for t in _token_list(text)}
 
 
 def _phrases(values: Iterable[Any]) -> list[str]:
@@ -340,9 +524,34 @@ class RelevanceContext:
     competitor_brand_tokens: set[str] = field(default_factory=set)
     client_brand_tokens: set[str] = field(default_factory=set)
     has_business_evidence: bool = False
+    distinctive_lemmas: set[str] = field(default_factory=set)
+    industry: str | None = None
+    geography: str | None = None
 
     def seed_is_supported(self, seed: str) -> bool:
         return bool(self._phrase_hit(seed) or self._token_hit(seed))
+
+    def seed_is_service(self, seed: str) -> bool:
+        """True when the seed is one of the client's own services/sub-services.
+
+        Seed lineage is only a relevance signal when the seed is something the
+        client actually sells — a CDD keyword or a website theme is too loose.
+        """
+        target = _norm(seed)
+        if not target:
+            return False
+        for service in self.services:
+            svc = _norm(service)
+            if not svc:
+                continue
+            if svc == target or svc in target or target in svc:
+                return True
+            if _lemmas(service) and _lemmas(service) <= _lemmas(target):
+                return True
+        return False
+
+    def _lemma_hit(self, text: str) -> set[str]:
+        return _lemmas(text) & self.distinctive_lemmas
 
     def _phrase_hit(self, text: str) -> str | None:
         kw = _norm(text)
@@ -372,6 +581,8 @@ def build_relevance_context(
     competitor_domains: Iterable[str] | None = None,
     brand_name: str | None = None,
     domain: str | None = None,
+    industry: str | None = None,
+    geography: str | None = None,
 ) -> RelevanceContext:
     svc = _phrases(services or [])
     cdd = _phrases(cdd_keywords or [])
@@ -385,7 +596,9 @@ def build_relevance_context(
     evidence_tokens: set[str] = set()
     for phrase in evidence:
         evidence_tokens |= _tokens(phrase)
-    distinctive = {t for t in evidence_tokens if t not in _WEAK}
+    distinctive = {
+        t for t in evidence_tokens if t not in _WEAK and t not in _NON_DISTINCTIVE
+    }
 
     brand_full, brand_tokens = competitor_brand_blocklist(
         competitor_names or [],
@@ -415,6 +628,9 @@ def build_relevance_context(
         competitor_brand_tokens=brand_tokens,
         client_brand_tokens=client_brand,
         has_business_evidence=bool(distinctive or evidence),
+        distinctive_lemmas={_lemma(t) for t in distinctive},
+        industry=industry,
+        geography=geography,
     )
 
 
@@ -428,6 +644,8 @@ def evaluate_keyword(
     provider_fallback: bool = False,
 ) -> tuple[bool, str, str]:
     """Return (keep, reason, evidence_note)."""
+    from app.services.keyword_exclusions import hard_reject_term, has_commercial_signal
+
     kw = str(keyword or "").strip()
     if not kw or len(_norm(kw)) < 2:
         return False, "empty", ""
@@ -435,6 +653,11 @@ def evaluate_keyword(
         return False, "stale_year", ""
     if is_url_like(kw):
         return False, "url_noise", ""
+    # Tier 1 runs before every other signal. A job ad that happens to contain two
+    # service words is still a job ad.
+    excluded = hard_reject_term(kw, industry=ctx.industry)
+    if excluded:
+        return False, f"excluded_{excluded.replace(' ', '_')}", excluded
     if is_competitor_brand_term(
         kw,
         brand_full=ctx.competitor_brand_full,
@@ -456,12 +679,56 @@ def evaluate_keyword(
     broad_token_hit = _tokens(kw) & ctx.evidence_tokens if ctx.evidence_tokens else set()
 
     if not ctx.has_business_evidence:
-        return True, "hygiene_only", ""
+        # Nothing to check relevance against. Passing everything here was the
+        # widest hole in the gate: the clients with the thinnest profiles — the
+        # ones least able to spot a bad keyword — got the least filtering.
+        # Keep the seed shells so the phase can still report what it was asked
+        # to expand, and reject the expansions as unverifiable.
+        seed_norms = {_norm(s) for s in ctx.seeds if _norm(s)}
+        if _norm(kw) in seed_norms or (seed_text and _norm(kw) == _norm(seed_text)):
+            return True, "relevance_unverified", "no business evidence on file"
+        return False, "no_business_evidence", ""
 
     from app.services.keyword_opportunity import is_ambiguous_seed, is_noisy_keyword
 
     if is_noisy_keyword(kw):
         return False, "noisy", ""
+
+    from app.services.keyword_service_contract import judge_keyword
+
+    service_for_contract = seed_text if seed_text and ctx.seed_is_service(seed_text) else seed_text
+    contract = judge_keyword(
+        kw,
+        service=service_for_contract or "",
+        cdd_keywords=list(ctx.cdd_keywords or []),
+        geography=getattr(ctx, "geography", None),
+    )
+    if contract.decision == "DROP":
+        return False, contract.reason, contract.reason_detail
+    if contract.decision == "KEEP":
+        # The service contract already verified the whole query. Do not drop it
+        # later for a weak lexical overlap.
+        return True, "service_match", contract.family or contract.reason_detail
+    if contract.decision == "REVIEW":
+        return True, "service_review", contract.reason_detail
+
+    def _related_stays_on_seed() -> bool:
+        """A related query must still carry the seed, not merely share its parent."""
+        if not seed_text:
+            return False
+        seed_norm = _norm(seed_text)
+        kw_norm = _norm(kw)
+        if seed_norm and (seed_norm in kw_norm or kw_norm in seed_norm):
+            return True
+        seed_core = _tokens(seed_text) - _NON_DISTINCTIVE - _WEAK - _STOP
+        if not seed_core:
+            seed_core = _tokens(seed_text) - _STOP
+        return bool(_tokens(kw) & seed_core)
+
+    # Cross-platform expansions (e.g. "google ads" under a Meta Ads seed) never
+    # inherit the seed's parent category — shared "ads" is not affinity.
+    if _platform_mismatch(kw, seed=seed_text, services=ctx.services):
+        return False, "platform_mismatch", seed_text or ""
 
     def _ambiguous_seed_on_topic() -> bool:
         """Short acronym seeds must keep expansions on the business sense of the seed."""
@@ -520,7 +787,8 @@ def evaluate_keyword(
     if cls == "related" and seed_supported:
         if not _ambiguous_seed_on_topic():
             return False, "ambiguous_seed_drift", seed_text
-        return True, "seed_related", seed_text
+        if _related_stays_on_seed():
+            return True, "seed_related", seed_text
 
     # Even when the seed isn't fully supported, keep exact/phrase expansions
     # that themselves share evidence tokens (broader match).
@@ -539,14 +807,36 @@ def evaluate_keyword(
             source = "theme_overlap"
         return True, source, phrase_hit
 
-    if token_hit:
-        if token_hit & _tokens(" ".join(ctx.services)):
-            return True, "service_overlap", " ".join(sorted(token_hit))
-        if token_hit & _tokens(" ".join(ctx.page_terms)):
-            return True, "page_overlap", " ".join(sorted(token_hit))
-        if token_hit & _tokens(" ".join(ctx.themes)):
-            return True, "theme_overlap", " ".join(sorted(token_hit))
-        return True, "cdd_phrase", " ".join(sorted(token_hit))
+    # Lemma overlap catches dentist/dental/dentistry and bake/baker/bakery, which
+    # plural-only stemming missed entirely.
+    lemma_hit = ctx._lemma_hit(kw)
+    effective_hit = token_hit or lemma_hit
+    if effective_hit:
+        # One shared token is not evidence of relevance on its own — "dental"
+        # matches a job ad, a museum and a school just as well as a patient.
+        # Require a second, independent signal.
+        if len(effective_hit) < 2:
+            # The head noun is what the searcher actually wants. "site speed
+            # audit" is a kind of audit; "dental museum exhibition" is not a kind
+            # of dentistry — same single shared token, opposite meaning.
+            kw_tokens = _token_list(kw)
+            head_noun_match = bool(
+                kw_tokens and _lemma(kw_tokens[-1]) in ctx.distinctive_lemmas
+            )
+            second_signal = (
+                head_noun_match
+                or has_commercial_signal(kw)
+                or (bool(seed_text) and ctx.seed_is_service(seed_text))
+            )
+            if not second_signal:
+                return False, "weak_single_token", " ".join(sorted(effective_hit))
+        if effective_hit & (_tokens(" ".join(ctx.services)) | _lemmas(" ".join(ctx.services))):
+            return True, "service_overlap", " ".join(sorted(effective_hit))
+        if effective_hit & _tokens(" ".join(ctx.page_terms)):
+            return True, "page_overlap", " ".join(sorted(effective_hit))
+        if effective_hit & _tokens(" ".join(ctx.themes)):
+            return True, "theme_overlap", " ".join(sorted(effective_hit))
+        return True, "cdd_phrase", " ".join(sorted(effective_hit))
 
     # Broader evidence token overlap (includes "weak" commercial modifiers)
     if broad_token_hit and len(broad_token_hit) >= 2:
@@ -557,9 +847,9 @@ def evaluate_keyword(
             return False, "ambiguous_seed_drift", seed_text
         return True, "competitor_gap", seed_text
 
-    # Last resort: keep related/broad expansions that share at least one
-    # evidence token, even after the distinctive filter stripped weak words.
-    if broad_token_hit and seed_text:
+    # Last resort: a related expansion that still names the seed. One generic
+    # evidence token ("marketing", "services") is not enough.
+    if broad_token_hit and seed_text and _related_stays_on_seed():
         if not _ambiguous_seed_on_topic():
             return False, "ambiguous_seed_drift", seed_text
         return True, "seed_related", " ".join(sorted(broad_token_hit))
@@ -635,6 +925,8 @@ def filter_relevant_keywords(
     source_label: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Keep client-relevant rows. Seeds are not invented or dropped here."""
+    from app.services.keyword_exclusions import reroute_term
+
     kept: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     audit = empty_cleaning_audit()
@@ -658,7 +950,24 @@ def filter_relevant_keywords(
             provider_fallback=bool(row.get("provider_fallback")),
         )
         if keep:
-            kept.append({**row, "relevance_reason": reason, "relevance_evidence": evidence})
+            # Tier 2: a real searcher with do-it-yourself intent. Keep the row for
+            # content, but never let a commercial/service page target it.
+            reroute = reroute_term(
+                keyword, industry=ctx.industry, service_terms=ctx.services
+            )
+            kept_row = {**row, "relevance_reason": reason, "relevance_evidence": evidence}
+            if reason == "relevance_unverified" or reason == "service_review":
+                kept_row["relevance_unverified"] = reason != "service_review"
+                kept_row["commercial_target_eligible"] = False
+            if reason == "service_review":
+                kept_row["classifier_version"] = "service_contract_v2"
+            if reroute:
+                kept_row["intent"] = "informational"
+                kept_row["commercial_target_eligible"] = False
+                kept_row["reroute_reason"] = reroute
+            else:
+                kept_row.setdefault("commercial_target_eligible", True)
+            kept.append(kept_row)
             continue
         source = str(source_label or row.get("source") or "unknown")
         excluded.append(

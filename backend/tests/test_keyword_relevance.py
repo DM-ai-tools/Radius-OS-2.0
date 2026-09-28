@@ -58,9 +58,46 @@ def test_drops_finance_bleed_from_ambiguous_acronym_seed():
 def test_keeps_cdd_and_service_keywords():
     ctx = _ctx()
     keep, reason, _ev = evaluate_keyword("seo services melbourne", ctx, match_class="phrase", seed="SEO Services")
-    assert keep and reason == "seed_phrase"
+    assert keep and reason in {"seed_phrase", "service_match"}
     keep, reason, _ev = evaluate_keyword("b2b lead generation", ctx)
     assert keep and reason in {"cdd_phrase", "service_overlap", "seed_exact"}
+
+
+def test_related_keyword_must_name_the_seed_when_no_service_contract_exists():
+    ctx = build_relevance_context(
+        services=["Drain Cleaning"],
+        cdd_keywords=["hydro jetting"],
+        page_terms=[],
+        themes=[],
+        seeds=["Drain Cleaning"],
+        competitor_names=[],
+        competitor_domains=[],
+    )
+    keep, reason, _ = evaluate_keyword(
+        "drain cleaning cost", ctx, match_class="related", seed="Drain Cleaning"
+    )
+    assert keep and reason == "seed_related"
+    keep, reason, _ = evaluate_keyword(
+        "netflix movies", ctx, match_class="related", seed="Drain Cleaning"
+    )
+    assert not keep
+    assert reason == "no_business_evidence"
+
+
+def test_service_contract_keep_survives_a_weak_lexical_overlap():
+    ctx = build_relevance_context(
+        services=["Email Marketing"],
+        cdd_keywords=[],
+        page_terms=[],
+        themes=[],
+        seeds=["Email Marketing"],
+        competitor_names=[],
+        competitor_domains=[],
+    )
+    keep, reason, _ = evaluate_keyword(
+        "drip campaign", ctx, match_class="related", seed="Email Marketing"
+    )
+    assert keep and reason == "service_match"
 
 
 def test_keeps_related_of_supported_seed_and_drops_unrelated_broad():
@@ -68,11 +105,11 @@ def test_keeps_related_of_supported_seed_and_drops_unrelated_broad():
     keep, reason, _ = evaluate_keyword(
         "services for seo", ctx, match_class="related", seed="SEO Services"
     )
-    assert keep and reason == "seed_related"
+    assert keep and reason in {"seed_related", "service_match"}
     keep, reason, _ = evaluate_keyword(
         "salesforce crm software", ctx, match_class="broad", seed="SEO Services"
     )
-    assert not keep and reason == "no_business_evidence"
+    assert not keep and reason in {"no_business_evidence", "service_mismatch"}
 
 
 def test_keeps_page_terms_and_nested_website_pages():
@@ -138,7 +175,9 @@ def test_filter_records_audit_and_preserves_seed_clusters():
     assert "seo services" in kept_kws
     assert "lead generation" in kept_kws
     assert audit["removed_count"] == 2
-    assert audit["removed_by_reason"]["no_business_evidence"] == 1
+    assert audit["removed_by_reason"].get("service_mismatch", 0) + audit["removed_by_reason"].get(
+        "no_business_evidence", 0
+    ) == 1
     assert audit["removed_by_reason"]["competitor_brand"] == 1
     assert any(row["keyword"] == "python programming" for row in excluded)
 
@@ -189,10 +228,23 @@ def test_rank_opportunities_drops_unsupported_when_services_exist():
     assert "python programming" not in all_kws
 
 
-def test_hygiene_only_when_no_business_evidence():
-    ctx = build_relevance_context(services=[], cdd_keywords=[], page_terms=[], themes=[])
+def test_no_business_evidence_keeps_only_the_seed_shell():
+    """Was: everything passed as "hygiene_only" when the profile was empty.
+
+    Now the seed itself survives as an unverified shell and its expansions are
+    rejected — a client with no services on file gets no keyword set at all,
+    rather than an unfiltered one.
+    """
+    ctx = build_relevance_context(
+        services=[], cdd_keywords=[], page_terms=[], themes=[], seeds=["acme widgets"]
+    )
     keep, reason, _ = evaluate_keyword("anything goes here", ctx)
-    assert keep and reason == "hygiene_only"
+    assert keep is False
+    assert reason == "no_business_evidence"
+
+    keep, reason, _ = evaluate_keyword("acme widgets", ctx)
+    assert keep is True
+    assert reason == "relevance_unverified"
 
 
 def test_merge_audits_and_slim_memory_keeps_compact_cleaning():
