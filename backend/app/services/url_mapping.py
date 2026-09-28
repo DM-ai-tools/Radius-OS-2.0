@@ -922,7 +922,38 @@ def map_cluster_to_url(
     best = real[0] if real else None
     best_score = float((best or {}).get("url_score") or 0)
     band = band_from_score(best_score)
-    create_url = str(suggested or cluster.get("recommended_url") or f"/services/{_slug(primary)}")
+
+    from app.services.create_content import path_for_page_type, resolve_page_type
+
+    # Resolve type from cluster signals first so we don't invent a /services/ URL
+    # that then forces every new page to look like a service page.
+    prior_type = (
+        cluster.get("page_type")
+        or cluster.get("content_type")
+        or (cluster.get("existing_page_match") or {}).get("page_type")
+        or (serp_summary or {}).get("dominant_format")
+    )
+    seed_url = str(
+        suggested
+        or cluster.get("recommended_url")
+        or (best or {}).get("path")
+        or ""
+    )
+    page_type = resolve_page_type(
+        {
+            "url": seed_url,
+            "keyword": primary,
+            "intent": intent,
+            "page_type": prior_type,
+            "content_type": prior_type,
+            "type": prior_type,
+        }
+    )
+    create_url = str(
+        suggested
+        or cluster.get("recommended_url")
+        or path_for_page_type(page_type, primary)
+    )
 
     existing_page_url = str((best or {}).get("path") or "") or None
     # Prefer Phase 5 topic classification when present
@@ -967,10 +998,15 @@ def map_cluster_to_url(
     # --- URL Mapping & Taxonomy sheet columns -------------------------------
     taxonomy = _taxonomy_levels(current_url or proposed_url)
     metrics = primary_keyword_metrics(cluster)
-    from app.services.create_content import resolve_page_type
-
     page_type = resolve_page_type(
-        {"url": current_url or proposed_url, "keyword": primary, "intent": intent}
+        {
+            "url": current_url or proposed_url or create_url,
+            "keyword": primary,
+            "intent": intent,
+            "page_type": prior_type or page_type,
+            "content_type": prior_type or page_type,
+            "type": prior_type or page_type,
+        }
     )
 
     entry = {
@@ -1302,6 +1338,10 @@ def apply_url_map_to_architecture(
                     node["keyword"] = entry.get("primary_keyword")
                     node["url_map_action"] = action
                     node["url_score"] = entry.get("url_score")
+                    mapped_type = str(entry.get("page_type") or "").strip()
+                    if mapped_type:
+                        node["page_type"] = mapped_type
+                        node["type"] = mapped_type
             # Record ownership for existing-page mappings too — previously only
             # newly-created nodes got a cluster_ownership row, so OPTIMIZE_EXISTING
             # (the most common action on a mature site) was invisible to the
@@ -1319,6 +1359,7 @@ def apply_url_map_to_architecture(
                 }
             )
             continue
+        mapped_type = str(entry.get("page_type") or "page").strip() or "page"
         tree.append(
             {
                 "url": selected,
@@ -1326,8 +1367,8 @@ def apply_url_map_to_architecture(
                 "cluster": cluster_name,
                 "primary_keyword": entry.get("primary_keyword"),
                 "keyword": entry.get("primary_keyword"),
-                "page_type": "service",
-                "type": "service",
+                "page_type": mapped_type,
+                "type": mapped_type,
                 "from_url_map": True,
                 "url_map_action": action,
                 "url_score": entry.get("url_score"),

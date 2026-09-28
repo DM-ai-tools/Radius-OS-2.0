@@ -15,7 +15,10 @@ def test_classify_blogs_guides_and_individual_services():
     assert classify_audit_page("https://ex.com/services/seo")["page_type"] == "service"
     assert classify_audit_page("https://ex.com/services/seo/local")["cluster"] == "sub_services"
     assert classify_audit_page("https://ex.com/services/seo/local")["page_type"] == "sub_service"
-    assert classify_audit_page("https://ex.com/seo")["cluster"] == "services"
+    assert classify_audit_page("https://ex.com/seo")["cluster"] == "other"
+    assert classify_audit_page("https://ex.com/seo")["page_type"] == "page"
+    assert classify_audit_page("https://ex.com/seo", "SEO Services")["cluster"] == "services"
+    assert classify_audit_page("https://ex.com/seo", "SEO Services")["page_type"] == "service"
     assert classify_audit_page("https://ex.com/about")["cluster"] == "other"
     assert classify_audit_page("https://ex.com/locations/austin")["cluster"] == "location"
 
@@ -88,3 +91,35 @@ def test_cdd_focus_and_prioritize_urls():
     # High blog score must not dominate business-weighted overall
     assert report["overall_score"] < 90
     assert any("Web Design" in (g.get("term") or "") for g in report["cdd_coverage_gaps"])
+
+
+def test_nested_non_blog_paths_stay_sub_services_without_a_keyword_in_the_url():
+    """A bare `/seo` needs a title signal before it counts as a service, but a
+    NESTED path like /crm/small-business is already filtered by _BLOG/_GUIDE/
+    _LOCATION/_OTHER_FIRST — requiring the word "service" in the URL too
+    demotes most real sub-service pages to generic pages, which breaks
+    cluster-to-URL mapping downstream."""
+    for url in (
+        "https://ex.com/crm/small-business",
+        "https://ex.com/seo/local",
+        "https://ex.com/web-design/ecommerce",
+    ):
+        got = classify_audit_page(url)
+        assert got["cluster"] == "sub_services", (url, got)
+        assert got["page_type"] == "sub_service", (url, got)
+
+
+def test_nested_paths_under_excluded_first_segments_are_not_sub_services():
+    for url in (
+        "https://ex.com/blog/seo-tips",
+        "https://ex.com/about/team",
+        "https://ex.com/locations/austin",
+        "https://ex.com/guides/crm",
+    ):
+        assert classify_audit_page(url)["cluster"] != "sub_services", url
+
+
+def test_single_segment_still_needs_a_commercial_signal():
+    """The deliberate 1-segment rule must survive this fix."""
+    assert classify_audit_page("https://ex.com/seo")["page_type"] == "page"
+    assert classify_audit_page("https://ex.com/seo", "SEO Services")["page_type"] == "service"

@@ -278,16 +278,34 @@ def classify_audit_page(url: str, title: str = "") -> dict[str, str]:
             "hierarchy_level": str(HIERARCHY_LEVEL["other"]),
             "parent_type": "Home",
         }
-    # Agency-style top-level service URLs: /seo, /web-design
+    # Agency-style top-level commercial URLs (/seo, /web-design) only when
+    # the title/path actually signals a service — otherwise leave as page.
+    commercial_signal = any(
+        tok in blob for tok in ("service", "services", "solution", "solutions", "pricing", "hire", "quote")
+    )
     if len(segs) == 1:
+        if commercial_signal:
+            return {
+                "cluster": "services",
+                "cluster_label": CLUSTER_LABELS["services"],
+                "page_type": "service",
+                "hierarchy_level": str(HIERARCHY_LEVEL["services"]),
+                "parent_type": "Home",
+            }
         return {
-            "cluster": "services",
-            "cluster_label": CLUSTER_LABELS["services"],
-            "page_type": "service",
-            "hierarchy_level": str(HIERARCHY_LEVEL["services"]),
+            "cluster": "other",
+            "cluster_label": CLUSTER_LABELS["other"],
+            "page_type": "page",
+            "hierarchy_level": str(HIERARCHY_LEVEL["other"]),
             "parent_type": "Home",
         }
-    # Nested top-level without /services/ prefix: /seo/local → sub-service
+    # Nested top-level without /services/ prefix: /seo/local → sub-service.
+    # No commercial-token requirement here, unlike the single-segment case
+    # above: the first segment has already passed the _BLOG/_GUIDE/_LOCATION/
+    # _OTHER_FIRST exclusions, which is the precise test. Real sub-service paths
+    # (/crm/small-business, /seo/local, /web-design/ecommerce) rarely contain
+    # the word "service", so demanding one demoted most of them to generic
+    # pages and broke cluster-to-URL mapping downstream.
     if len(segs) >= 2 and segs[0] not in _BLOG | _GUIDE | _LOCATION | _OTHER_FIRST:
         return {
             "cluster": "sub_services",

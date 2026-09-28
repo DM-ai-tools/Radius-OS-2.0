@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.agents.prompts import load_shared_reference, load_skill_file
+from app.services.content_signals.explain import explain_content_context
 from app.config import get_settings
 from app.integrations.llm import generate_openrouter_image, synthesize_json
 from app.logging_config import get_logger
@@ -23,13 +24,64 @@ _INSTRUCTIONAL = re.compile(
     r"(cover this section|briefed outcome|expand this heading|for the writer|"
     r"this section should|write \d+ paragraphs|reach(?:es)? the briefed|"
     r"approved brief is missing|missing the required author|"
-    r"please provide the named human|named human author or reviewer)",
+    r"please provide the named human|named human author or reviewer|"
+    r"answer the query in the opening|publishable prose,? not a brief|"
+    r"skip generic pitches|if a claim cannot be evidenced|"
+    r"ranking pages often lead with|related terms used in support|"
+    r"stay on that query|not as competing topics|"
+    r"named steps from first call|deliverables, scope, what is not included|"
+    r"depends on the situation behind|use the sections above for the criteria|"
+    r"writer notes|do not paste|photorealistic editorial photograph|"
+    r"show a real workplace)",
     re.IGNORECASE,
 )
 _IMPERATIVE_OPEN = re.compile(
     r"^(cover|write|expand|include|add|ensure|make sure|this section)\b",
     re.IGNORECASE,
 )
+_OUTLINE_NOTE = re.compile(
+    r"(?i)^(named steps|deliverables|scope|what is not included|definition|steps|"
+    r"process|outcomes?|proof|cta|faq)\b|"
+    r"(from first call to handover|what to cover|briefed)"
+)
+_FAQ_STUB = re.compile(
+    r"(?i)depends on the situation behind|use the sections above for the criteria"
+)
+# Common vertical acronyms — keyword/title tokens are merged in at normalize time
+# so HVAC, EHR, ERP, etc. work without hardcoding every industry.
+_ACRONYM_FORCE = {
+    "aeo": "AEO",
+    "geo": "GEO",
+    "seo": "SEO",
+    "sem": "SEM",
+    "ppc": "PPC",
+    "cro": "CRO",
+    "ai": "AI",
+    "llm": "LLM",
+    "crm": "CRM",
+    "erp": "ERP",
+    "hr": "HR",
+    "it": "IT",
+    "ux": "UX",
+    "ui": "UI",
+    "api": "API",
+    "saas": "SaaS",
+    "b2b": "B2B",
+    "b2c": "B2C",
+    "roi": "ROI",
+    "kpi": "KPI",
+    "cms": "CMS",
+    "hvac": "HVAC",
+    "msp": "MSP",
+    "ehr": "EHR",
+    "emr": "EMR",
+}
+
+# Never invent casing for these even if they appear in the keyword seed.
+_ACRONYM_SKIP = {
+    "a", "an", "the", "or", "of", "to", "in", "on", "by", "is", "be", "as",
+    "at", "for", "and", "with", "from", "this", "that", "page", "blog",
+}
 
 
 def _preflight(brief: dict[str, Any]) -> dict[str, Any]:
@@ -231,9 +283,15 @@ def related_keywords(
 _PAGE_ALIASES = {
     "service": "service",
     "services": "service",
+    "service page": "service",
     "commercial": "service",
+    "sub_service": "sub_service",
+    "subservice": "sub_service",
+    "sub-service": "sub_service",
+    "service_hub": "hub",
     "product": "product",
     "landing": "landing",
+    "landing page": "landing",
     "comparison": "comparison",
     "listicle": "listicle",
     "list": "listicle",
@@ -244,13 +302,69 @@ _PAGE_ALIASES = {
     "location": "location",
     "local": "location",
     "article": "article",
-    "blog": "article",
-    "post": "article",
+    "blog": "blog",
+    "blog_article": "blog",
+    "post": "blog",
     "guide": "guide",
     "tool": "tool",
+    "faq": "faq",
     "home": "home",
     "utility": "utility",
+    "page": "page",
+    "company": "utility",
+    "legal": "utility",
+    "conversion": "landing",
+    "proof": "page",
 }
+
+
+def _path_slug(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s[:60] or "page"
+
+
+def path_for_page_type(page_type: str, keyword: str) -> str:
+    """Suggested path prefix that matches the page type (never invents a host)."""
+    slug = _path_slug(keyword)
+    key = _PAGE_ALIASES.get(str(page_type or "").strip().lower(), str(page_type or "").strip().lower())
+    if key in ("service", "sub_service", "product", "hub"):
+        return f"/services/{slug}/"
+    if key == "guide":
+        return f"/guides/{slug}/"
+    if key in ("article", "blog"):
+        return f"/blog/{slug}/"
+    if key == "comparison":
+        return f"/compare/{slug}/"
+    if key == "landing":
+        return f"/pricing/{slug}/"
+    if key == "location":
+        return f"/locations/{slug}/"
+    if key == "tool":
+        return f"/tools/{slug}/"
+    if key == "listicle":
+        return f"/blog/{slug}/"
+    if key == "faq":
+        return f"/faq/{slug}/"
+    return f"/{slug}/"
+
+
+# Keyword-side classification signals. Word-bounded so they cannot fire on a
+# substring ("guidelines" must not read as "guide").
+_INFORMATIONAL_KW = re.compile(
+    r"^(?:how to|how do|how does|what is|what are|why |when to|should i)\b"
+    r"|\b(?:step by step|tutorial|checklist|walkthrough|explained|examples?"
+    r"|templates?|best practices|tips|ideas|guide to|guides? for"
+    r"|beginners? guide)\b"
+)
+_LISTICLE_KW = re.compile(r"^\d+\s|\b(?:alternatives?|examples of)\b")
+_PRICING_KW = re.compile(
+    r"\b(?:pricing|price|prices|cost|costs|how much|quote|rates?)\b"
+)
+_SERVICE_KW = re.compile(
+    r"\b(?:services?|agency|agencies|company|companies|consultant|consultants"
+    r"|consultancy|firm|specialists?|experts?|provider|providers|hire|near me"
+    r"|freelancer|management)\b"
+)
 
 
 def resolve_page_type(src: dict[str, Any] | None) -> str:
@@ -259,10 +373,16 @@ def resolve_page_type(src: dict[str, Any] | None) -> str:
     pre = src.get("preflight") if isinstance(src.get("preflight"), dict) else {}
     url = str(src.get("url") or pre.get("url") or src.get("path") or src.get("suggested_url") or "").lower()
     intent = str(src.get("search_intent") or src.get("intent") or "").lower()
-    kw = str(src.get("keyword") or src.get("title") or "").lower()
+    # Collapse whitespace as well as lower-casing: a leading space or trailing
+    # newline from a CSV, form field or LLM payload defeated every "^..."
+    # anchored pattern below, so the keyword fell through to the default.
+    kw = " ".join(str(src.get("keyword") or src.get("title") or "").lower().split())
 
     def _alias(raw: Any) -> str | None:
-        return _PAGE_ALIASES.get(str(raw or "").strip().lower())
+        key = str(raw or "").strip().lower()
+        if not key:
+            return None
+        return _PAGE_ALIASES.get(key) or (key if key in _PAGE_ALIASES.values() else None)
 
     strong: list[str] = []
     weak: list[str] = []
@@ -271,35 +391,82 @@ def resolve_page_type(src: dict[str, Any] | None) -> str:
         src.get("page_type"),
         src.get("type"),
         src.get("content_type"),
+        src.get("content_type_label"),
     ):
         key = _alias(raw)
         if not key:
             continue
-        (weak if key in ("article", "guide") else strong).append(key)
+        (weak if key in ("article", "blog", "guide", "listicle", "page") else strong).append(key)
     if strong:
         return strong[0]
 
-    if "/services/" in url or "/service/" in url:
+    # Explicit URL structure beats intent defaults.
+    if re.search(r"/services?(?:/|$)", url):
+        path = urlparse(url).path if "://" in url else url
+        segs = [p for p in path.split("/") if p]
+        # Drop the services|service prefix when present.
+        if segs and segs[0] in ("services", "service"):
+            depth = len(segs) - 1
+        else:
+            depth = len(segs)
+        if depth <= 0:
+            return "hub"
+        if depth >= 2:
+            return "sub_service"
         return "service"
-    if "/pricing/" in url:
+    if "/pricing/" in url or url.rstrip("/").endswith("/pricing"):
         return "landing"
     if "/compare/" in url or " vs " in kw or " versus " in kw:
         return "comparison"
-    if "/locations/" in url or "/areas-we-service" in url:
+    if "/locations/" in url or "/areas-we-serve" in url or "/service-areas" in url:
         return "location"
-    if kw.startswith("how to") or "/guides/" in url:
+    if "/tools/" in url or "/tool/" in url:
+        return "tool"
+    if "/faq/" in url or url.rstrip("/").endswith("/faq"):
+        return "faq"
+    if "/guides/" in url or "/guide/" in url:
         return "guide"
-    if "/blog/" in url:
-        return "article"
+    if "/blog/" in url or "/news/" in url or "/insights/" in url:
+        return "blog"
+    # --- keyword signals ---------------------------------------------------
+    # These run BEFORE the service nouns below, because an informational
+    # phrasing outranks a commercial noun inside it: "how to choose a digital
+    # marketing agency" contains "agency" but is a guide, not a service page.
+    if _INFORMATIONAL_KW.search(kw):
+        return "guide"
+    if kw.startswith(("best ", "top ")) or _LISTICLE_KW.search(kw):
+        return "listicle"
+
+    # Explicit content_type / page_type (even soft ones like article/guide) wins
+    # over intent defaults — otherwise every commercial row collapses to "service".
+    if weak:
+        return weak[0]
+
+    # Commercial nouns in the keyword itself. Previously only intent could
+    # produce "service", so a plain "SEO services in Bengaluru" with no intent
+    # attached fell through to the default.
+    if _PRICING_KW.search(kw):
+        return "landing"
+    if _SERVICE_KW.search(kw):
+        return "service"
+
     if intent == "transactional":
         return "landing"
     if intent == "commercial":
         return "service"
-    if weak and "/blog/" not in url and "/guides/" not in url:
-        return "service"
-    if weak:
-        return weak[0]
-    return "service"
+    if intent == "informational":
+        return "guide"
+
+    # Neutral, never "service". A silent default to a commercial page type is
+    # what made every unmatched keyword look like a service page; say so instead.
+    log.warning(
+        "page_type_unclassified",
+        keyword=kw[:80],
+        url=url[:120],
+        intent=intent or None,
+        fallback="page",
+    )
+    return "page"
 
 
 # Phase 5 (create_topic._ANGLE_CYCLE) assigns each topic one of these angles so a
@@ -577,20 +744,25 @@ def _topic_context(
         or intake.get("target_demographic")
         or ""
     )
+    kw = str(brief.get("keyword") or brief.get("title") or "").strip()
+    products_raw = [str(p) for p in products if p][:6]
+    ind = str(industry or mkt.get("industry") or "").strip()
+    title_raw = str(brief.get("title") or brief.get("keyword") or "").strip()
     return {
         "client": client_name,
-        "keyword": str(brief.get("keyword") or brief.get("title") or "").strip(),
-        "title": str(brief.get("title") or brief.get("keyword") or "").strip(),
-        "audience": str(audience or "").strip(),
-        "industry": str(industry or mkt.get("industry") or "").strip(),
+        "keyword": kw,
+        "title": _normalize_acronyms(title_raw, kw, title_raw),
+        "audience": _short_audience(audience, industry=ind),
+        "industry": ind,
         "geo": str(geo or "").strip(),
-        "products": [str(p) for p in products if p][:6],
+        "products": _scoped_products(products_raw, kw),
         "intent": str(brief.get("search_intent") or brief.get("intent") or "").strip(),
         "format": str(brief.get("content_type") or "").strip(),
         "page_type": resolve_page_type(brief),
-        "positioning": str(
-            mkt.get("positioning") or intake.get("positioning") or ""
-        ).strip(),
+        "positioning": _scoped_positioning(
+            str(mkt.get("positioning") or intake.get("positioning") or "").strip(),
+            kw,
+        ),
     }
 
 
@@ -653,12 +825,17 @@ def collect_image_specs(
         if len(prompt) < 12 or key in seen:
             return
         seen.add(key)
+        alt, caption = _human_image_meta(
+            role=str(r or "supporting"),
+            keyword=str(brief.get("keyword") or ""),
+            client_name=client_name,
+        )
         specs.append(
             {
                 "role": r or "supporting",
                 "prompt": prompt,
-                "alt": f"{r or 'figure'}: {brief.get('keyword') or client_name}",
-                "caption": prompt[:180],
+                "alt": alt,
+                "caption": caption,
             }
         )
 
@@ -729,12 +906,19 @@ def collect_image_specs(
 
 
 def _figure_markdown(img: dict[str, Any]) -> str:
-    alt = str(img.get("alt") or img.get("role") or "Figure")
+    role = str(img.get("role") or "supporting")
+    alt = str(img.get("alt") or "").strip()
+    cap = str(img.get("caption") or "").strip()
+    # Never publish the image-generation prompt as caption/alt.
+    prompt = str(img.get("prompt") or "").strip()
+    if not alt or alt == prompt or re.match(r"(?i)^(hero|supporting|figure)\s*:", alt):
+        alt = f"{role} visual"
+    if not cap or cap == prompt or _is_instructional(cap) or len(cap) > 160 and "photorealistic" in cap.lower():
+        cap = alt
     src = str(img.get("src") or "").strip()
-    cap = str(img.get("caption") or img.get("prompt") or alt).strip()
     if src:
         return f"![{alt}]({src})\n*{cap[:220]}*"
-    return f"[FIGURE {img.get('role') or 'image'}] {cap[:220]}"
+    return f"[FIGURE {role}] {cap[:220]}"
 
 
 _FIGURE_MARKER = re.compile(r"(?im)^\s*\[FIGURE\s+[^\]]+\][^\n]*\n?")
@@ -830,6 +1014,8 @@ def _is_instructional(text: str) -> bool:
         return False
     if _INSTRUCTIONAL.search(t):
         return True
+    if _OUTLINE_NOTE.search(t) and len(t) < 160:
+        return True
     return bool(_IMPERATIVE_OPEN.search(t) and len(t) < 280)
 
 
@@ -838,7 +1024,159 @@ def _usable_prose(text: str) -> str:
     t = str(text or "").strip()
     if not t or _is_instructional(t):
         return ""
+    if _FAQ_STUB.search(t):
+        return ""
     return t
+
+
+def _acronym_candidates(*seeds: Any) -> dict[str, str]:
+    """Known acronyms plus short alphabetic tokens from this page's keyword/title.
+
+    Works for AEO, HVAC, EHR, SaaS, or any 2–5 letter topic acronym — not one vertical.
+    """
+    mapping = dict(_ACRONYM_FORCE)
+    for seed in seeds:
+        for tok in re.findall(r"[A-Za-z][A-Za-z0-9-]{0,8}", str(seed or "")):
+            bare = tok.replace("-", "").lower()
+            if bare in _ACRONYM_SKIP or bare in mapping:
+                continue
+            if not (2 <= len(bare) <= 5 and bare.isalpha()):
+                continue
+            # Length alone cannot tell "AEO" from "rate", and guessing turned
+            # "conversion rate optimisation" into "conversion RATE optimisation".
+            # A real acronym is WRITTEN uppercase in the source; an ordinary word
+            # is not. Known acronyms are already forced above, so a lower-cased
+            # slug like "seo-services" is unaffected by this check.
+            if tok.replace("-", "").isupper():
+                mapping[bare] = bare.upper()
+    return mapping
+
+
+def _normalize_acronyms(text: str, *seeds: Any) -> str:
+    """Uppercase acronyms that belong to this page (keyword/title) or the shared set.
+
+    Seeds must be topic labels (keyword/title) — never the full body, or ordinary
+    short words like “cost” / “plan” would be forced to COST / PLAN.
+    """
+    out = str(text or "")
+    for low, up in _acronym_candidates(*seeds).items():
+        out = re.sub(rf"\b{re.escape(low)}\b", up, out, flags=re.IGNORECASE)
+        titled = low[:1].upper() + low[1:].lower()
+        if titled != up:
+            out = re.sub(rf"\b{re.escape(titled)}\b", up, out)
+    return out
+
+
+def _short_audience(raw: Any, *, industry: str | None = None) -> str:
+    """Buyer-facing audience label — never dump age/revenue/list-size demographics."""
+    from app.services.create_topic import format_audience_label
+
+    if isinstance(raw, dict):
+        primary = raw.get("primary") if isinstance(raw.get("primary"), dict) else raw
+        titles = primary.get("job_titles") if isinstance(primary, dict) else None
+        if isinstance(titles, list) and titles:
+            return ", ".join(str(t).strip() for t in titles[:3] if str(t).strip())
+    label = format_audience_label(raw) if not isinstance(raw, str) else raw
+    text = str(label or "").strip()
+    text = re.sub(r"(?i)^primary:\s*", "", text)
+    text = re.split(
+        r"(?i)\baged\b|\bages?\b|\b\$\d|\brevenue\b|\bemail list\b|\bcontacts\b|"
+        r"\bannual\b|\baud\b|\bm & f\b|\bm&f\b|\bemployees\b|\bheadcount\b",
+        text,
+    )[0]
+    text = text.strip(" ,.;·-\n\t")
+    text = re.sub(r"\.{2,}", ".", text)
+    if len(text) > 90:
+        text = text[:87].rsplit(" ", 1)[0].rstrip(",.;") + "…"
+    if text:
+        return text
+    ind = str(industry or "").strip()
+    if ind:
+        return f"{ind} buyers and decision-makers"
+    return "business buyers and decision-makers"
+
+
+def _place_phrase(geo: str) -> str:
+    """Natural geo phrase — never 'in Australia-wide' / 'in nationwide'."""
+    g = str(geo or "").strip()
+    if not g:
+        return ""
+    low = g.lower().strip()
+    if low.startswith("in "):
+        g = g[3:].strip()
+        low = g.lower()
+    if low in {"nationwide", "national", "countrywide", "nationally"}:
+        return " nationwide"
+    # *-wide → " across X" (works for any country or region label)
+    if low.endswith("-wide"):
+        base = re.sub(r"(?i)-wide$", "", g).strip() or g
+        if len(base) <= 3 and base.isalpha():
+            return f" across the {base.upper()}"
+        return f" across {base}"
+    if "nationwide" in low:
+        return " nationwide"
+    # Bare country codes
+    if low in {"au", "us", "uk", "nz", "ca", "eu"}:
+        return f" across the {g.upper()}"
+    return f" in {g}"
+
+
+def _on_topic(text: str, kw: str) -> bool:
+    """True when copy tokens overlap the page keyword (filters off-service pitches)."""
+    kt = {t for t in re.findall(r"[a-z0-9]+", (kw or "").lower()) if len(t) > 1}
+    tt = {t for t in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(t) > 1}
+    # Generic fillers only — never strip tokens that are part of this page's keyword
+    # (e.g. keep "marketing" when the topic is digital marketing).
+    stop = {
+        "services",
+        "service",
+        "agency",
+        "company",
+        "companies",
+        "the",
+        "and",
+        "for",
+        "with",
+        "best",
+        "top",
+        "online",
+    } - kt
+    kt -= stop
+    if not kt:
+        return True
+    return bool(kt & tt)
+
+
+def _scoped_products(products: list[str] | None, kw: str) -> list[str]:
+    rows = [str(p).strip() for p in (products or []) if str(p).strip()]
+    on = [p for p in rows if _on_topic(p, kw)]
+    return on[:3] if on else []
+
+
+def _scoped_positioning(positioning: str, kw: str) -> str:
+    text = str(positioning or "").strip()
+    if not text or not _on_topic(text, kw):
+        return ""
+    return text
+
+
+def _human_image_meta(*, role: str, keyword: str, client_name: str) -> tuple[str, str]:
+    """Publishable alt + caption — never the image-generation prompt."""
+    r = str(role or "supporting").strip() or "supporting"
+    kw = _normalize_acronyms(str(keyword or "").strip(), keyword) or "page"
+    brand = str(client_name or "").strip() or "Brand"
+    alt = f"{brand} {kw} — {r}"
+    caption = f"{kw} — {r}"
+    return alt, caption
+
+
+def _is_faq_stub(answer: str) -> bool:
+    return bool(_FAQ_STUB.search(str(answer or "")))
+
+
+def _titles_match(a: str, b: str) -> bool:
+    return _norm_topic(a) == _norm_topic(b) and bool(_norm_topic(a))
+
 
 
 def _count_placeholders(text: str) -> tuple[int, int]:
@@ -975,18 +1313,25 @@ def _section_prose(
         (t for t in related_terms if _norm_topic(t) in _norm_topic(stitle)),
         None,
     )
-    usable_notes = [str(n).strip() for n in notes if str(n).strip() and not _is_instructional(str(n))]
-    who = audience or "the businesses you work with"
-    place = f" in {geo}" if geo else ""
-    offer = ", ".join((products or [])[:3])
-    angle = positioning or f"how {client_name} actually delivers the work"
-    note_bit = " ".join(usable_notes[:2])
-    floor = must_address[0] if must_address else None
-    related_line = (
-        f" “{matched}” sits under “{kw}” on this page — it is not a second topic."
-        if matched
-        else ""
-    )
+    usable_notes = [
+        str(n).strip()
+        for n in notes
+        if str(n).strip()
+        and not _is_instructional(str(n))
+        and not _OUTLINE_NOTE.search(str(n).strip())
+        and len(str(n).strip()) > 40
+    ]
+    who = _short_audience(audience) if audience else "the businesses you work with"
+    place = _place_phrase(geo)
+    offer = ", ".join(_scoped_products(products, kw))
+    angle = _scoped_positioning(positioning, kw) or f"how {client_name} delivers {kw}"
+    note_bit = " ".join(usable_notes[:2]).strip()
+    if note_bit and _is_instructional(note_bit):
+        note_bit = ""
+    floor = must_address[0] if must_address and not _is_instructional(must_address[0]) else None
+    related_line = ""
+    if matched and _on_topic(str(matched), kw):
+        related_line = f" Related reading on this page also covers “{matched}”."
 
     if page_type == "tool":
         section = stitle.lower()
@@ -1041,23 +1386,26 @@ def _section_prose(
 
     if page_type in ("service", "subservice", "sub_service", "landing", "product", "location"):
         p1 = (
-            f"{client_name} offers {kw}{place} for {who}. "
-            f"This part of the page — {stitle.lower()} — is the practical detail a buyer needs "
-            f"before they enquire, not a definition of the keyword."
+            f"{client_name} helps {who} with {kw}{place}. "
+            f"{stitle} explains the practical detail a buyer needs before they enquire."
         )
-        p2 = (
-            f"{note_bit} " if note_bit else ""
-        ) + (
-            f"Expect a named process, a clear owner, and a way to tell whether {kw} is working. "
-            + (f"Offerings that may be named here: {offer}. " if offer else "")
-            + f"{angle.rstrip('.')}."
+        p2_bits = []
+        if note_bit:
+            p2_bits.append(note_bit.rstrip("."))
+        p2_bits.append(
+            f"Expect a clear scope for {kw}, a named owner, and a way to tell whether the work is helping"
         )
+        if offer:
+            p2_bits.append(f"Relevant offerings on this page: {offer}")
+        if angle:
+            p2_bits.append(angle.rstrip("."))
+        p2 = ". ".join(p2_bits) + "."
         p3 = (
-            "Skip generic pitches. If a claim cannot be evidenced, it does not belong here."
-            + (f" Ranking pages often lead with “{floor}” — answer that only as it applies to {kw}." if floor else "")
+            (f"Priorities under this heading include {floor}. " if floor else "")
+            + f"{client_name} keeps this section on {kw} — not adjacent services."
             + related_line
         )
-        return f"{p1}\n\n{p2.strip()}\n\n{p3.strip()}"
+        return f"{p1}\n\n{p2}\n\n{p3.strip()}"
 
     if page_type == "comparison":
         return (
@@ -1069,20 +1417,22 @@ def _section_prose(
         )
 
     p1 = (
-        f"{stitle} is the part of “{kw}” most readers still get wrong. "
-        f"{client_name} writes for {who}{place} and stays on that query — "
-        f"what it is, what to do, and what to ignore."
+        f"{stitle} is where most readers still get “{kw}” wrong. "
+        f"{client_name} wrote this for {who}{place}: what it is, what to do, and what to ignore."
     )
     p2 = (
         (f"{note_bit} " if note_bit else "")
-        + (f"Ground this section in {angle.rstrip('.')}. " if positioning else "")
-        + (f"Bring in “{floor}” only where it helps someone acting on {kw}." if floor else "Be specific enough that a practitioner could use the paragraph.")
+        + (f"Ground this section in {angle.rstrip('.')}. " if angle else "")
+        + (
+            f"Bring in “{floor}” only where it helps someone acting on {kw}."
+            if floor
+            else f"Be specific enough that a practitioner could use the paragraph on {kw}."
+        )
         + related_line
     )
     p3 = (
         f"Do not wander into adjacent services. If {client_name} names a product or method, "
         f"it must belong to {kw}."
-        + (f" Related terms that may appear in support: {', '.join(related_terms[:4])}." if related_terms else "")
     )
     return f"{p1}\n\n{p2.strip()}\n\n{p3.strip()}"
 
@@ -1101,17 +1451,16 @@ def _opening_prose(
     positioning: str = "",
     angle: str = "",
 ) -> str:
-    who = audience or "the reader"
-    place = f" in {geo}" if geo else ""
+    who = _short_audience(audience) if audience else "the reader"
+    place = _place_phrase(geo)
     outcome = outcomes[0].rstrip(".") if outcomes else None
-    floor = ", ".join(must_address[:2]) if must_address else None
+    floor = ", ".join(
+        x for x in must_address[:2] if x and not _is_instructional(x)
+    ) if must_address else None
     angle_lead = _ANGLE_OPENING_LEAD.get(str(angle or "").strip().lower())
-    related_clause = (
-        f" Related terms used in support of that query (not as competing topics): {', '.join(related_terms[:6])}."
-        if related_terms
-        else ""
-    )
-    diff = _differentiation(brief)
+    diff_raw = _differentiation(brief)
+    diff = diff_raw if diff_raw and _on_topic(diff_raw, kw) else ""
+    pos = _scoped_positioning(positioning, kw)
     if page_type == "tool":
         return (
             f"{kw[0].upper() + kw[1:] if kw else 'This tool'} is an interactive product page "
@@ -1126,14 +1475,14 @@ def _opening_prose(
     if page_type in ("service", "subservice", "sub_service", "landing", "product", "location"):
         lead = (
             f"{client_name} provides {kw}{place} for {who}. "
-            + (f"{outcome}. " if outcome else "This page says what is included, how the work runs, and how to start. ")
+            + (f"{outcome}. " if outcome else "This page covers what is included, how the work runs, and how to start. ")
             + (f"{diff} " if diff else "")
+            + (f"{pos} " if pos and pos not in (diff or "") else "")
         )
         second = (
-            "If you are comparing providers, you should leave this page knowing the scope, the sequence, "
-            "and whether this team is a fit — not a definition of the keyword."
+            "If you are comparing providers, you should leave knowing the scope, the sequence, "
+            "and whether this team is a fit."
             + (f" We also cover {floor}." if floor else "")
-            + related_clause
         )
         return f"{lead.strip()}\n\n{second.strip()}"
     if page_type == "comparison":
@@ -1157,11 +1506,10 @@ def _opening_prose(
         + (f" {diff}" if diff else "")
         + "\n\n"
         + (
-            f"The article stays on that assigned query — {floor} — and does not wander into adjacent services."
-            if floor
-            else "The article stays on that assigned query and does not wander into adjacent services."
+            f"The article stays on {kw}"
+            + (f" — including {floor}" if floor else "")
+            + "."
         )
-        + related_clause
     )
 
 
@@ -1173,7 +1521,7 @@ def _cta_prose(
     intent: str,
     geo: str = "",
 ) -> str:
-    place = f" in {geo}" if geo else ""
+    place = _place_phrase(geo)
     if page_type == "tool":
         return (
             f"After reviewing the {kw} result{place}, the user should be able to revise their "
@@ -1218,7 +1566,11 @@ def _build_markdown(
     pre = _preflight(brief)
     author, standing, _ymyl = _author(brief)
     diff = _differentiation(brief)
-    title = str((brief.get("title_options") or [None])[0] or brief.get("title") or brief.get("keyword"))
+    title_seed = str(
+        (brief.get("title_options") or [None])[0] or brief.get("title") or brief.get("keyword") or ""
+    )
+    kw_seed = str(brief.get("keyword") or title_seed).strip()
+    title = _normalize_acronyms(title_seed, kw_seed, title_seed)
     url = str(brief.get("url") or pre.get("url") or brief.get("path") or "/")
     parent = str(pre.get("parent") or brief.get("parent") or "/")
     action = str(brief.get("action") or "create")
@@ -1229,7 +1581,7 @@ def _build_markdown(
     )
     page_type = ctx["page_type"] or resolve_page_type(brief)
     sections = body_sections or _effective_outline(brief, client_name=client_name)
-    kw_primary = str(brief.get("keyword") or title).strip()
+    kw_primary = _normalize_acronyms(kw_seed, kw_seed, title)
     related_terms = [str(t).strip() for t in (related or []) if str(t).strip()]
     related_label = ", ".join(related_terms) if related_terms else "none in brief/cluster"
 
@@ -1328,9 +1680,14 @@ def _build_markdown(
             verify_placeholders.append("body")
     else:
         for sec in sections:
-            stitle = sec.get("title") or "Section"
+            stitle = _normalize_acronyms(str(sec.get("title") or "Section"), kw_primary, title)
             if stitle.upper() in ("FAQ", "NEXT STEP", "CTA"):
                 continue
+            # Avoid duplicating the H1 as the first H2.
+            if _titles_match(stitle, title):
+                stitle = f"Who {kw_primary} is for" if page_type in {
+                    "service", "subservice", "sub_service", "landing", "product", "location"
+                } else f"What {kw_primary} means in practice"
             lines.extend([f"## {stitle}", ""])
             notes = sec.get("notes") or []
             if isinstance(notes, str):
@@ -1338,9 +1695,14 @@ def _build_markdown(
             body = _usable_prose(str(sec.get("body") or ""))
             if not body:
                 usable_notes = [
-                    str(n).strip() for n in notes if str(n).strip() and not _is_instructional(str(n))
+                    str(n).strip()
+                    for n in notes
+                    if str(n).strip()
+                    and not _is_instructional(str(n))
+                    and not _OUTLINE_NOTE.search(str(n).strip())
+                    and len(str(n).strip()) > 80
                 ]
-                if usable_notes and all(len(n) > 80 for n in usable_notes[:2]):
+                if usable_notes:
                     body = "\n\n".join(usable_notes[:3])
                 else:
                     body = _section_prose(
@@ -1356,7 +1718,7 @@ def _build_markdown(
                         products=list(ctx.get("products") or []),
                         positioning=ctx.get("positioning") or "",
                     )
-            lines.extend([body, ""])
+            lines.extend([_normalize_acronyms(body, kw_primary, title), ""])
             if supporting and stitle not in ("FAQ",):
                 lines.extend([_figure_markdown(supporting.pop(0)), ""])
             a_n, v_n = _count_placeholders(body)
@@ -1371,8 +1733,8 @@ def _build_markdown(
     # FAQ from PAA only — skip if the full page already includes FAQ
     faq_in = faq_answers if faq_answers is not None else (brief.get("faq") or [])
     already_faq = has_full and re.search(r"^##\s+faq\b", full_page, re.IGNORECASE | re.MULTILINE)
+    faq_lines: list[str] = []
     if faq_in and not already_faq:
-        lines.extend(["## FAQ", ""])
         for q in faq_in:
             if isinstance(q, dict):
                 question = q.get("q") or q.get("question")
@@ -1381,18 +1743,26 @@ def _build_markdown(
                 question, answer = q, ""
             if not question:
                 continue
-            if not answer:
+            if not answer or _is_faq_stub(answer):
+                # Never ship "depends on the situation behind…" stubs.
                 answer = (
-                    f"{question.rstrip('?')} depends on the situation behind “{kw}”. "
-                    f"Use the sections above for the criteria {client_name} would apply, "
-                    f"then decide whether you need a service conversation or you can act on this yourself."
+                    f"[AUTHOR INPUT REQUIRED — write a direct, self-contained answer to "
+                    f"“{question}” in 2–4 sentences. Do not reference other sections.]"
                 )
-            lines.extend([f"### {question}", "", answer, ""])
+                author_placeholders.append(f"FAQ: {question}")
+            faq_lines.extend([
+                f"### {_normalize_acronyms(str(question), kw_primary, title)}",
+                "",
+                _normalize_acronyms(answer, kw_primary, title),
+                "",
+            ])
             a_n, v_n = _count_placeholders(answer)
-            if a_n:
+            if a_n and f"FAQ: {question}" not in author_placeholders:
                 author_placeholders.append(f"FAQ: {question}")
             if v_n:
                 verify_placeholders.append(f"FAQ: {question}")
+    if faq_lines:
+        lines.extend(["## FAQ", "", *faq_lines])
 
     already_cta = has_full and re.search(r"^##\s+(next step|get started|contact)\b", full_page, re.IGNORECASE | re.MULTILINE)
     cta_text = _usable_prose(str(cta or ""))
@@ -1505,9 +1875,33 @@ async def _llm_draft_article(
     image_specs: list[dict[str, Any]] | None = None,
     related: list[str] | None = None,
     outline: list[dict[str, Any]] | None = None,
+    content_context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Full ready-to-publish page for the resolved page type."""
     skill = load_skill_file("create-content")
+    # A content-type skill and a copywriting framework from the signal bundle
+    # layer ON TOP of the generic create-content contract rather than replacing
+    # it, so the house rules still apply to every page.
+    signal_block = ""
+    if content_context:
+        from app.services.content_signals.context import render_context_block
+
+        signals = content_context.get("signals") or {}
+        from app.services.content_signals.validation import business_rules_block
+
+        extras: list[str] = []
+        for name in ("skill", "framework"):
+            payload = signals.get(name) or {}
+            if payload.get("available"):
+                body = str((payload.get("data") or {}).get("instructions") or "")
+                if body:
+                    extras.append(body[:2500])
+        rules = business_rules_block(content_context)
+        if rules:
+            extras.append(rules)
+        signal_block = "\n\n".join(
+            [render_context_block(content_context, max_chars=5000), *extras]
+        )
     evidence = load_shared_reference("google-helpful-content.md", max_chars=5500)
     ctx = _topic_context(
         brief,
@@ -1545,24 +1939,37 @@ async def _llm_draft_article(
         "Each H2 body is 3–6 short paragraphs of real copy, not notes. "
         "Forbidden: outlines, 'cover this section', 'people who searched', 'treats X as a decision', "
         "'stay on that query', 'in today's digital landscape', 'when it comes to', keyword stuffing, "
+        "'Skip generic pitches', 'Ranking pages often lead with', 'Related terms used in support', "
+        "'Answer the query in the opening', 'depends on the situation behind', "
+        "pasting audience demographics (age, revenue, list size) into body sections, "
+        "pasting writer/outline notes as body copy, printing image-generation prompts as captions, "
         "invented statistics, fake case studies, fake quotes, padding to a word count, "
         "claiming Google requires pillar pages or a topical authority score. "
+        "Uppercase topic acronyms that appear in the primary keyword "
+        "(e.g. Hvac→HVAC, Aeo→AEO, Saas→SaaS) — never invent industry-specific jargon. "
         "Primary keyword in title/H1/first paragraph/one H2/closing. Related terms only in support. "
+        "Audience is tone guidance only — never paste it into the page. "
+        "Only name products/positioning that clearly belong to this keyword. "
+        "FAQ answers must be direct and self-contained (2–4 sentences). "
         "Placeholders are rare: [AUTHOR INPUT REQUIRED] only for a named first-hand fact; "
         "[VERIFY] only beside a specific unsourced number/date/price/study. "
         "Honour out_of_scope. Deliver differentiation in the opening and again in the body. "
         "No word_count field. One page only. Pass the people-first test: original value, "
         "bookmark-worthy, leaves the reader able to act. "
-        "Accuracy: only use supplied related keywords, products, geo, and competitive notes; "
+        "Accuracy: only use supplied related keywords, on-topic products, geo, and competitive notes; "
         "never invent markets, stats, or case studies."
     )
+    if signal_block:
+        # Signals last so they qualify the house rules rather than being buried.
+        system = system + "\n\n" + signal_block
     image_note = ""
     if image_specs:
         image_note = (
-            "Image captions to reference in the matching section using [FIGURE role] caption "
-            f"({len(image_specs)} figures — place each where it helps the reader, hero under the title):\n"
+            "Place figures with [FIGURE role] short_human_caption "
+            f"({len(image_specs)} figures — hero under the title). "
+            "Captions must be short human lines, never the generation prompt:\n"
             + "\n".join(
-                f"- {s.get('role')}: {str(s.get('prompt') or '')[:180]}"
+                f"- {s.get('role')}: caption “{s.get('caption') or s.get('alt')}”"
                 for s in image_specs[:MAX_DRAFT_IMAGES]
             )
             + "\n"
@@ -1574,12 +1981,12 @@ async def _llm_draft_article(
         if related_terms
         else "RELATED KEYWORDS: none supplied — do not invent extra target terms.\n"
     )
-    outline_lines = "\n".join(
-        f"- {s.get('title')}"
-        + (f" — {'; '.join(str(n) for n in (s.get('notes') or [])[:2])}" if s.get("notes") else "")
-        for s in sections[:12]
-    )
+    # Titles only — outline notes are writer metadata and must not be echoed into body copy.
+    outline_lines = "\n".join(f"- {s.get('title')}" for s in sections[:12])
     angle_line = angle_guidance(brief.get("angle"), kw=kw)
+    faq_qs = [
+        (q.get("q") if isinstance(q, dict) else q) for q in (brief.get("faq") or [])
+    ]
     user = (
         f"PAGE TYPE: {page_type}\n"
         f"JOB: {playbook['job']}\n"
@@ -1592,34 +1999,31 @@ async def _llm_draft_article(
         f"Client (the brand on the page): {ctx['client']}\n"
         f"Industry: {ctx['industry'] or 'n/a'}\n"
         f"Geography: {ctx['geo'] or 'n/a'}\n"
-        f"Audience: {ctx['audience'] or 'n/a'}\n"
-        f"Positioning: {ctx.get('positioning') or 'n/a'}\n"
-        f"Products/services that may be named (do not invent others): {ctx['products'] or ['n/a']}\n"
+        f"Audience (tone only — do NOT paste into the page): {ctx['audience'] or 'n/a'}\n"
+        f"Positioning (only if on-topic for this keyword): {ctx.get('positioning') or 'n/a'}\n"
+        f"Products/services that may be named (on-topic only): {ctx['products'] or ['n/a']}\n"
         f"Title: {ctx['title']}\n"
         f"Intent: {ctx['intent']}\n"
-        f"Differentiation (must appear in opening + body): {_differentiation(brief)}\n"
+        f"Differentiation (must appear in opening + body, must match this keyword): {_differentiation(brief)}\n"
         f"Required outcomes: {cov['outcomes']}\n"
         f"Must address: {cov['must_address']}\n"
         f"Must name: {cov['must_name']}\n"
         f"Out of scope (do not cover): {cov['out_of_scope']}\n"
-        f"H2 outline (use these titles, in order; write finished copy under each):\n{outline_lines}\n"
-        f"FAQ (PAA only — answer in 3–5 sentences of real copy): {brief.get('faq') or []}\n"
+        f"H2 outline (use these titles, in order; write finished buyer-facing copy under each):\n"
+        f"{outline_lines}\n"
+        f"FAQ questions (answer each directly in 2–4 sentences): {faq_qs}\n"
         f"CTA: write a finished Next step section, not a label like Contact / Learn more.\n"
         f"{_accuracy_prompt_block(brief)}"
         f"{image_note}"
     )
     try:
         settings = get_settings()
-        write_model = (
-            settings.write_model
-            if settings.llm_provider == "openrouter"
-            else settings.skill_model
-        )
+        # Skills always draft on Anthropic Claude Sonnet.
         parsed = await synthesize_json(
             system,
             user,
             max_tokens=12288,
-            model=write_model,
+            model=settings.skill_model,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("create_content_draft_generation_failed", keyword=kw, error=str(exc))
@@ -1688,8 +2092,16 @@ async def write_one_page(
     generate_images: bool | None = None,
     search_demand: dict[str, Any] | None = None,
     enhance_brief: bool = True,
+    content_context: dict[str, Any] | None = None,
+    google_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Write a single page. Never call in a loop to fill a calendar unattended."""
+    """Write a single page. Never call in a loop to fill a calendar unattended.
+
+    ``content_context`` is the signal bundle from
+    ``content_signals.build_content_context``. When supplied it drives the skill,
+    framework and prompt context, and is echoed back on the draft so the run is
+    reproducible. When omitted the writer behaves exactly as before.
+    """
     enhancements: list[str] = []
     if enhance_brief and isinstance(brief, dict):
         from app.services.content_enhancement import enhance_brief_for_writing
@@ -1745,6 +2157,7 @@ async def write_one_page(
             image_specs=specs,
             related=related,
             outline=outline,
+            content_context=content_context,
         )
     draft = _build_markdown(
         brief=brief,
@@ -1763,6 +2176,16 @@ async def write_one_page(
     )
     draft["ok"] = True
     draft["refused"] = False
+    if content_context:
+        # Saved with the piece so the same inputs can be replayed and compared.
+        draft["content_context"] = content_context
+        draft["why_this_content"] = explain_content_context(content_context)
+        draft["relevance"] = content_context.get("relevance")
+        from app.services.content_signals.validation import validate_business_logic
+
+        draft["business_validation"] = validate_business_logic(draft, content_context)
+        if content_context.get("exploratory"):
+            draft["exploratory"] = True
     if enhancements:
         draft["enhancements"] = enhancements
     draft["accuracy"] = score_draft_accuracy(
@@ -1771,6 +2194,9 @@ async def write_one_page(
         client_name=client_name,
         related=related,
     )
+    from app.services.google_policy_gate import attach_google_policy
+
+    attach_google_policy(draft, brief=brief if isinstance(brief, dict) else None, config=google_policy)
     return draft
 
 

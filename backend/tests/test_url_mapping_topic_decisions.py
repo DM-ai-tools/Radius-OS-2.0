@@ -76,8 +76,43 @@ def test_new_topic_gets_a_proposed_url():
 
     assert entry["action"] == "CREATE"
     assert entry["current_url"] is None
-    assert entry["proposed_url"] == "/blog/payroll-software-pricing"
+    # The prefix follows the resolved page type rather than one hardcoded
+    # default. A plain commercial keyword is a service page; the routing for
+    # the other intents is pinned in test_proposed_url_prefix_follows_page_type.
+    # A "pricing" keyword resolves to a landing page, so the prefix is /pricing/.
+    assert entry["proposed_url"].startswith("/pricing/")
+    assert entry["proposed_url"].strip("/").endswith("payroll-software-pricing")
     assert entry["url_status"] == "new_proposed_url"
+
+
+def test_proposed_url_prefix_follows_page_type_not_a_single_default():
+    """URL mapping used to send every new topic to one hardcoded prefix —
+    first /blog/, then /services/. The prefix now follows the page type the
+    cluster's keyword and intent resolve to, so a how-to and a pricing page
+    stop landing in the same folder."""
+    cases = [
+        ("how to choose payroll software", "informational", "/guides/"),
+        ("best payroll software", "commercial", "/blog/"),
+        ("buy payroll software", "transactional", "/pricing/"),
+        ("payroll software vs excel", "commercial", "/compare/"),
+        ("payroll software pricing", "commercial", "/pricing/"),
+        ("payroll software services", "commercial", "/services/"),
+    ]
+    for primary, intent, expected_prefix in cases:
+        cluster = {
+            "name": primary.title(),
+            "primary_keyword": primary,
+            "intent": intent,
+            "keywords": [_kw(primary, "Primary", intent=intent, volume=800)],
+        }
+        classify_clusters_against_site_map([cluster], pages=PAGES)
+        entry = map_cluster_to_url(cluster, crawled_pages=PAGES)
+        assert entry["action"] == "CREATE", (primary, entry["action"])
+        assert entry["proposed_url"].startswith(expected_prefix), (
+            primary,
+            intent,
+            entry["proposed_url"],
+        )
 
 
 def test_supporting_cluster_gets_no_dedicated_url_and_folds_into_its_parent():
