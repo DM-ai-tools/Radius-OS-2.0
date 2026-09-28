@@ -231,6 +231,7 @@ function phaseSignoffScore(m: UiMessage): number {
   if (
     type === "discovery_report" ||
     type === "discovery_questionnaire" ||
+    type === "discovery_cdd_prompt" ||
     type === "tracking_report" ||
     type === "tracking_t5_known_changes"
   ) {
@@ -241,6 +242,12 @@ function phaseSignoffScore(m: UiMessage): number {
 
 function reportBucketKey(m: UiMessage): string {
   const type = String(m.card?.card_type || "");
+  // Phase 5 emits both the service-selection gate and the keyword report under
+  // agent_key=search_demand. Keep them in separate report buckets so confirming
+  // services never hides the keyword pack (or vice versa).
+  if (type === "service_prioritization" || type === "search_demand_report") {
+    return type;
+  }
   const key =
     type === "phase_validation_report"
       ? String(m.card?.validated_agent_key || m.agent_key || m.card?.agent_key || m.id)
@@ -295,9 +302,9 @@ function reportsInPipelineOrder(messages: UiMessage[]): UiMessage[] {
     return reportTime(a) - reportTime(b);
   });
 
-  // Flatten: for each bucket emit the LATEST run first (gets phase focus),
-  // then earlier runs labeled as history. Users were looking at Run #1 after
-  // re-running Search Demand and thinking topics had not changed.
+  // Flatten each bucket in chronological order (oldest → newest) so new packs
+  // stack below prior ones — CDD prompt, then questionnaire, then confirmation.
+  // Still mark the current pack for focus chrome / scroll targets.
   const base: UiMessage[] = [];
   for (const [, runs] of sortedBuckets) {
     runs.sort((a, b) => {
@@ -309,27 +316,41 @@ function reportsInPipelineOrder(messages: UiMessage[]): UiMessage[] {
       // Prefer production cards that actually carry a draft body.
       const draft = productionDraftScore(a) - productionDraftScore(b);
       if (draft !== 0) return draft;
-      // Prefer confirmation gates over draft questionnaires / known-changes forms.
+      // Pipeline step order within a phase (prompt → form → confirmation).
       const disc = phaseSignoffScore(a) - phaseSignoffScore(b);
       if (disc !== 0) return disc;
       return messages.indexOf(a) - messages.indexOf(b);
     });
-    // When a confirmation gate exists, treat it as the current pack —
-    // otherwise users keep hitting pre-gate Submit and never Approve.
     const signoffLatest = [...runs]
       .reverse()
       .find((m) => phaseSignoffScore(m) >= 2);
     const latest = signoffLatest || runs[runs.length - 1];
-    const earlier = runs.filter((m) => m !== latest).reverse();
-    (latest as any)._isLatestRun = true;
-    delete (latest as any)._rerunIndex;
-    delete (latest as any)._rerunTotal;
-    earlier.forEach((m, i) => {
+    const latestType = String(latest.card?.card_type || "");
+    const latestScore = phaseSignoffScore(latest);
+    let earlierOrdinal = 0;
+    for (const m of runs) {
+      if (m === latest) {
+        (m as any)._isLatestRun = true;
+        delete (m as any)._rerunIndex;
+        delete (m as any)._rerunTotal;
+        continue;
+      }
       (m as any)._isLatestRun = false;
-      (m as any)._rerunIndex = earlier.length - i;
-      (m as any)._rerunTotal = runs.length;
-    });
-    base.push(latest, ...earlier);
+      // Label true re-runs of the same pack — not earlier pipeline steps
+      // (e.g. CDD prompt → questionnaire → confirmation in Phase 1).
+      const sameStage =
+        phaseSignoffScore(m) === latestScore &&
+        String(m.card?.card_type || "") === latestType;
+      if (sameStage) {
+        earlierOrdinal += 1;
+        (m as any)._rerunIndex = earlierOrdinal;
+        (m as any)._rerunTotal = runs.length;
+      } else {
+        delete (m as any)._rerunIndex;
+        delete (m as any)._rerunTotal;
+      }
+    }
+    base.push(...runs);
   }
 
   const sortedRevisions = [...revisions].sort((a, b) => {
@@ -1317,7 +1338,11 @@ export default function ChatPage() {
     if (sidebarNav !== "reports") return;
     const id = window.requestAnimationFrame(() => {
       if (reportFocusKey) {
-        document.getElementById(`report-phase-${reportFocusKey}`)?.scrollIntoView({ block: "start" });
+        // Focus the current (latest) pack for that phase — now at the bottom of
+        // its chronological stack, so scroll it into view from below.
+        document
+          .getElementById(`report-phase-${reportFocusKey}`)
+          ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
         return;
       }
       reportsEndRef.current?.scrollIntoView({ block: "end" });
@@ -1537,14 +1562,43 @@ export default function ChatPage() {
   async function onUploadCdd(file: File) {
     if (!token || !clientId) throw new Error("Not ready");
     const res = await api.importDiscoveryDocument(token, clientId, file);
+    const version = res.cdd_version?.version_no;
+    const changed = res.diff?.changed_keys || [];
+    const stale = res.stale_phases || [];
+
+    const lines = [
+      `Imported CDD "${res.filename}"` +
+        (version ? ` as version ${version}` : "") +
+        ` — ${Object.keys(res.fields || {}).length} fields extracted.`,
+    ];
+    if (changed.length) {
+      lines.push(`Changed since the previous version: ${changed.join(", ")}.`);
+    }
+    if (stale.length) {
+      const detail = stale
+        .map((agent) => {
+          const entry = res.staleness?.[agent];
+          return entry?.reason ? `${agent} (${entry.reason})` : agent;
+        })
+        .join("; ");
+      lines.push(
+        `${stale.length} completed phase(s) now out of date: ${detail}. ` +
+          "Nothing was re-run — re-run the affected phases, or dismiss the staleness if the change does not affect them.",
+      );
+    } else if (changed.length) {
+      lines.push("No completed phase is affected by this change.");
+    }
+
     setMessages((m) => [
       ...m,
-      {
-        id: crypto.randomUUID(),
-        role: "system",
-        content: `Imported CDD "${res.filename}" - ${Object.keys(res.fields || {}).length} fields applied to the questionnaire.`,
-      },
+      { id: crypto.randomUUID(), role: "system", content: lines.join("\n") },
     ]);
+
+    // Unlock the questionnaire card (CDD-first Discovery).
+    for (const ev of res.events || []) {
+      await handleStreamEvent(ev);
+    }
+
     return res.fields || {};
   }
 
@@ -1657,6 +1711,7 @@ export default function ChatPage() {
       type === "discovery_preresearch" ||
       type === "discovery_questionnaire" ||
       type === "discovery_report" ||
+      type === "discovery_cdd_prompt" ||
       type === "discovery_completeness" ||
       type === "discovery_rerun_confirm" ||
       type === "discovery_confirmation"
@@ -1692,7 +1747,7 @@ export default function ChatPage() {
           canAct={canAct(trackingKey)}
           canSubmit={canSubmitPreGate(trackingKey)}
           canGrant={true}
-          onAction={(a) => onCardAction(trackingKey, a)}
+          onAction={(a, edits) => onCardAction(trackingKey, a, edits)}
           onGrant={onGrant}
           onSubmitKnownChanges={onSubmitKnownChanges}
         />
@@ -1703,7 +1758,7 @@ export default function ChatPage() {
         <WebsiteCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1712,7 +1767,7 @@ export default function ChatPage() {
         <BrokenLinkCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1721,7 +1776,7 @@ export default function ChatPage() {
         <OnPageSeoCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1730,7 +1785,7 @@ export default function ChatPage() {
         <TechnicalSeoCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
           clientId={clientId}
           token={token}
         />
@@ -1741,7 +1796,7 @@ export default function ChatPage() {
         <SeoAuditCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1750,7 +1805,7 @@ export default function ChatPage() {
         <CompetitorCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
           onAddManual={async (name, url) => {
             if (!token || !clientId) return;
             try {
@@ -1778,6 +1833,8 @@ export default function ChatPage() {
         <ServicePrioritizationCard
           payload={card}
           canAct={canApprove(key)}
+          token={token}
+          clientId={clientId}
           onConfirm={async (selection) => {
             if (!token || !clientId) return;
             await api.saveServicePrioritization(token, clientId, selection);
@@ -1792,7 +1849,7 @@ export default function ChatPage() {
         <SearchDemandCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1801,7 +1858,7 @@ export default function ChatPage() {
         <ContentStrategyCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1810,7 +1867,7 @@ export default function ChatPage() {
         <SiteArchitectureCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1819,7 +1876,7 @@ export default function ChatPage() {
         <ContentAuditCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1828,7 +1885,7 @@ export default function ChatPage() {
         <ContentPlanningCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
         />
       );
     }
@@ -1854,7 +1911,7 @@ export default function ChatPage() {
         <PublishingCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a) => onCardAction(agentKey, a)}
+          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
           wordpressStatus={wordpressStatus}
           onConnectWordPress={() => setWordpressModalOpen(true)}
           onDisconnectWordPress={onDisconnectWordpress}

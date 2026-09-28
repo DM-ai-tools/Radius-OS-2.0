@@ -95,6 +95,18 @@ async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
 
 export type ReportDownloadFormat = "pdf" | "docx";
 
+function triggerBrowserDownload(blob: Blob, filename: string): string {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+  return filename;
+}
+
 /** Fetch a report file (PDF or Word) and hand it to the browser's downloader.
  *  Returns the saved filename. */
 async function downloadReportFile(
@@ -107,15 +119,14 @@ async function downloadReportFile(
   const blob = await res.blob();
   const disposition = res.headers.get("Content-Disposition") || "";
   const filename = disposition.match(/filename="([^"]+)"/i)?.[1] || fallbackName;
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-  return filename;
+  return triggerBrowserDownload(blob, filename);
+}
+
+/** Save a self-contained HTML document (e.g. designed site preview) via the browser. */
+export function downloadHtmlFile(html: string, filename: string): string {
+  const cleaned = filename.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-").trim() || "site-preview.html";
+  const name = cleaned.toLowerCase().endsWith(".html") ? cleaned : `${cleaned}.html`;
+  return triggerBrowserDownload(new Blob([html], { type: "text/html;charset=utf-8" }), name);
 }
 
 export type Permission = {
@@ -315,6 +326,59 @@ export type ChatEvent = {
   payload?: Record<string, unknown>;
 };
 
+
+/** One competitor's comparison across every benchmark dimension. */
+export type BenchmarkDimension = {
+  key: string;
+  label: string;
+  measurable: boolean;
+  score: number | null;
+  ours: unknown;
+  theirs: unknown;
+  detail: string;
+  reason: string;
+  gaps: string[];
+  recommendations: string[];
+};
+
+export type BenchmarkCompetitor = {
+  competitor_id: string;
+  name: string;
+  domain: string;
+  url: string;
+  source: string;
+  ok: boolean;
+  error: string | null;
+  verdict: string;
+  score: number | null;
+  warnings?: string[];
+  content: Record<string, unknown>;
+  dimensions: BenchmarkDimension[];
+};
+
+export type BenchmarkReport = {
+  version: string;
+  service_id: string;
+  service_name: string;
+  generated_at: string;
+  competitors: BenchmarkCompetitor[];
+  overall: {
+    score: number | null;
+    verdict: string;
+    competitors_compared: number;
+    competitors_failed: number;
+    our_word_count: number;
+  } | null;
+  gaps: Array<{ gap: string; dimension: string; competitors: string[] }>;
+  recommendations: Array<{
+    priority: number;
+    recommendation: string;
+    dimension: string;
+    raised_by: string[];
+  }>;
+  notes: string[];
+};
+
 export const api = {
   login: (email: string, password: string) =>
     request<{ access_token: string }>("/api/v1/auth/login", {
@@ -405,6 +469,8 @@ export const api = {
       markdown: string;
       images?: Array<Record<string, unknown>>;
       media_base?: string;
+      /** Inline images as data URIs for offline/downloadable HTML. */
+      embed_images?: boolean;
     },
   ) =>
     request<{
@@ -414,6 +480,7 @@ export const api = {
       design_source?: string;
       design_fallback?: string | null;
       wordpress_kit_id?: string | null;
+      images_embedded?: boolean;
     }>(`/api/v1/clients/${clientId}/content-production/site-preview`, {
       method: "POST",
       token,
@@ -651,6 +718,20 @@ export const api = {
       filename: string;
       fields: Record<string, unknown>;
       client: Client;
+      cdd_version?: { id: string; version_no: number; created_at: string | null };
+      diff?: {
+        changed_keys?: string[];
+        added?: Record<string, unknown>;
+        removed?: Record<string, unknown>;
+        modified?: Record<string, { old: unknown; new: unknown }>;
+      };
+      staleness?: Record<
+        string,
+        { state: string; fields?: string[]; upstream?: string[]; reason?: string }
+      >;
+      stale_phases?: string[];
+      events?: ChatEvent[];
+      questionnaire_card?: Record<string, unknown>;
     }>(`/api/v1/clients/${client_id}/discovery/import-document`, {
       method: "POST",
       token,
@@ -665,6 +746,79 @@ export const api = {
       token,
       body: JSON.stringify({ name, url }),
     }),
+  /** Competitors attached to one service, plus every competitor available to pick. */
+  serviceCompetitors: (token: string, client_id: string, service_id: string) =>
+    request<{
+      service_id: string;
+      selected_competitor_ids: string[];
+      selected: Array<Record<string, unknown>>;
+      available: Array<Record<string, unknown>>;
+    }>(
+      `/api/v1/clients/${client_id}/services/${encodeURIComponent(service_id)}/competitors`,
+      { token },
+    ),
+  /** Replace a service's competitor selection. Order is preserved. */
+  saveServiceCompetitors: (
+    token: string,
+    client_id: string,
+    service_id: string,
+    competitor_ids: string[],
+  ) =>
+    request<{ ok: boolean; selected_competitor_ids: string[]; warnings: string[] }>(
+      `/api/v1/clients/${client_id}/services/${encodeURIComponent(service_id)}/competitors`,
+      { method: "PUT", token, body: JSON.stringify({ competitor_ids }) },
+    ),
+  /** Add a competitor inline and attach it to this service (reuses an existing domain). */
+  addServiceCompetitor: (
+    token: string,
+    client_id: string,
+    service_id: string,
+    body: { name: string; website: string; notes?: string },
+  ) =>
+    request<{
+      ok: boolean;
+      created: boolean;
+      competitor: Record<string, unknown>;
+      warnings: string[];
+    }>(
+      `/api/v1/clients/${client_id}/services/${encodeURIComponent(service_id)}/competitors`,
+      { method: "POST", token, body: JSON.stringify(body) },
+    ),
+  /** Detach from this service, or delete the competitor from the client entirely. */
+  removeServiceCompetitor: (
+    token: string,
+    client_id: string,
+    service_id: string,
+    competitor_id: string,
+    deleteEverywhere = false,
+  ) =>
+    request<{ ok: boolean; deleted: boolean; selected_competitor_ids: string[] }>(
+      `/api/v1/clients/${client_id}/services/${encodeURIComponent(service_id)}` +
+        `/competitors/${competitor_id}${deleteEverywhere ? "?delete_everywhere=true" : ""}`,
+      { method: "DELETE", token },
+    ),
+  /** Benchmark our content for a service against its selected competitors. */
+  benchmarkService: (
+    token: string,
+    client_id: string,
+    service_id: string,
+    body: {
+      competitor_ids?: string[];
+      target_keywords?: string[];
+      allow_live_fetch?: boolean;
+      pasted?: Record<string, string>;
+    } = {},
+  ) =>
+    request<BenchmarkReport>(
+      `/api/v1/clients/${client_id}/services/${encodeURIComponent(service_id)}/benchmark`,
+      {
+        method: "POST",
+        token,
+        body: JSON.stringify(body),
+        // Live-fetching several competitor pages outruns the default budget.
+        timeoutMs: 120_000,
+      },
+    ),
   /** Download latest structured report per phase as a single PDF or Word document. */
   downloadReports: async (
     token: string | null,
