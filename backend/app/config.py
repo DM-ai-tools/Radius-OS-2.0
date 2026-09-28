@@ -32,27 +32,56 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     openrouter_api_key: str = ""
-    # anthropic | openrouter — skill synthesis (competitor analysis, discovery research, etc.)
+    # Skills always use Anthropic directly (see llm._skill_chat).
+    # OpenRouter remains for research (Perplexity) and image generation only.
     llm_provider: str = "anthropic"
     router_model: str = "claude-haiku-4-5"
-    # Main reasoning for skills (Architecture v1.9 Step 06/08 — Claude Sonnet)
+    # Main reasoning for every skill — Claude Sonnet via ANTHROPIC_API_KEY
     skill_model: str = "claude-sonnet-5"
-    # Competitor Research is forced to Gemini (Architecture v1.9 common skill)
-    competitor_model: str = "google/gemini-2.5-pro"
+    # Optional alias for SKILL_MODEL. When CLAUDE_MODEL is set it wins.
+    claude_model: str = ""
+    # Legacy alias; competitor skills now use skill_model
+    competitor_model: str = "claude-sonnet-5"
     # OpenRouter Perplexity Pro for URL research / CDD extraction
     research_model: str = "perplexity/sonar-pro"
     # Nano Banana (Gemini 2.5 Flash Image) via OpenRouter Images API
     image_model: str = "google/gemini-2.5-flash-image"
-    # Article drafts (Phase 10 create-content) via OpenRouter
-    write_model: str = "openai/gpt-5.6-sol"
-    # Lightweight OpenRouter model for post-cleaning keyword cluster + intent/funnel
-    keyword_cluster_model: str = "google/gemini-2.5-flash"
+    # Legacy write-model id; Phase 10 drafts now use skill_model on Anthropic
+    write_model: str = "claude-sonnet-5"
+    # Legacy clustering model id; keyword LLM paths now use skill_model
+    keyword_cluster_model: str = "claude-sonnet-5"
     keyword_relevance_max_per_seed: int = 60
     keyword_relevance_max_input_per_seed: int = 80
     keyword_max_seeds: int = 50
     keyword_pool_target: int = 4500
     keyword_relevance_max_tokens: int = 2048
     keyword_cluster_use_llm: bool = False
+    # Per-keyword LLM relevance gate (Phase 5). Judges every seeded keyword
+    # against its own service + CDD + competitor context, and fails closed:
+    # anything it could not judge is quarantined, never silently kept.
+    keyword_validation_enabled: bool = True
+    # Must stay consistent with keyword_relevance_max_tokens: each verdict row
+    # costs ~40 output tokens, so 200 keywords needed ~8000 against a 2048
+    # budget and every reply was truncated mid-JSON. tokens_for_batch() now
+    # scales the budget too, but a smaller batch also keeps each judgement
+    # sharper and limits the blast radius of one bad reply.
+    keyword_validation_batch_size: int = 25
+    keyword_validation_threshold: float = 0.6
+    # Hard ceiling on LLM calls per run — nothing else in the LLM path caps spend.
+    keyword_validation_max_calls: int = 120
+    keyword_validation_concurrency: int = 3
+    keyword_validation_call_timeout: int = 45
+    keyword_validation_cache_days: int = 14
+    # Post-clustering LLM coherence gate (Phase 5). Judges each cluster as a
+    # single-page topic; fails closed — unjudged / drop / review stay out of
+    # CDP + topic drafting.
+    cluster_validation_enabled: bool = True
+    cluster_validation_batch_size: int = 8
+    cluster_validation_threshold: float = 0.6
+    cluster_validation_max_calls: int = 40
+    cluster_validation_concurrency: int = 3
+    cluster_validation_call_timeout: int = 45
+    cluster_validation_cache_days: int = 14
     use_mock_llm: bool = True
     use_mock_providers: bool = True
 
@@ -67,6 +96,26 @@ class Settings(BaseSettings):
     semrush_api_key: str = ""
     dataforseo_login: str = ""
     dataforseo_password: str = ""
+    # Every DataForSEO request sets location and language explicitly. These are
+    # the fallbacks when a client's geographic focus resolves to nothing; a
+    # project or request may override either.
+    dataforseo_location_code: int = 2840  # United States
+    dataforseo_language_code: str = "en"
+    # sandbox.dataforseo.com for dev and the opt-in integration test.
+    dataforseo_sandbox: bool = False
+    # Expansion pushes this floor to Labs via filters. Default 50.
+    keyword_expand_min_volume: int = 10
+    # related_keywords depth is 0–4. Default 1 (the seed plus one hop).
+    keyword_related_depth: int = 2
+    # Ads volume vs clickstream volume. Flag when the larger is more than this
+    # many times the smaller. Both numbers still come from DataForSEO.
+    volume_discrepancy_ratio: float = 2.0
+    # SERP-overlap cluster refinement. Priced per keyword (one request each),
+    # so it runs over the head terms only; the tail keeps token clustering.
+    serp_clustering_enabled: bool = True
+    serp_clustering_head_terms: int = 100
+    serp_clustering_min_shared: int = 4
+    serp_clustering_concurrency: int = 5
     moz_api_key: str = ""
     # Ahrefs Site Audit (Phase 7) — project resolved by URL when unset
     ahrefs_site_audit_project_id: int | None = None
@@ -116,6 +165,9 @@ class Settings(BaseSettings):
     # be requested later through the dedicated crawl/audit tools.
     website_situation_max_pages: int = 40
     website_operation_timeout_seconds: int = 75
+    # Comprehensive SEO audit needs headroom for discovery + multi-page fetches
+    # (WAF/Cloudflare sites especially). Inner audit stops ~10s early for partials.
+    website_seo_audit_timeout_seconds: int = 240
 
     feature_discovery_agent: bool = True
     feature_tracking_agent: bool = True
@@ -247,7 +299,6 @@ class Settings(BaseSettings):
             )
         return self
 
-
     @model_validator(mode="after")
     def _live_providers_when_production_flags_unset(self) -> "Settings":
         """Production must not inherit the dev mock defaults.
@@ -264,6 +315,11 @@ class Settings(BaseSettings):
             self.use_mock_llm = False
         return self
 
+    @model_validator(mode="after")
+    def _claude_model_alias(self) -> "Settings":
+        if (self.claude_model or "").strip():
+            self.skill_model = self.claude_model.strip()
+        return self
 
 
 @lru_cache

@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.integrations.llm import extract_domain
 from app.integrations.web_fetch import discover_site_urls, fetch_url, parse_html
 from app.models import CompetitorProfile
+from app.config import get_settings
 
 # DataForSEO country codes
 COUNTRY_LOCATION_CODES: dict[str, int] = {
@@ -257,11 +258,21 @@ def resolve_geographic_focus(
 
     labs_location_code = int(COUNTRY_LOCATION_CODES.get(country, 2840))
 
+    # Language is explicit on every provider request. A project may override it;
+    # otherwise it comes from config, never from a call-site default argument.
+    language_code = str(
+        (commercial or {}).get("language_code")
+        or (marketing or {}).get("language_code")
+        or (intake or {}).get("language_code")
+        or get_settings().dataforseo_language_code
+    ).strip().lower()
+
     return {
         "geographic_focus": raw_s,
         "country": country,
         "location_code": int(location_code),
         "labs_location_code": labs_location_code,
+        "language_code": language_code,
         "location_name": location_name,
         "location_type": location_type,
         "city": city,
@@ -519,9 +530,18 @@ async def fetch_competitor_site_snapshots(
             failures = 0
             html = fetched.get("text") or ""
             title = ""
+            h1s: list[str] = []
+            h2s: list[str] = []
+            meta_description = ""
             if html:
                 try:
-                    title = parse_html(html).title or ""
+                    parsed = parse_html(html)
+                    title = parsed.title or ""
+                    # Keyword intel reads these; titles alone lose most of the
+                    # on-page targeting signal.
+                    h1s = [h.strip() for h in (parsed.h1s or [])[:2] if h and h.strip()]
+                    h2s = [h.strip() for h in (parsed.h2s or [])[:6] if h and h.strip()]
+                    meta_description = (parsed.meta or {}).get("description", "") or ""
                 except Exception:  # noqa: BLE001
                     title = ""
 
@@ -531,6 +551,9 @@ async def fetch_competitor_site_snapshots(
                 "url": fetched.get("url") or u,
                 "path": path,
                 "title": (title or "")[:160],
+                "h1s": h1s,
+                "h2s": h2s,
+                "meta_description": meta_description[:320],
                 "kind": kind,
                 "status": fetched.get("status_code"),
             }

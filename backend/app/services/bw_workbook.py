@@ -38,6 +38,10 @@ CATEGORY_URL_COLUMNS = [
 SEARCH_DEMAND_COLUMNS = [
     "keyword",
     "search_volume_mo",
+    # Sits next to the volume it qualifies: "measured" came from a provider,
+    # "estimated" came from the coverage fallback when the providers were
+    # unreachable. Without this the two are indistinguishable in the export.
+    "volume_basis",
     "cpc",
     "competition",
     "category_dimension",
@@ -91,7 +95,15 @@ def _excel_priority(
     priority: str | None = None,
     volume: Any = None,
     page_type: str | None = None,
+    relevance_reason: str | None = None,
 ) -> str:
+    reason = str(relevance_reason or "")
+    # Volume is an opportunity metric. It cannot promote a rejected or
+    # still-ambiguous query to P0.
+    if reason in ("service_mismatch", "entity_mismatch", "negative_concept", "geo_mismatch"):
+        return "P3"
+    if reason == "service_review":
+        return "P2"
     if priority and str(priority).upper().startswith("P"):
         return str(priority).upper()
     band_u = str(band or priority or "").upper()
@@ -308,7 +320,18 @@ def build_search_demand_analysis_rows(
             {
                 "row_type": "data",
                 "keyword": kw,
-                "search_volume_mo": row.get("volume"),
+                # A null volume means the provider had no data for this keyword.
+                # Printing it as an empty cell read as a measured zero.
+                "search_volume_mo": (
+                    "N/A" if row.get("volume") is None else row.get("volume")
+                ),
+                "volume_basis": (
+                    "estimated"
+                    if row.get("provider_fallback") or row.get("volume_estimated")
+                    else "unmeasured"
+                    if row.get("volume") is None
+                    else "measured"
+                ),
                 "cpc": row.get("cpc"),
                 "competition": competition,
                 "category_dimension": category_dim,
@@ -318,7 +341,11 @@ def build_search_demand_analysis_rows(
                 "funnel_stage": funnel,
                 "secondary_keywords": _join_keywords(secondaries),
                 "combined_cluster_volume": combined,
-                "priority": _excel_priority(volume=row.get("volume"), band=row.get("bucket")),
+                "priority": _excel_priority(
+                    volume=row.get("volume"),
+                    band=row.get("bucket"),
+                    relevance_reason=str(row.get("relevance_reason") or ""),
+                ),
                 "intent": row.get("intent"),
                 "opportunity_score": row.get("opportunity_score"),
             }

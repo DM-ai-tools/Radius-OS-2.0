@@ -91,6 +91,79 @@ def sanitize_keyword(keyword: str) -> str:
     return q[:80]
 
 
+# Documented ceiling for the bulk keyword endpoints (google_ads/search_volume,
+# bulk_keyword_difficulty, search_intent): 1000 keywords per task.
+MAX_KEYWORDS_PER_TASK = 1000
+# Documented ceiling for the Labs `limit` request field.
+MAX_LABS_LIMIT = 1000
+
+
+def _dedupe_keywords(keywords: list[str]) -> list[str]:
+    """Sanitize, drop blanks and case-insensitive duplicates, keep input order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in keywords:
+        cleaned = sanitize_keyword(str(raw or ""))
+        key = cleaned.lower()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+    return out
+
+
+def _chunks(items: list[str], size: int) -> list[list[str]]:
+    size = max(1, int(size))
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _labs_query_fields(
+    *,
+    limit: int,
+    min_volume: int | None,
+    volume_field: str = "keyword_info.search_volume",
+) -> dict[str, Any]:
+    """limit / filters / order_by, pushed to the provider rather than done here.
+
+    Labs accepts up to 8 filters and 3 order_by rules; `limit` maxes at 1000.
+    Sorting by volume server-side means a truncated page keeps the keywords
+    worth having instead of an arbitrary slice.
+
+    ``volume_field`` differs by endpoint. Suggestions and ideas use
+    ``keyword_info.search_volume``. Related keywords and ranked keywords nest
+    it under ``keyword_data.keyword_info.search_volume``.
+    """
+    fields: dict[str, Any] = {
+        "limit": max(1, min(int(limit), MAX_LABS_LIMIT)),
+        "order_by": [f"{volume_field},desc"],
+    }
+    if min_volume is not None:
+        fields["filters"] = [volume_field, ">=", int(min_volume)]
+    return fields
+
+
+def normalize_target(value: str) -> str:
+    """Bare registrable host for the Labs `target` field — no scheme, no path, no www."""
+    raw = (value or "").strip()
+    if "://" in raw:
+        raw = urlparse(raw).hostname or raw
+    return raw.split("/")[0].lower().removeprefix("www.").strip()
+
+
+def _is_locale_rejection(error: str | None) -> bool:
+    """True only when the provider explicitly refused a locale field.
+
+    A missing body ("no_body") is a transport failure, not the provider telling
+    us location_code is unsupported.
+    """
+    if not error:
+        return False
+    text = error.lower()
+    if "no_body" in text:
+        return False
+    return "location" in text or "language" in text
+
+
 def _task_error(body: dict[str, Any] | None) -> str | None:
     if not body:
         return "no_body"
@@ -118,7 +191,35 @@ def _auth_header() -> str | None:
     return f"Basic {token}"
 
 
+def api_base() -> str:
+    """Live API, or the sandbox host when DATAFORSEO_SANDBOX is set."""
+    settings = get_settings()
+    host = "sandbox.dataforseo.com" if settings.dataforseo_sandbox else "api.dataforseo.com"
+    return f"https://{host}/v3"
+
+
+def should_retry_dataforseo(
+    *,
+    http_status: int | None,
+    body_status: int | None,
+    transport_error: bool,
+) -> bool:
+    """Retry timeouts, 5xx, and rate limits. Never retry 40xxx validation errors."""
+    if transport_error:
+        return True
+    if http_status == 429 or (http_status is not None and http_status >= 500):
+        return True
+    if http_status is not None and 400 <= http_status < 500:
+        return False
+    if body_status is None:
+        return False
+    if 40000 <= int(body_status) < 50000:
+        return False
+    return int(body_status) >= 50000
+
+
 async def _post(path: str, payload: list[dict[str, Any]]) -> dict[str, Any] | None:
+    import asyncio
     import time
 
     from app.services.api_meter import record_api_call
@@ -126,69 +227,102 @@ async def _post(path: str, payload: list[dict[str, Any]]) -> dict[str, Any] | No
     auth = _auth_header()
     if not auth:
         return None
-    url = f"https://api.dataforseo.com/v3{path}"
-    t0 = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.post(
-                url,
-                headers={"Authorization": auth, "Content-Type": "application/json"},
-                json=payload,
-            )
-    except httpx.HTTPError as exc:
-        log.warning("dataforseo_request_failed", path=path, error=str(exc)[:240])
+    url = f"{api_base()}{path}"
+    delays = (0.4, 1.2)
+    last_body: dict[str, Any] | None = None
+    for attempt in range(3):
+        t0 = time.perf_counter()
+        transport_error = False
+        http_status: int | None = None
+        body: dict[str, Any] | None = None
+        error_detail = ""
+        try:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": auth, "Content-Type": "application/json"},
+                    json=payload,
+                )
+        except httpx.HTTPError as exc:
+            transport_error = True
+            error_detail = str(exc)[:500]
+            log.warning("dataforseo_request_failed", path=path, error=error_detail[:240])
+        else:
+            http_status = resp.status_code
+            if resp.status_code >= 400:
+                error_detail = resp.text[:500]
+                log.warning(
+                    "dataforseo_http_error",
+                    path=path,
+                    status=resp.status_code,
+                    body=resp.text[:240],
+                )
+            else:
+                body = resp.json()
+                last_body = body
+                status = body.get("status_code")
+                if status not in (20000, None) and not body.get("tasks"):
+                    error_detail = str(body.get("status_message") or status)[:500]
+                    log.warning(
+                        "dataforseo_status",
+                        path=path,
+                        status=status,
+                        message=body.get("status_message"),
+                    )
+                else:
+                    await record_api_call(
+                        provider="dataforseo",
+                        operation=path,
+                        latency_ms=int((time.perf_counter() - t0) * 1000),
+                        status="success",
+                        estimated_cost_usd=_response_cost(body),
+                        request_meta={"tasks": len(payload)},
+                    )
+                    return body
+        body_status = None
+        if isinstance(last_body, dict) and last_body.get("status_code") is not None:
+            try:
+                body_status = int(last_body.get("status_code"))
+            except (TypeError, ValueError):
+                body_status = None
+        retry = should_retry_dataforseo(
+            http_status=http_status,
+            body_status=body_status if body is not None or transport_error else body_status,
+            transport_error=transport_error,
+        )
         await record_api_call(
             provider="dataforseo",
             operation=path,
             latency_ms=int((time.perf_counter() - t0) * 1000),
             status="error",
-            error_detail=str(exc)[:500],
-            request_meta={"tasks": len(payload)},
+            error_detail=error_detail,
+            request_meta={"tasks": len(payload), "attempt": attempt + 1},
         )
+        if not retry or attempt >= 2:
+            return None
+        await asyncio.sleep(delays[attempt])
+    return None
+
+
+def _response_cost(body: dict[str, Any] | None) -> float | None:
+    """Actual USD cost reported by DataForSEO, or None if it didn't say."""
+    if not body:
         return None
-    else:
-        if resp.status_code >= 400:
-            log.warning(
-                "dataforseo_http_error",
-                path=path,
-                status=resp.status_code,
-                body=resp.text[:240],
-            )
-            await record_api_call(
-                provider="dataforseo",
-                operation=path,
-                latency_ms=int((time.perf_counter() - t0) * 1000),
-                status="error",
-                error_detail=resp.text[:500],
-                request_meta={"tasks": len(payload)},
-            )
+    raw = body.get("cost")
+    if raw is None:
+        tasks = body.get("tasks") or []
+        totals = [
+            t.get("cost")
+            for t in tasks
+            if isinstance(t, dict) and isinstance(t.get("cost"), (int, float))
+        ]
+        if not totals:
             return None
-        body = resp.json()
-        status = body.get("status_code")
-        if status not in (20000, None) and not body.get("tasks"):
-            log.warning(
-                "dataforseo_status",
-                path=path,
-                status=status,
-                message=body.get("status_message"),
-            )
-            await record_api_call(
-                provider="dataforseo",
-                operation=path,
-                latency_ms=int((time.perf_counter() - t0) * 1000),
-                status="error",
-                error_detail=str(body.get("status_message") or status)[:500],
-                request_meta={"tasks": len(payload)},
-            )
-            return None
-        await record_api_call(
-            provider="dataforseo",
-            operation=path,
-            latency_ms=int((time.perf_counter() - t0)  * 1000),
-            status="success",
-            request_meta={"tasks": len(payload)},
-        )
-        return body
+        return float(sum(totals))
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _task_items(body: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -197,24 +331,65 @@ def _task_items(body: dict[str, Any] | None) -> list[dict[str, Any]]:
     tasks = body.get("tasks") or []
     if not tasks:
         return []
-    task = tasks[0]
-    if not isinstance(task, dict):
-        return []
-    if task.get("status_code") not in (20000, 20100, None):
-        log.warning(
-            "dataforseo_task_status",
-            status=task.get("status_code"),
-            message=task.get("status_message"),
-        )
-        return []
-    results = task.get("result") or []
+    # A POST may carry several tasks. Reading tasks[0] alone silently dropped
+    # every task after the first, so anything that batches must merge them —
+    # and one failed task must not discard its healthy siblings.
+    out: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if task.get("status_code") not in (20000, 20100, None):
+            log.warning(
+                "dataforseo_task_status",
+                status=task.get("status_code"),
+                message=task.get("status_message"),
+            )
+            continue
+        out.extend(_result_items(task.get("result") or []))
+    return out
+
+
+def _result_items(results: list[Any]) -> list[dict[str, Any]]:
+    """Normalize one task's `result` into a flat list of item dicts."""
     if not results:
         return []
     first = results[0]
-    items = first.get("items") if isinstance(first, dict) else None
-    if isinstance(items, list):
-        return [i for i in items if isinstance(i, dict)]
-    return []
+    if not isinstance(first, dict):
+        return []
+    # Two documented shapes:
+    #   Labs            -> result[0].items = [...]   (items may be null/empty)
+    #   keywords_data   -> result            = [...]  (keyword objects directly)
+    # Assuming only the Labs shape made search_volume() silently return nothing
+    # on every call. The discriminator is whether the wrapper DECLARES items:
+    # an explicit "items": null means an empty Labs result, not a flat payload.
+    if "items" in first or "items_count" in first:
+        out: list[dict[str, Any]] = []
+        for wrapper in results:
+            if not isinstance(wrapper, dict):
+                continue
+            out.extend(i for i in (wrapper.get("items") or []) if isinstance(i, dict))
+        return out
+    return [row for row in results if isinstance(row, dict)]
+
+
+def _successful_result_rows(body: dict[str, Any] | None) -> int:
+    """How many result objects a successful task actually returned.
+
+    Used to tell "the provider sent keyword rows we failed to parse" apart
+    from "the provider sent an empty result".
+    """
+    count = 0
+    for task in (body or {}).get("tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        if task.get("status_code") not in (20000, 20100, None):
+            continue
+        result = task.get("result")
+        if isinstance(result, list):
+            count += sum(1 for row in result if isinstance(row, dict))
+        elif isinstance(result, dict):
+            count += 1
+    return count
 
 
 async def competitors_domain(domain: str, *, limit: int = 10) -> list[dict[str, str]]:
@@ -286,13 +461,21 @@ async def related_keywords(
     location_code: int = DEFAULT_LOCATION,
     language_code: str = DEFAULT_LANGUAGE,
     limit: int = 50,
+    min_volume: int | None = None,
+    depth: int = 1,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Google 'searches related to' expansion — the RELATED match source."""
+    """Google 'searches related to' expansion — the RELATED match source.
+
+    ``depth`` is 0–4. 1 is one hop from the seed (DataForSEO's useful default).
+    """
     errors: list[str] = []
     if not seed.strip():
         return [], errors
     if not _auth_header():
         errors.append("dataforseo_unavailable")
+        return [], errors
+    if not language_code:
+        errors.append("dataforseo_language_missing")
         return [], errors
 
     body = await _post(
@@ -302,9 +485,14 @@ async def related_keywords(
                 "keyword": sanitize_keyword(seed) or seed.strip(),
                 "location_code": coerce_labs_location(location_code),
                 "language_code": language_code,
-                "limit": min(limit, 100),
+                "depth": max(0, min(int(depth), 4)),
                 "include_seed_keyword": True,
                 "include_serp_info": False,
+                **_labs_query_fields(
+                    limit=limit,
+                    min_volume=min_volume,
+                    volume_field="keyword_data.keyword_info.search_volume",
+                ),
             }
         ],
     )
@@ -323,6 +511,7 @@ async def keyword_suggestions(
     location_code: int = DEFAULT_LOCATION,
     language_code: str = DEFAULT_LANGUAGE,
     limit: int = 50,
+    min_volume: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Full-text search for queries CONTAINING the seed — the PHRASE match source."""
     errors: list[str] = []
@@ -339,9 +528,9 @@ async def keyword_suggestions(
                 "keyword": sanitize_keyword(seed) or seed.strip(),
                 "location_code": coerce_labs_location(location_code),
                 "language_code": language_code,
-                "limit": min(limit, 100),
                 "include_seed_keyword": True,
                 "include_serp_info": False,
+                **_labs_query_fields(limit=limit, min_volume=min_volume),
             }
         ],
     )
@@ -360,6 +549,7 @@ async def keyword_ideas(
     location_code: int = DEFAULT_LOCATION,
     language_code: str = DEFAULT_LANGUAGE,
     limit: int = 50,
+    min_volume: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Category-based ideas that need NOT contain the seed — the BROAD match source."""
     errors: list[str] = []
@@ -376,8 +566,8 @@ async def keyword_ideas(
                 "keywords": [sanitize_keyword(seed) or seed.strip()],
                 "location_code": coerce_labs_location(location_code),
                 "language_code": language_code,
-                "limit": min(limit, 100),
                 "include_serp_info": False,
+                **_labs_query_fields(limit=limit, min_volume=min_volume),
             }
         ],
     )
@@ -397,18 +587,8 @@ async def search_volume(
     language_code: str = DEFAULT_LANGUAGE,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     errors: list[str] = []
-    seen: set[str] = set()
-    batch: list[str] = []
-    for raw in keywords:
-        cleaned = sanitize_keyword(str(raw or ""))
-        key = cleaned.lower()
-        if not cleaned or key in seen:
-            continue
-        seen.add(key)
-        batch.append(cleaned)
-        if len(batch) >= 40:
-            break
-    if not batch:
+    cleaned = _dedupe_keywords(keywords)
+    if not cleaned:
         return [], errors
     if not _auth_header():
         errors.append("dataforseo_unavailable")
@@ -419,48 +599,118 @@ async def search_volume(
     if country not in locations:
         locations.append(country)
 
-    body: dict[str, Any] | None = None
-    for loc in locations:
+    out: list[dict[str, Any]] = []
+    ok_batches = 0
+    # The endpoint takes up to MAX_KEYWORDS_PER_TASK per task; send as many
+    # tasks as the pool needs. Truncating to one batch left the rest of the
+    # pool with no measured volume at all.
+    for batch in _chunks(cleaned, MAX_KEYWORDS_PER_TASK):
+        body: dict[str, Any] | None = None
+        for loc in locations:
+            body = await _post(
+                "/keywords_data/google_ads/search_volume/live",
+                [
+                    {
+                        "keywords": batch,
+                        "location_code": loc,
+                        "language_code": language_code,
+                    }
+                ],
+            )
+            err = _task_error(body)
+            if err and "location_code" in err.lower():
+                errors.append(f"dataforseo_volume_location:{err}")
+                continue
+            if body is not None and not err:
+                # This location works — don't re-probe it on later batches.
+                if locations[0] != loc:
+                    locations = [loc]
+                break
+            if err:
+                errors.append(f"dataforseo_volume:{err}")
+                body = None
+        if body is None:
+            errors.append("dataforseo_volume_failed")
+            continue
+        ok_batches += 1
+        items = _task_items(body)
+        # Google Ads puts keyword rows directly in result[]. If a 200 body
+        # still yields nothing, the volume was discarded — say so.
+        if not items and _successful_result_rows(body):
+            errors.append("dataforseo_volume_unparsed")
+            log.warning(
+                "dataforseo_volume_unparsed",
+                result_rows=_successful_result_rows(body),
+            )
+        for item in items:
+            kw = str(item.get("keyword") or "").strip()
+            if not kw:
+                continue
+            monthly = item.get("monthly_searches") or []
+            trend = _trend_from_monthly(monthly)
+            out.append(
+                {
+                    "keyword": kw,
+                    "volume": _int_or_none(item.get("search_volume")),
+                    "competition": _float_or_none(item.get("competition")),
+                    "cpc": _float_or_none(item.get("cpc")),
+                    "trend": trend,
+                    "source": "dataforseo",
+                }
+            )
+    return out, errors
+
+
+async def clickstream_search_volume(
+    keywords: list[str],
+    *,
+    location_code: int = DEFAULT_LOCATION,
+    language_code: str = DEFAULT_LANGUAGE,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Clickstream search volume. Stored beside Google Ads volume, never blended.
+
+    Endpoint: POST /keywords_data/clickstream_data/bulk_search_volume/live
+    Up to 1000 keywords per task. language_code is required by this app even
+    though the published schema keys the series by location.
+    """
+    errors: list[str] = []
+    cleaned = _dedupe_keywords(keywords)
+    if not cleaned:
+        return [], errors
+    if not _auth_header():
+        errors.append("dataforseo_unavailable")
+        return [], errors
+    if not location_code or not language_code:
+        errors.append("dataforseo_locale_missing")
+        return [], errors
+
+    out: list[dict[str, Any]] = []
+    for batch in _chunks(cleaned, MAX_KEYWORDS_PER_TASK):
         body = await _post(
-            "/keywords_data/google_ads/search_volume/live",
+            "/keywords_data/clickstream_data/bulk_search_volume/live",
             [
                 {
                     "keywords": batch,
-                    "location_code": loc,
+                    "location_code": int(location_code),
                     "language_code": language_code,
                 }
             ],
         )
-        err = _task_error(body)
-        if err and "location_code" in err.lower():
-            errors.append(f"dataforseo_volume_location:{err}")
+        if body is None:
+            errors.append("dataforseo_clickstream_volume_failed")
             continue
-        if body is not None and not err:
-            break
-        if err:
-            errors.append(f"dataforseo_volume:{err}")
-            body = None
-    if body is None:
-        errors.append("dataforseo_volume_failed")
-        return [], errors
-
-    out: list[dict[str, Any]] = []
-    for item in _task_items(body):
-        kw = str(item.get("keyword") or "").strip()
-        if not kw:
-            continue
-        monthly = item.get("monthly_searches") or []
-        trend = _trend_from_monthly(monthly)
-        out.append(
-            {
-                "keyword": kw,
-                "volume": _int_or_none(item.get("search_volume")),
-                "competition": _float_or_none(item.get("competition")),
-                "cpc": _float_or_none(item.get("cpc")),
-                "trend": trend,
-                "source": "dataforseo",
-            }
-        )
+        for item in _task_items(body):
+            kw = str(item.get("keyword") or "").strip()
+            if not kw:
+                continue
+            out.append(
+                {
+                    "keyword": kw,
+                    "volume_clickstream": _int_or_none(item.get("search_volume")),
+                    "source": "dataforseo",
+                    "dataforseo_endpoint": "clickstream_bulk_search_volume",
+                }
+            )
     return out, errors
 
 
@@ -471,49 +721,39 @@ async def keyword_difficulty(
     language_code: str = DEFAULT_LANGUAGE,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     errors: list[str] = []
-    seen: set[str] = set()
-    batch: list[str] = []
-    for raw in keywords:
-        cleaned = sanitize_keyword(str(raw or ""))
-        key = cleaned.lower()
-        if not cleaned or key in seen:
-            continue
-        seen.add(key)
-        batch.append(cleaned)
-        if len(batch) >= 20:
-            break
-    if not batch:
+    cleaned = _dedupe_keywords(keywords)
+    if not cleaned:
         return [], errors
     if not _auth_header():
         errors.append("dataforseo_unavailable")
         return [], errors
 
-    body = await _post(
-        "/dataforseo_labs/google/bulk_keyword_difficulty/live",
-        [
-            {
-                "keywords": batch,
-                "location_code": coerce_labs_location(location_code),
-                "language_code": language_code,
-            }
-        ],
-    )
-    if body is None:
-        errors.append("dataforseo_kd_failed")
-        return [], errors
-
     out: list[dict[str, Any]] = []
-    for item in _task_items(body):
-        kw = str(item.get("keyword") or "").strip()
-        if not kw:
-            continue
-        out.append(
-            {
-                "keyword": kw,
-                "difficulty": _int_or_none(item.get("keyword_difficulty")),
-                "source": "dataforseo",
-            }
+    for batch in _chunks(cleaned, MAX_KEYWORDS_PER_TASK):
+        body = await _post(
+            "/dataforseo_labs/google/bulk_keyword_difficulty/live",
+            [
+                {
+                    "keywords": batch,
+                    "location_code": coerce_labs_location(location_code),
+                    "language_code": language_code,
+                }
+            ],
         )
+        if body is None:
+            errors.append("dataforseo_kd_failed")
+            continue
+        for item in _task_items(body):
+            kw = str(item.get("keyword") or "").strip()
+            if not kw:
+                continue
+            out.append(
+                {
+                    "keyword": kw,
+                    "difficulty": _int_or_none(item.get("keyword_difficulty")),
+                    "source": "dataforseo",
+                }
+            )
     return out, errors
 
 
@@ -578,6 +818,7 @@ async def serp_advanced(
         "people_also_ask": [],
         "featured_snippet": None,
         "item_types": [],
+        "ai_overview": False,
         "validated": False,
     }
     if not keyword.strip():
@@ -609,6 +850,7 @@ async def serp_advanced(
                 "people_also_ask": [],
                 "featured_snippet": None,
                 "item_types": ["organic"],
+                "ai_overview": False,
                 "validated": True,
                 "note": "Advanced SERP unavailable — organic titles only; PAA unvalidated.",
             }, errors
@@ -656,8 +898,78 @@ async def serp_advanced(
         "people_also_ask": paa[:8],
         "featured_snippet": snippet,
         "item_types": types,
+        "ai_overview": any("ai_overview" in t for t in types),
         "validated": True,
     }, errors
+
+
+async def ranked_keywords(
+    domain: str,
+    *,
+    location_code: int = DEFAULT_LOCATION,
+    language_code: str = DEFAULT_LANGUAGE,
+    limit: int = 50,
+    min_volume: int | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Organic keywords a domain already ranks for (DataForSEO Labs).
+
+    Replaces the SEMrush ``organic_keywords`` report — this deployment has no
+    SEMrush subscription, so client and competitor ranking data comes from Labs.
+    """
+    errors: list[str] = []
+    target = normalize_target(domain)
+    if not target:
+        return [], errors
+    if not _auth_header():
+        errors.append("dataforseo_unavailable")
+        return [], errors
+
+    body = await _post(
+        "/dataforseo_labs/google/ranked_keywords/live",
+        [
+            {
+                "target": target,
+                "location_code": coerce_labs_location(location_code),
+                "language_code": language_code,
+                "item_types": ["organic"],
+                **_labs_query_fields(
+                    limit=limit,
+                    min_volume=min_volume,
+                    volume_field="keyword_data.keyword_info.search_volume",
+                ),
+            }
+        ],
+    )
+    if body is None:
+        errors.append("dataforseo_ranked_keywords_failed")
+        return [], errors
+
+    out: list[dict[str, Any]] = []
+    for item in _task_items(body):
+        kw_data = item.get("keyword_data") if isinstance(item, dict) else None
+        kw_data = kw_data if isinstance(kw_data, dict) else {}
+        kw = str(kw_data.get("keyword") or item.get("keyword") or "").strip()
+        if not kw:
+            continue
+        info = kw_data.get("keyword_info")
+        info = info if isinstance(info, dict) else {}
+        serp = item.get("ranked_serp_element")
+        serp_item = (serp or {}).get("serp_item") if isinstance(serp, dict) else None
+        serp_item = serp_item if isinstance(serp_item, dict) else {}
+        out.append(
+            {
+                "keyword": kw,
+                "volume": _int_or_none(info.get("search_volume")),
+                "cpc": _float_or_none(info.get("cpc")),
+                "competition": _float_or_none(info.get("competition")),
+                "position": _int_or_none(serp_item.get("rank_absolute")),
+                "traffic": _int_or_none(serp_item.get("etv")),
+                "domain": target,
+                "source": "dataforseo",
+            }
+        )
+    log.info("dataforseo_ranked_keywords_ok", domain=target, count=len(out))
+    return out, errors
 
 
 async def keyword_gap(
@@ -687,7 +999,7 @@ async def keyword_gap(
                 "location_code": coerce_labs_location(location_code),
                 "language_code": language_code,
                 "intersections": True,
-                "limit": min(limit, 100),
+                "limit": max(1, min(int(limit), MAX_LABS_LIMIT)),
                 "item_types": ["organic"],
             }
         ],
@@ -701,7 +1013,7 @@ async def keyword_gap(
                     "target": comps[0],
                     "location_code": coerce_labs_location(location_code),
                     "language_code": language_code,
-                    "limit": min(limit, 100),
+                    "limit": max(1, min(int(limit), MAX_LABS_LIMIT)),
                     "item_types": ["organic"],
                 }
             ],
@@ -815,3 +1127,122 @@ def _float_or_none(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+async def search_intent(
+    keywords: list[str],
+    *,
+    location_code: int = DEFAULT_LOCATION,
+    language_code: str = DEFAULT_LANGUAGE,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Provider-labelled search intent (DataForSEO Labs).
+
+    Returns the label and probability exactly as the provider gives them. When
+    the provider says nothing for a keyword the intent stays None — nothing
+    downstream may guess a label from the keyword string.
+
+    The documented request fields are `keywords` and `tag` only, so a locale
+    rejection falls back to a locale-free retry rather than losing the batch.
+    """
+    errors: list[str] = []
+    cleaned = _dedupe_keywords(keywords)
+    if not cleaned:
+        return [], errors
+    if not _auth_header():
+        errors.append("dataforseo_unavailable")
+        return [], errors
+
+    send_locale = True
+    out: list[dict[str, Any]] = []
+    for batch in _chunks(cleaned, MAX_KEYWORDS_PER_TASK):
+        body: dict[str, Any] | None = None
+        transient_retried = False
+        while True:
+            task: dict[str, Any] = {"keywords": batch}
+            if send_locale:
+                task["location_code"] = coerce_labs_location(location_code)
+                task["language_code"] = language_code
+            body = await _post("/dataforseo_labs/google/search_intent/live", [task])
+            err = _task_error(body)
+            if body is not None and not err:
+                break
+            if send_locale and _is_locale_rejection(err):
+                # Locale fields are undocumented here; drop them and retry once.
+                # Only an explicit field rejection disables them — a transport
+                # failure must not silently re-target later batches at another
+                # market.
+                log.info("dataforseo_intent_locale_rejected", error=str(err)[:120])
+                send_locale = False
+                body = None
+                continue
+            if not transient_retried:
+                # One retry for a transport blip, keeping the locale intact.
+                transient_retried = True
+                body = None
+                continue
+            if err:
+                errors.append(f"dataforseo_intent:{err}")
+            body = None
+            break
+        if body is None:
+            errors.append("dataforseo_intent_failed")
+            continue
+        for item in _task_items(body):
+            kw = str(item.get("keyword") or "").strip()
+            if not kw:
+                continue
+            primary = item.get("keyword_intent")
+            primary = primary if isinstance(primary, dict) else {}
+            secondary = [
+                {
+                    "label": str(s.get("label")),
+                    "probability": _float_or_none(s.get("probability")),
+                }
+                for s in (item.get("secondary_keyword_intents") or [])
+                if isinstance(s, dict) and s.get("label")
+            ]
+            label = primary.get("label")
+            out.append(
+                {
+                    "keyword": kw,
+                    "intent": str(label) if label else None,
+                    "intent_probability": _float_or_none(primary.get("probability")),
+                    "secondary_intents": secondary,
+                    "source": "dataforseo",
+                }
+            )
+    return out, errors
+
+
+async def keywords_for_site(
+    domain: str,
+    *,
+    location_code: int = DEFAULT_LOCATION,
+    language_code: str = DEFAULT_LANGUAGE,
+    limit: int = 100,
+    min_volume: int | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Keywords a site is relevant for (DataForSEO Labs), metrics included."""
+    errors: list[str] = []
+    target = normalize_target(domain)
+    if not target:
+        return [], errors
+    if not _auth_header():
+        errors.append("dataforseo_unavailable")
+        return [], errors
+
+    body = await _post(
+        "/dataforseo_labs/google/keywords_for_site/live",
+        [
+            {
+                "target": target,
+                "location_code": coerce_labs_location(location_code),
+                "language_code": language_code,
+                **_labs_query_fields(limit=limit, min_volume=min_volume),
+            }
+        ],
+    )
+    if body is None:
+        errors.append("dataforseo_keywords_for_site_failed")
+        return [], errors
+    return _keyword_rows(body, endpoint="keywords_for_site"), errors

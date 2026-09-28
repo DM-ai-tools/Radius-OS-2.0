@@ -15,6 +15,41 @@ from app.services.keyword_pipeline import run_keyword_pipeline
 from app.services.topic_naming import specific_cluster_name
 
 _STOP = {"the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with"}
+# Shared agency heads — never enough alone to nest a seed under a service
+# (otherwise "Google Ads" lands under "Meta Ads" via the token "ads").
+_GENERIC_SERVICE_GROUP_TOKENS = frozenset(
+    {
+        "ads",
+        "ad",
+        "advertising",
+        "advert",
+        "ppc",
+        "sem",
+        "cpc",
+        "paid",
+        "search",
+        "social",
+        "media",
+        "marketing",
+        "digital",
+        "online",
+        "agency",
+        "agencies",
+        "service",
+        "services",
+        "management",
+        "company",
+        "campaign",
+        "campaigns",
+    }
+)
+_PLATFORM_TOKEN_ALIASES: dict[str, frozenset[str]] = {
+    "meta": frozenset({"meta", "facebook", "fb", "instagram", "ig"}),
+    "google": frozenset({"google", "adwords", "adword", "gads", "gad", "gadwords", "gadword"}),
+    "linkedin": frozenset({"linkedin"}),
+    "tiktok": frozenset({"tiktok"}),
+    "youtube": frozenset({"youtube"}),
+}
 _LOCATIONS = {
     "near me",
     "usa",
@@ -48,6 +83,30 @@ def _slug(text: str) -> str:
 
 def _tokens(kw: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]+", _norm(kw)) if t not in _STOP and len(t) > 1}
+
+
+def _distinctive_service_tokens(kw: str) -> set[str]:
+    tokens = {t for t in _tokens(kw) if t not in _GENERIC_SERVICE_GROUP_TOKENS}
+    expanded = set(tokens)
+    for tok in tokens:
+        for family in _PLATFORM_TOKEN_ALIASES.values():
+            if tok in family:
+                expanded.update(family)
+    return expanded
+
+
+def _platform_family_key(kw: str) -> str:
+    """Return google/meta/… when the keyword names a paid-media platform."""
+    raw = _tokens(kw)
+    for family, aliases in _PLATFORM_TOKEN_ALIASES.items():
+        if raw & aliases:
+            return family
+    return ""
+
+
+def _norm_service_key(value: str) -> str:
+    """Normalize service labels so slash/punctuation variants still match."""
+    return re.sub(r"[^a-z0-9]+", " ", _norm(value)).strip()
 
 
 def _singularize(word: str) -> str:
@@ -150,37 +209,48 @@ def build_service_seed_clusters(
     def _best_service(cluster: dict[str, Any]) -> tuple[str, str, int]:
         seed = str(cluster.get("seed") or "").strip()
         target = str(cluster.get("target") or seed).strip()
+        seed_key = _norm_service_key(seed)
+        target_key = _norm_service_key(target)
         if str(cluster.get("target_type") or "").lower() == "service":
             explicit = next(
-                (s for s in clean_services if _norm(s) in {_norm(target), _norm(seed)}),
+                (
+                    s
+                    for s in clean_services
+                    if _norm_service_key(s) in {target_key, seed_key}
+                ),
                 None,
             )
             if explicit:
                 return _norm(explicit), "explicit_service_target", 100
 
-        source_tokens = _tokens(f"{seed} {target}")
+        source_tokens = _distinctive_service_tokens(f"{seed} {target}")
+        if not source_tokens:
+            return other_key, "no_service_overlap", 0
         best_key = ""
         best_score = 0
         for service in clean_services:
-            service_tokens = _tokens(service)
+            service_tokens = _distinctive_service_tokens(service)
             if not service_tokens:
                 continue
-            overlap = len(source_tokens & service_tokens)
-            score = overlap * 10
+            overlap = source_tokens & service_tokens
+            if not overlap:
+                continue
+            score = len(overlap) * 10
             if service_tokens.issubset(source_tokens):
                 score += 20
-            elif source_tokens and source_tokens.issubset(service_tokens):
+            elif source_tokens.issubset(service_tokens):
                 score += 10
-            # Expanded keywords can disambiguate a generic page/keyword seed.
+            # Expanded keywords can break ties — only distinctive tokens count.
             for cls in ("exact", "phrase", "related", "broad"):
                 for row in (cluster.get(cls) or [])[:10]:
                     if not isinstance(row, dict):
                         continue
-                    kw_tokens = _tokens(str(row.get("keyword") or ""))
+                    kw_tokens = _distinctive_service_tokens(str(row.get("keyword") or ""))
                     score += min(3, len(kw_tokens & service_tokens))
             if score > best_score:
                 best_key = _norm(service)
                 best_score = score
+        # Require at least one distinctive token match (score 10+).
         if best_key and best_score >= 10:
             return best_key, "service_token_overlap", best_score
         return other_key, "no_service_overlap", 0
@@ -220,6 +290,12 @@ def build_service_seed_clusters(
                         "intent": detect_intent(keyword, row.get("intent")),
                         "source": row.get("source"),
                         "below_volume_floor": bool(row.get("below_volume_floor")),
+                        # Carried so select_topics_from_service_clusters can
+                        # actually honour them — this projection is what it reads.
+                        "relevance_reason": row.get("relevance_reason"),
+                        "relevance_unverified": bool(row.get("relevance_unverified")),
+                        "commercial_target_eligible": row.get("commercial_target_eligible"),
+                        "gap_flag": bool(row.get("gap_flag")),
                     }
                 )
 
@@ -392,6 +468,11 @@ def _cluster_key(row: dict[str, Any], brand_tokens: set[str]) -> tuple[str, str]
         return f"loc:{head}|{loc}", f"{head.title()} - {loc.title()}"
     parent = str(row.get("parent_topic") or "").strip()
     if parent:
+        # Keep cross-platform expansions (google* under a Meta Ads parent_topic)
+        # out of the parent's topical cluster — shared "ads" is not affinity.
+        plat = _platform_family_key(kw)
+        if plat:
+            return f"topic:{_norm(parent)}|plat:{plat}", f"{head.title()}"
         return f"topic:{_norm(parent)}", parent.title()
     # Modifier informs the label later; key stays topical so how-to/listicle
     # variants of the same head can share a page when SERP-overlap is likely.
@@ -451,20 +532,28 @@ def build_clusters_deterministic(
             if key.startswith("topic:") and " (" not in labels[key]:
                 labels[key] = label.split("(")[0].strip() if "(" in label else labels.get(key, label)
 
-    # Merge tiny topical clusters (<3) into nearest topical cluster by head overlap
+    # Merge tiny topical clusters (<3) into nearest topical cluster by
+    # distinctive head overlap. Shared generic heads like "ads" must not merge
+    # Google Ads into Meta Ads.
     small = [k for k, v in groups.items() if len(v) < 3]
     large_keys = [k for k, v in groups.items() if len(v) >= 3]
     for sk in small:
         if sk.startswith("cmp:") or sk.startswith("brand:") or sk.startswith("loc:"):
             continue
-        stoks = _tokens(labels.get(sk, sk))
+        stoks = _distinctive_service_tokens(labels.get(sk, sk))
         best_k = None
         best_score = 0
         candidates = large_keys or [k for k in groups if k != sk and k.startswith("topic:")]
         for lk in candidates:
             if lk == sk:
                 continue
-            score = len(stoks & _tokens(labels.get(lk, lk)))
+            ltoks = _distinctive_service_tokens(labels.get(lk, lk))
+            # Refuse cross-platform merges (google* vs meta*/facebook*).
+            s_plat = {f for f, aliases in _PLATFORM_TOKEN_ALIASES.items() if stoks & aliases}
+            l_plat = {f for f, aliases in _PLATFORM_TOKEN_ALIASES.items() if ltoks & aliases}
+            if s_plat and l_plat and s_plat.isdisjoint(l_plat):
+                continue
+            score = len(stoks & ltoks)
             if score > best_score:
                 best_score = score
                 best_k = lk
@@ -786,11 +875,39 @@ def _attach_cluster_validation(report: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def _cluster_is_unverified(cluster: dict[str, Any]) -> bool:
+    """True when the cluster must not become a page target.
+
+    Choke point between clustering and everything downstream — site
+    architecture, planning, briefs, production, publishing all read the CDP
+    `clusters` list.
+
+    A cluster is unverified when the post-cluster coherence gate rejected it,
+    when the cluster itself is flagged, or when every member keyword is an
+    unverified shell.
+    """
+    if cluster.get("cluster_coherence_ok") is False:
+        return True
+    if cluster.get("cluster_sense_verdict") in ("drop", "review"):
+        return True
+    if cluster.get("relevance_unverified") and cluster.get("cluster_sense_verdict"):
+        return True
+    keywords = [k for k in (cluster.get("keywords") or []) if isinstance(k, dict)]
+    if not keywords:
+        return bool(cluster.get("relevance_unverified"))
+    return all(
+        k.get("relevance_unverified") or k.get("relevance_reason") == "relevance_unverified"
+        for k in keywords
+    )
+
+
 def clusters_for_cdp(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten cluster report into the simpler CDP `clusters` list."""
     out: list[dict[str, Any]] = []
     for c in report.get("clusters") or []:
         if not isinstance(c, dict):
+            continue
+        if _cluster_is_unverified(c):
             continue
         out.append(
             {
@@ -826,6 +943,36 @@ def clusters_for_cdp(report: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+async def _serp_name_and_attach(
+    report: dict[str, Any],
+    cleaned: list[dict[str, Any]],
+    *,
+    location_code: int | None,
+    language_code: str | None,
+) -> dict[str, Any]:
+    """SERP-overlap the head terms, then let Claude name each cluster."""
+    from app.services.keyword_cluster_naming import name_clusters
+    from app.services.keyword_serp_clustering import refine_clusters_with_serp
+
+    clusters = list(report.get("clusters") or [])
+    if len(cleaned) >= 3:
+        clusters, serp_meta = await refine_clusters_with_serp(
+            clusters,
+            cleaned,
+            location_code=location_code,
+            language_code=language_code,
+        )
+        report = {
+            **report,
+            "clusters": clusters,
+            "clusters_created": len(clusters),
+            "serp_clustering": serp_meta,
+        }
+        if not serp_meta.get("skipped"):
+            report["clusters"] = await name_clusters(clusters)
+    return _attach_cluster_validation(report)
+
+
 async def run_keyword_clustering(
     rows: list[dict[str, Any]],
     *,
@@ -835,6 +982,8 @@ async def run_keyword_clustering(
     products: list[str] | None = None,
     use_llm: bool = True,
     relevance_context: Any | None = None,
+    location_code: int | None = None,
+    language_code: str | None = None,
 ) -> dict[str, Any]:
     pipeline_result = run_keyword_pipeline(
         [r for r in rows if isinstance(r, dict) and r.get("keyword")],
@@ -859,12 +1008,16 @@ async def run_keyword_clustering(
     report["keyword_cleaning"] = pipeline_result.get("relevance_audit") or {}
 
     if not use_llm or len(cleaned) < 3:
-        return _attach_cluster_validation(report)
+        return await _serp_name_and_attach(
+            report, cleaned, location_code=location_code, language_code=language_code
+        )
 
     from app.config import get_settings
 
     if not get_settings().keyword_cluster_use_llm:
-        return _attach_cluster_validation(report)
+        return await _serp_name_and_attach(
+            report, cleaned, location_code=location_code, language_code=language_code
+        )
 
     from app.services.keyword_llm_clustering import llm_cluster_keywords
 
@@ -884,11 +1037,27 @@ async def run_keyword_clustering(
     orphans = llm_result.get("orphans") or []
     roadmap = llm_result.get("content_roadmap") or []
 
+    # Head terms get a real SERP check: keywords returning the same pages are
+    # one query however differently they are worded. Priced per keyword, so it
+    # covers the head only and is skipped entirely without a resolved locale.
+    from app.services.keyword_serp_clustering import refine_clusters_with_serp
+
+    clusters, serp_meta = await refine_clusters_with_serp(
+        clusters,
+        cleaned,
+        location_code=location_code,
+        language_code=language_code,
+    )
+    from app.services.keyword_cluster_naming import name_clusters
+
+    clusters = await name_clusters(clusters)
+
     clusters.sort(key=lambda c: c.get("best_score") or 0, reverse=True)
     return _attach_cluster_validation(
         {
             "total_keywords": len(cleaned),
             "clusters_created": len(clusters),
+            "serp_clustering": serp_meta,
             "orphan_count": len(orphans),
             "clusters": clusters,
             "orphans": orphans[:30],
