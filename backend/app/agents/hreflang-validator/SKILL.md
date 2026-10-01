@@ -53,6 +53,12 @@ python scripts/hreflang_check.py annotations.csv --format csv --out ./hreflang
 
 Exit code is 1 when a CRITICAL check fails, so this drops into CI.
 
+## What Phase 7 runs on the sample it already fetched
+
+`run_hreflang_surface_check` flags invalid codes (including `uk` vs `gb`), a missing self-reference, an annotation whose host differs from the page, and a canonical on that same page that points elsewhere.
+
+These stay on `scripts/hreflang_check.py` and are not run by the phase: the return-tag matrix for targets outside the sample, non-200 targets, `x-default`, and cluster integrity.
+
 ## The seven checks, in order of damage
 
 | # | Check | Severity | What breaks |

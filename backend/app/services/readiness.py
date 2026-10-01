@@ -36,16 +36,52 @@ TRACKING_ELEMENTS = [
 ]
 
 
+def _discovery_row_value(row: DiscoveryResponse) -> object:
+    if isinstance(row.field_value, dict):
+        return row.field_value.get("value")
+    return row.field_value
+
+
+def _discovery_row_is_empty(row: DiscoveryResponse) -> bool:
+    raw = _discovery_row_value(row)
+    if isinstance(raw, str):
+        return not raw.strip()
+    return raw in (None, "", [], {})
+
+
+# Higher wins when two rows both carry a real value.
+_DISCOVERY_SOURCE_RANK = {
+    "client_questionnaire": 3,
+    "cdd_upload": 2,
+}
+
+
+def _discovery_row_rank(row: DiscoveryResponse) -> tuple[int, int]:
+    """A row that actually has a value always outranks a blank one.
+
+    A client who leaves a field blank still writes a ``client_questionnaire``
+    row. Ranking by source alone let that blank hide a real value drafted from
+    research or AI gap fill, so the field scored as missing while a usable
+    answer sat in the table.
+    """
+    return (
+        0 if _discovery_row_is_empty(row) else 1,
+        _DISCOVERY_SOURCE_RANK.get(str(row.source or ""), 1),
+    )
+
+
 async def compute_discovery_score(db: AsyncSession, client_id: UUID) -> tuple[Decimal, list[str]]:
     result = await db.execute(
-        select(DiscoveryResponse).where(DiscoveryResponse.client_id == client_id)
+        select(DiscoveryResponse)
+        .where(DiscoveryResponse.client_id == client_id)
+        .order_by(DiscoveryResponse.created_at)
     )
     rows = list(result.scalars().all())
     by_key: dict[str, DiscoveryResponse] = {}
     for r in rows:
-        # Prefer client_questionnaire, then approved
         existing = by_key.get(r.field_key)
-        if existing is None or r.source == "client_questionnaire":
+        # ``>=`` so the most recent row wins an otherwise equal comparison.
+        if existing is None or _discovery_row_rank(r) >= _discovery_row_rank(existing):
             by_key[r.field_key] = r
 
     missing: list[str] = []

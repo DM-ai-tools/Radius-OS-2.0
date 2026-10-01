@@ -1,4 +1,4 @@
-"""Lightweight OpenRouter LLM — post-cleaning relevance check + cluster/intent/funnel."""
+"""Anthropic Claude skill path — post-cleaning relevance check + cluster/intent/funnel."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from app.config import get_settings
-from app.integrations.llm import _openrouter_chat
+from app.integrations.llm import _skill_chat
 from app.logging_config import get_logger
 from app.services.keyword_clustering import (
     _content_type,
@@ -22,7 +22,7 @@ from app.services.keyword_relevance import evaluate_keyword
 
 log = get_logger("keyword_llm_clustering")
 
-DEFAULT_MODEL = "google/gemini-2.5-flash"
+DEFAULT_MODEL = "claude-sonnet-5"
 
 _SYSTEM = """\
 You are an SEO keyword analyst. You receive keywords that already passed rule-based
@@ -179,7 +179,7 @@ async def _call_llm(
         chunk_total=chunk_total,
     )
     try:
-        raw = await _openrouter_chat(
+        raw = await _skill_chat(
             system=_SYSTEM,
             user=user,
             model=model,
@@ -223,11 +223,11 @@ async def llm_cluster_keywords(
     max_concurrent: int = 3,
     model: str | None = None,
 ) -> dict[str, Any]:
-    """Run lightweight OpenRouter model on all cleaned keywords."""
+    """Run Anthropic Claude Sonnet on all cleaned keywords."""
     settings = get_settings()
-    use_model = model or getattr(settings, "keyword_cluster_model", None) or DEFAULT_MODEL
+    use_model = model or settings.skill_model or DEFAULT_MODEL
 
-    if settings.use_mock_llm or not settings.openrouter_api_key:
+    if settings.use_mock_llm or not settings.anthropic_api_key:
         return {
             "dropped": [],
             "clusters": [],

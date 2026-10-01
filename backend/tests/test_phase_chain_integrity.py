@@ -144,15 +144,16 @@ def test_priority_queue_uses_phase5_topics_as_spine_not_best_opportunities():
     assert queue[0]["volume"] == 4400
     assert "cro agency" in queue[0]["secondary_keywords"]
     assert queue[1]["keyword"] == "digital marketing agency australia"
-    # Unrelated high-volume best rows may appear only as fill-ins after the spine.
-    fill_kws = [r["keyword"] for r in queue if not r.get("from_phase5_topic")]
-    assert "meta ads library" in fill_kws
-    assert fill_kws.index("meta ads library") >= 0
-    assert queue.index(next(r for r in queue if r["keyword"] == "meta ads library")) > 1
+    # Keyword buckets supply metrics for the spine. They do not add extra rows.
+    assert [r["keyword"] for r in queue] == [
+        "conversion rate optimisation",
+        "digital marketing agency australia",
+    ]
+    assert "meta ads library" not in [r["keyword"] for r in queue]
 
 
-def test_priority_queue_still_titles_keywords_phase5_never_covered():
-    """Keywords with no Create Topic idea must still get a generated title."""
+def test_priority_queue_does_not_invent_titles_without_phase5_topics():
+    """A keyword bucket with no Create Topic idea does not become a page."""
     queue = build_priority_queue(
         best=[{"keyword": "seo audit", "volume": 300, "opportunity_score": 60}],
         evergreen=[],
@@ -162,9 +163,7 @@ def test_priority_queue_still_titles_keywords_phase5_never_covered():
         domain="example.com",
         topic_plan={"topic_ideas": []},
     )
-    row = next(r for r in queue if r["keyword"] == "seo audit")
-    assert row["title"] and row["title"].lower() != "seo audit"
-    assert row["from_phase5_topic"] is False
+    assert queue == []
 
 
 # --- Phase 9 join: same topic, different URL was dropped from BOTH sides -----------

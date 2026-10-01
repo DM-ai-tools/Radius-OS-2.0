@@ -105,6 +105,21 @@ def _should_skip_validation(output: dict[str, Any], events: list[dict[str, Any]]
     # Bounce/blocked notices without a deliverable card
     if "structured_card" not in types and not output:
         return "no_deliverable"
+
+    # Search Demand service-selection gate is an intentional mid-phase pause.
+    # Validating it as a finished report forces a full Phase 5 re-run and
+    # roughly doubles wall time.
+    if str(output.get("search_demand_status") or "") == "awaiting_service_selection":
+        return "awaiting_service_selection"
+    for ev in events:
+        if ev.get("type") != "structured_card":
+            continue
+        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        card = str(payload.get("card_type") or "")
+        if card == "service_prioritization":
+            return "awaiting_service_selection"
+        if str(payload.get("search_demand_status") or "") == "awaiting_service_selection":
+            return "awaiting_service_selection"
     return None
 
 

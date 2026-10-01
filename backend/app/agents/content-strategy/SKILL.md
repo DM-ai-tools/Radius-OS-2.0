@@ -32,6 +32,17 @@ requirement" and does not create an official "topical authority" score (B2).
 
 ```
 Core Topic (hub / pillar — practitioner term)
+
+**Page order the plan must follow**, inside each pillar, before the next pillar starts:
+
+1. Pillar page
+2. Blogs on that pillar page
+3. Sub-pillar pages
+4. Blogs on those sub-pillar pages
+
+Do not schedule a sub-pillar or its blogs ahead of the pillar page and the blogs that support the pillar.
+
+**Blog pages require a virality check first.** Create a blog only when the topic shows trend potential: rising search, a trend bucket, current-year demand, or enough volume and opportunity to clear the threshold. Declining, stale, avoided, and evidence-free topics do not become blog pages. Pillar and sub-pillar pages are not held for this check.
 ├── Subtopic 1 (cluster / spoke)
 │   ├── Long-tail keyword article
 │   ├── Long-tail keyword article

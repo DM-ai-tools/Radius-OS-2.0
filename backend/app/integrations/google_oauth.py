@@ -1,4 +1,4 @@
-"""Google OAuth helpers for GA4, GSC, GTM, and Google Business Profile."""
+"""Google OAuth helpers for GA4, GSC, and GTM."""
 
 from __future__ import annotations
 
@@ -14,12 +14,10 @@ from app.config import get_settings
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-# Least-privilege scopes per product; GBP requires business.manage.
 PROVIDER_SCOPES: dict[str, list[str]] = {
     "ga4": ["https://www.googleapis.com/auth/analytics.readonly"],
     "search_console": ["https://www.googleapis.com/auth/webmasters.readonly"],
     "gtm": ["https://www.googleapis.com/auth/tagmanager.readonly"],
-    "google_business": ["https://www.googleapis.com/auth/business.manage"],
 }
 
 OAUTH_PROVIDERS = tuple(PROVIDER_SCOPES.keys())
@@ -28,7 +26,6 @@ PROVIDER_LABELS = {
     "ga4": "Google Analytics 4",
     "search_console": "Google Search Console",
     "gtm": "Google Tag Manager",
-    "google_business": "Google Business Profile",
 }
 
 
@@ -97,6 +94,33 @@ def expires_at_from(token_payload: dict[str, Any]) -> datetime | None:
         return datetime.now(timezone.utc) + timedelta(seconds=int(expires_in))
     except (TypeError, ValueError):
         return None
+
+
+def credential_grant_status(
+    expires_at: datetime | None,
+    token_blob: str | None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """active, refreshable, or expired.
+
+    A past expiry is not access. A refresh token means the grant can be
+    renewed; without one the specialist must reconnect.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if expires_at is None:
+        return "active"
+    exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+    if exp > moment:
+        return "active"
+    refresh = ""
+    try:
+        payload = json.loads(token_blob or "")
+        if isinstance(payload, dict):
+            refresh = str(payload.get("refresh_token") or "")
+    except json.JSONDecodeError:
+        refresh = ""
+    return "refreshable" if refresh else "expired"
 
 
 def frontend_redirect_base() -> str:

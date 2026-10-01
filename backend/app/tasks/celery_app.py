@@ -17,6 +17,13 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    # Ack only after the task finishes. If the worker dies mid-crawl, the
+    # broker redelivers it instead of dropping a job the chat still shows as running.
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    task_track_started=True,
+    worker_prefetch_multiplier=1,
+    broker_transport_options={"visibility_timeout": 7200},
     beat_schedule={
         "recheck-unverified-tracking": {
             "task": "app.tasks.jobs.recheck_unverified_tracking",

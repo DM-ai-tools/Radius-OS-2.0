@@ -1,6 +1,5 @@
 """Waterfall predecessor gates for phases 1–8."""
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4

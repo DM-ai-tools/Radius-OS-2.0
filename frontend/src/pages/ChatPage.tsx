@@ -420,36 +420,180 @@ function hydrateProductionDraftFromProfile(history: UiMessage[], profile?: Profi
   const pack = profile?.content_production_summary;
   if (!pack || typeof pack !== "object" || Array.isArray(pack)) return history;
   const drafts = (pack as Record<string, unknown>).drafts;
-  if (!Array.isArray(drafts) || !drafts.length) return history;
-  const first = drafts[0] as Record<string, unknown>;
-  const md = String(first?.markdown || "");
-  if (md.length < 200) return history;
+  const profileBriefs = (pack as Record<string, unknown>).briefs;
+  const hasDrafts = Array.isArray(drafts) && drafts.length > 0;
+  const hasBriefs = Array.isArray(profileBriefs) && profileBriefs.length > 0;
+  if (!hasDrafts && !hasBriefs) return history;
+
+  const first = hasDrafts ? (drafts[0] as Record<string, unknown>) : null;
+  const md = first ? String(first.markdown || "") : "";
 
   return history.map((m) => {
     if (String(m.card?.card_type) !== "content_production_report" || !m.card) return m;
-    const existing = Array.isArray(m.card.drafts) ? m.card.drafts : [];
-    const existingMd =
-      existing.length && typeof existing[0] === "object"
-        ? String((existing[0] as Record<string, unknown>).markdown || "")
-        : String(m.card.draft_markdown || "");
-    if (existingMd.length >= md.length) return m;
+    let next = { ...m.card };
+
+    if (hasBriefs) {
+      // Always prefer CDP briefs — cards can be same length but missing
+      // secondary_keywords / meta after a later backfill.
+      next = {
+        ...next,
+        briefs: profileBriefs,
+        brief_count: profileBriefs.length,
+        writer_ready_count:
+          (pack as Record<string, unknown>).writer_ready_count || m.card.writer_ready_count,
+      };
+    }
+
+    if (hasDrafts && md.length >= 200) {
+      const existing = Array.isArray(m.card.drafts) ? m.card.drafts : [];
+      const existingMd =
+        existing.length && typeof existing[0] === "object"
+          ? String((existing[0] as Record<string, unknown>).markdown || "")
+          : String(m.card.draft_markdown || "");
+      if (existingMd.length < md.length && first) {
+        next = {
+          ...next,
+          drafts,
+          draft_markdown: md,
+          draft_title: first.title || first.keyword || m.card.draft_title,
+          draft_images: first.images || m.card.draft_images,
+          draft_count: drafts.length,
+          awaiting_topic_selection: false,
+          topic_choices: (pack as Record<string, unknown>).topic_choices || m.card.topic_choices,
+          queued_for_next_write:
+            (pack as Record<string, unknown>).queued_for_next_write || m.card.queued_for_next_write,
+          selected_keyword: (pack as Record<string, unknown>).selected_keyword,
+          selected_url: (pack as Record<string, unknown>).selected_url,
+          note: (pack as Record<string, unknown>).note || m.card.note,
+        };
+      }
+    }
+
+    if (next === m.card) return m;
+    return {
+      ...m,
+      card: {
+        ...next,
+        hydrated_from_cdp: true,
+      },
+    };
+  });
+}
+
+/** Expand the draft picker from the full Phase 9 roadmap when the saved card is still capped. */
+function hydrateProductionTopicChoicesFromProfile(
+  history: UiMessage[],
+  profile?: Profile,
+): UiMessage[] {
+  const planning = profile?.content_planning_summary;
+  const production = profile?.content_production_summary;
+  if (!planning || typeof planning !== "object" || Array.isArray(planning)) return history;
+
+  const pagesRaw = (planning as Record<string, unknown>).pages;
+  const roadmapRaw = (planning as Record<string, unknown>).roadmap;
+  const pages = (
+    Array.isArray(pagesRaw) && pagesRaw.length
+      ? pagesRaw
+      : Array.isArray(roadmapRaw)
+        ? roadmapRaw
+        : []
+  ).filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object"));
+
+  const briefable = pages.filter((row) => {
+    const action = String(row.action || "").toLowerCase();
+    return action === "create" || action === "refresh";
+  });
+  if (briefable.length <= 8) return history;
+
+  const briefRows = Array.isArray((production as Record<string, unknown> | undefined)?.briefs)
+    ? ((production as Record<string, unknown>).briefs as Array<Record<string, unknown>>)
+    : [];
+  const readyByUrl = new Map<string, Record<string, unknown>>();
+  const readyByKw = new Map<string, Record<string, unknown>>();
+  for (const brief of briefRows) {
+    if (!brief?.writer_ready) continue;
+    const url = String(brief.url || brief.path || "")
+      .replace(/^https?:\/\/[^/]+/i, "")
+      .replace(/\/$/, "")
+      .toLowerCase();
+    const kw = String(brief.keyword || brief.title || "")
+      .trim()
+      .toLowerCase();
+    if (url) readyByUrl.set(url, brief);
+    if (kw) readyByKw.set(kw, brief);
+  }
+
+  const expanded = briefable.map((row, i) => {
+    const url = String(row.url_n || row.url || row.path || "");
+    const urlKey = url.replace(/^https?:\/\/[^/]+/i, "").replace(/\/$/, "").toLowerCase();
+    const kw = String(row.keyword || row.primary_keyword || row.title || "topic");
+    const kwKey = kw.trim().toLowerCase();
+    const brief = (urlKey && readyByUrl.get(urlKey)) || (kwKey && readyByKw.get(kwKey)) || null;
+    const keyword = String(brief?.keyword || kw);
+    const finalUrl = String(brief?.url || url);
+    return {
+      rank: i + 1,
+      keyword,
+      title: String(brief?.title || row.title || keyword),
+      url: finalUrl,
+      action: brief?.action || row.action,
+      work_label: brief?.work_label || row.work_label,
+      from_selected_service: brief?.from_selected_service || row.from_selected_service,
+      funnel: brief?.funnel || row.funnel,
+      intent: brief?.search_intent || brief?.intent || row.intent,
+      writer_ready: Boolean(brief?.writer_ready),
+      page_type: brief?.page_type || row.page_type || row.content_type,
+      content_type: brief?.content_type || row.content_type || row.page_type,
+      primary_keyword: brief?.primary_keyword || brief?.keyword || row.primary_keyword || keyword,
+      secondary_keywords:
+        (Array.isArray(brief?.secondary_keywords) && brief.secondary_keywords.length
+          ? brief.secondary_keywords
+          : null) ||
+        (Array.isArray(brief?.supporting_keywords) && brief.supporting_keywords.length
+          ? brief.supporting_keywords
+          : null) ||
+        row.supporting_keywords ||
+        row.secondary_keywords ||
+        [],
+      meta_description: brief?.meta_description,
+      content_goal: brief?.content_goal,
+      differentiation: brief?.differentiation,
+      outline: brief?.outline,
+      who_how_why: brief?.who_how_why,
+      prompt: finalUrl
+        ? `Write the full draft for: ${keyword} (${finalUrl})`
+        : `Write the full draft for: ${keyword}`,
+    };
+  });
+
+  return history.map((m) => {
+    if (String(m.card?.card_type) !== "content_production_report" || !m.card) return m;
+    const current = Array.isArray(m.card.topic_choices) ? m.card.topic_choices : [];
+    const awaiting =
+      Boolean(m.card.awaiting_topic_selection) ||
+      (!Array.isArray(m.card.drafts) || !(m.card.drafts as unknown[]).length);
+    const needsExpand = current.length < expanded.length;
+    const needsEnrich =
+      current.length > 0 &&
+      current.every(
+        (row) =>
+          !row ||
+          typeof row !== "object" ||
+          !(row as Record<string, unknown>).page_type,
+      );
+    if (!needsExpand && !needsEnrich) return m;
+    if (!awaiting && current.length > 0 && !needsEnrich) return m;
     return {
       ...m,
       card: {
         ...m.card,
-        drafts,
-        draft_markdown: md,
-        draft_title: first.title || first.keyword || m.card.draft_title,
-        draft_images: first.images || m.card.draft_images,
-        draft_count: drafts.length,
-        awaiting_topic_selection: false,
-        topic_choices: (pack as Record<string, unknown>).topic_choices || m.card.topic_choices,
-        queued_for_next_write:
-          (pack as Record<string, unknown>).queued_for_next_write || m.card.queued_for_next_write,
-        selected_keyword: (pack as Record<string, unknown>).selected_keyword,
-        selected_url: (pack as Record<string, unknown>).selected_url,
-        note: (pack as Record<string, unknown>).note || m.card.note,
-        hydrated_from_cdp: true,
+        topic_choices: needsExpand || needsEnrich ? expanded : current,
+        writer_ready_count: expanded.filter((row) => row.writer_ready).length || m.card.writer_ready_count,
+        awaiting_topic_selection: awaiting || Boolean(m.card.awaiting_topic_selection),
+        note:
+          m.card.note ||
+          "Use the dropdown to pick one page, then draft it. One page per run.",
+        hydrated_topic_choices: true,
       },
     };
   });
@@ -955,8 +1099,11 @@ export default function ChatPage() {
             setClient(c);
             setStatuses(mapPhaseStatuses(c.profile as unknown as Record<string, unknown>));
             setMessages((prev) =>
-              hydrateProductionDraftFromProfile(
-                hydrateStrategyQueueFromProfile(prev, c.profile),
+              hydrateProductionTopicChoicesFromProfile(
+                hydrateProductionDraftFromProfile(
+                  hydrateStrategyQueueFromProfile(prev, c.profile),
+                  c.profile
+                ),
                 c.profile
               )
             );
@@ -1031,9 +1178,12 @@ export default function ChatPage() {
           const firstWithHistory = loaded.find((r) => r.mapped.length);
           if (firstWithHistory) {
             sid = firstWithHistory.id;
-            history = hydrateProductionDraftFromProfile(
-              hydrateStrategyQueueFromProfile(
-                hydrateValidationReports(firstWithHistory.mapped, c.profile),
+            history = hydrateProductionTopicChoicesFromProfile(
+              hydrateProductionDraftFromProfile(
+                hydrateStrategyQueueFromProfile(
+                  hydrateValidationReports(firstWithHistory.mapped, c.profile),
+                  c.profile
+                ),
                 c.profile
               ),
               c.profile

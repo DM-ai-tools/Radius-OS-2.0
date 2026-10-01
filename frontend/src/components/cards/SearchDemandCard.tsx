@@ -1,10 +1,25 @@
-import WorkbookTable from "./WorkbookTable";
+import { useMemo, useState } from "react";
 
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
 };
+
+type ManualCompetitorKeyword = { keyword: string; competitor: string };
+
+type KeywordFocus = {
+  focused: (keyword: string) => boolean;
+  onToggle: (keyword: string) => void;
+  disabled?: boolean;
+};
+
+function normKw(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
 
 function kwRows(raw: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(raw)) return [];
@@ -14,7 +29,7 @@ function kwRows(raw: unknown): Array<Record<string, unknown>> {
 }
 
 function fmtVol(v: unknown): string {
-  if (v == null || v === "") return "—";
+  if (v == null || v === "" || v === "N/A") return v === "N/A" ? "N/A" : "—";
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
   return n.toLocaleString();
@@ -25,7 +40,12 @@ function fmtNum(v: unknown): string {
   return String(v);
 }
 
-/** TOFU/MOFU/BOFU tag next to a keyword — awareness / consideration / decision. */
+function fmtCpc(v: unknown): string {
+  if (v == null || v === "") return "—";
+  const n = Number(v);
+  return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
+}
+
 function FunnelBadge({ stage }: { stage: unknown }) {
   const s = String(stage || "")
     .trim()
@@ -34,17 +54,258 @@ function FunnelBadge({ stage }: { stage: unknown }) {
   return <span className={`funnel-badge ${cls}`}>{s || "—"}</span>;
 }
 
-function serpTitles(
-  row: Record<string, unknown>,
-): Array<Record<string, unknown>> {
-  return kwRows(row.serp_titles);
+function buildAnalysisIndex(
+  workbookRows: Array<Record<string, unknown>>,
+  dataset: Array<Record<string, unknown>>,
+): Map<string, Record<string, unknown>> {
+  const index = new Map<string, Record<string, unknown>>();
+  for (const row of dataset) {
+    const key = normKw(row.keyword);
+    if (key) index.set(key, row);
+  }
+  // Workbook wins for the analysis fields when both exist.
+  for (const row of workbookRows) {
+    const key = normKw(row.keyword);
+    if (!key) continue;
+    index.set(key, { ...(index.get(key) || {}), ...row });
+  }
+  return index;
 }
 
-/** Service → Seed 1, Seed 2 … → keywords; subservices nested with competitor gaps. */
+function enrichKeyword(
+  row: Record<string, unknown>,
+  analysis: Map<string, Record<string, unknown>>,
+): Record<string, unknown> {
+  const key = normKw(row.keyword);
+  const extra = key ? analysis.get(key) : undefined;
+  const merged: Record<string, unknown> = extra
+    ? {
+        ...row,
+        ...extra,
+        // Seed-specific fields must not be overwritten by the flat workbook.
+        match_class: row.match_class ?? extra.match_class,
+        gap_flag: row.gap_flag ?? extra.gap_flag,
+        competitor_domains: row.competitor_domains ?? extra.competitor_domains,
+        keyword: row.keyword || extra.keyword,
+        search_volume_mo:
+          extra.search_volume_mo ?? row.volume ?? row.search_volume_mo,
+        funnel_stage: extra.funnel_stage ?? row.funnel ?? row.funnel_stage,
+        competition: extra.competition ?? row.difficulty ?? row.competition,
+      }
+    : {
+        ...row,
+        search_volume_mo: row.volume ?? row.search_volume_mo,
+        funnel_stage: row.funnel ?? row.funnel_stage,
+        competition: row.difficulty ?? row.competition,
+        parent_category: row.parent_topic || row.target || row.seed || row.parent_category,
+        category_dimension: row.target_type || row.category_dimension,
+      };
+
+  // Seed target_type ("service") is the expansion root — not the page type.
+  // Blog destinations must stay labelled blog even on a service seed.
+  const targetUrl = String(merged.target_url || row.recommended_url || "");
+  const path = targetUrl.toLowerCase();
+  if (
+    ["/blog/", "/blogs/", "/guides/", "/guide/", "/articles/", "/insights/", "/news/"].some(
+      (m) => path.includes(m),
+    )
+  ) {
+    merged.category_dimension = "blog";
+  }
+  return merged;
+}
+
+function HighlightList({
+  title,
+  rows,
+  showRationale,
+}: {
+  title: string;
+  rows: Array<Record<string, unknown>>;
+  showRationale?: boolean;
+}) {
+  if (!rows.length) return null;
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <h4 style={{ margin: "0 0 4px", fontSize: 13 }}>{title}</h4>
+      <ul className="missing-list" style={{ margin: 0 }}>
+        {rows.map((r, i) => (
+          <li key={`${String(r.keyword)}-${i}`}>
+            <strong>{String(r.keyword || "—")}</strong>
+            {r.volume != null ? ` · vol ${fmtVol(r.volume)}` : ""}
+            {r.opportunity_score != null ? ` · ${r.opportunity_score}%` : ""}
+            {showRationale && r.rationale ? ` — ${String(r.rationale)}` : ""}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SeedKeywordBlock({
+  seed,
+  analysis,
+  keywordFocus,
+}: {
+  seed: Record<string, unknown>;
+  analysis: Map<string, Record<string, unknown>>;
+  keywordFocus: KeywordFocus;
+}) {
+  const keywords = kwRows(seed.keywords).map((k) => enrichKeyword(k, analysis));
+  const counts =
+    seed.class_counts && typeof seed.class_counts === "object"
+      ? (seed.class_counts as Record<string, number>)
+      : {};
+  const missing = Array.isArray(seed.classes_missing)
+    ? (seed.classes_missing as string[])
+    : [];
+
+  return (
+    <details style={{ marginTop: 8 }}>
+      <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 700 }}>
+        {String(seed.seed_label || "Seed")}: {String(seed.seed || "—")}{" "}
+        <span style={{ fontWeight: 500, color: "var(--muted)" }}>
+          ({Number(seed.keyword_count ?? keywords.length)} keywords)
+        </span>
+        <span
+          style={{
+            display: "block",
+            marginTop: 3,
+            marginLeft: 16,
+            fontSize: 11,
+            fontWeight: 500,
+            color: "var(--muted)",
+          }}
+        >
+          Exact {Number(counts.exact ?? 0)} · Phrase {Number(counts.phrase ?? 0)} · Related{" "}
+          {Number(counts.related ?? 0)} · Broad {Number(counts.broad ?? 0)}
+          {missing.length ? ` · no results for: ${missing.join(", ")}` : ""}
+        </span>
+      </summary>
+      <div style={{ overflowX: "auto", paddingBottom: 8 }}>
+        <table
+          className="kw-report-table"
+          style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}
+        >
+          <thead>
+            <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+              <th style={{ padding: "3px 6px" }}>Focus</th>
+              <th style={{ padding: "3px 6px" }}>Class</th>
+              <th style={{ padding: "3px 6px" }}>Keyword</th>
+              <th style={{ padding: "3px 6px" }}>Volume</th>
+              <th style={{ padding: "3px 6px" }}>Basis</th>
+              <th style={{ padding: "3px 6px" }}>CPC</th>
+              <th style={{ padding: "3px 6px" }}>Competition</th>
+              <th style={{ padding: "3px 6px" }}>Category</th>
+              <th style={{ padding: "3px 6px" }}>Parent</th>
+              <th style={{ padding: "3px 6px" }}>Target URL</th>
+              <th style={{ padding: "3px 6px" }}>Status</th>
+              <th style={{ padding: "3px 6px" }}>Funnel</th>
+              <th style={{ padding: "3px 6px" }}>Secondary keywords</th>
+              <th style={{ padding: "3px 6px" }}>Cluster vol</th>
+              <th style={{ padding: "3px 6px" }}>Priority</th>
+              <th style={{ padding: "3px 6px" }}>Intent</th>
+              <th style={{ padding: "3px 6px" }}>Gap</th>
+            </tr>
+          </thead>
+          <tbody>
+            {keywords.map((k, kj) => {
+              const keyword = String(k.keyword || "");
+              const focused = !keyword || keywordFocus.focused(keyword);
+              return (
+                <tr
+                  key={`${keyword}-${kj}`}
+                  style={{
+                    borderBottom: "1px solid var(--line)",
+                    opacity: focused ? 1 : 0.45,
+                  }}
+                >
+                  <td style={{ padding: "3px 6px" }}>
+                    {keyword ? (
+                      <input
+                        type="checkbox"
+                        checked={focused}
+                        disabled={keywordFocus.disabled}
+                        aria-label={`Focus ${keyword}`}
+                        onChange={() => keywordFocus.onToggle(keyword)}
+                      />
+                    ) : null}
+                  </td>
+                  <td style={{ padding: "3px 6px", textTransform: "capitalize" }}>
+                    {String(k.match_class || "—")}
+                  </td>
+                  <td style={{ padding: "3px 6px", fontWeight: 600 }}>
+                    {keyword || "—"}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>
+                    {fmtVol(k.search_volume_mo ?? k.volume)}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>
+                    {String(k.volume_basis || "—")}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>{fmtCpc(k.cpc)}</td>
+                  <td style={{ padding: "3px 6px" }}>
+                    {fmtNum(k.competition ?? k.difficulty)}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>
+                    {String(k.category_dimension || "—")}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>
+                    {String(k.parent_category || "—")}
+                  </td>
+                  <td style={{ padding: "3px 6px", maxWidth: 160 }}>
+                    {String(k.target_url || "—")}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>{String(k.status || "—")}</td>
+                  <td style={{ padding: "3px 6px" }}>
+                    <FunnelBadge stage={k.funnel_stage ?? k.funnel} />
+                  </td>
+                  <td style={{ padding: "3px 6px", maxWidth: 180 }}>
+                    {String(k.secondary_keywords || "—")}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>
+                    {fmtVol(k.combined_cluster_volume)}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>{String(k.priority || "—")}</td>
+                  <td style={{ padding: "3px 6px", textTransform: "capitalize" }}>
+                    {String(k.intent || "—")}
+                  </td>
+                  <td style={{ padding: "3px 6px" }}>
+                    {k.gap_flag ? (
+                      <span
+                        title={String(
+                          (k.competitor_domains as string[] | undefined)?.join(", ") || "",
+                        )}
+                      >
+                        gap
+                      </span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {keywords.length === 0 ? (
+          <p style={{ fontSize: 11, color: "var(--muted)" }}>
+            No keywords above the volume threshold were returned for this seed.
+          </p>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
 function ServiceSeedGroups({
   services,
+  analysis,
+  keywordFocus,
 }: {
   services: Array<Record<string, unknown>>;
+  analysis: Map<string, Record<string, unknown>>;
+  keywordFocus: KeywordFocus;
 }) {
   return (
     <>
@@ -87,10 +348,8 @@ function ServiceSeedGroups({
               {String(service.service || "Other website topics")}{" "}
               <span style={{ fontWeight: 500, color: "var(--muted)" }}>
                 ({Number(service.seed_count ?? seeds.length)} seeds
-                {subservices.length
-                  ? ` · ${subservices.length} subservices`
-                  : ""}{" "}
-                · {Number(service.keyword_count ?? 0)} keywords
+                {subservices.length ? ` · ${subservices.length} subservices` : ""} ·{" "}
+                {Number(service.keyword_count ?? 0)} keywords
                 {service.total_volume != null
                   ? ` · vol ${fmtVol(service.total_volume)}`
                   : ""}
@@ -107,11 +366,8 @@ function ServiceSeedGroups({
                   }}
                 >
                   Strongest competitor in{" "}
-                  {String(service.competitor_category || "category").replace(
-                    /_/g,
-                    " ",
-                  )}
-                  : {String(categoryLeader.competitor)}
+                  {String(service.competitor_category || "category").replace(/_/g, " ")}:{" "}
+                  {String(categoryLeader.competitor)}
                 </span>
               ) : null}
             </summary>
@@ -180,9 +436,7 @@ function ServiceSeedGroups({
                           Competitors ranking:{" "}
                           {leaders
                             .slice(0, 3)
-                            .map((l) =>
-                              String(l.name || l.domain || "—"),
-                            )
+                            .map((l) => String(l.name || l.domain || "—"))
                             .join(", ")}
                         </span>
                       ) : null}
@@ -191,6 +445,8 @@ function ServiceSeedGroups({
                       <SeedKeywordBlock
                         key={`${String(sub.subservice)}-${String(seed.seed)}-${sj}`}
                         seed={seed}
+                        analysis={analysis}
+                        keywordFocus={keywordFocus}
                       />
                     ))}
                   </details>
@@ -200,6 +456,8 @@ function ServiceSeedGroups({
                 <SeedKeywordBlock
                   key={`${String(seed.seed)}-${sj}`}
                   seed={seed}
+                  analysis={analysis}
+                  keywordFocus={keywordFocus}
                 />
               ))}
             </div>
@@ -210,119 +468,54 @@ function ServiceSeedGroups({
   );
 }
 
-function SeedKeywordBlock({ seed }: { seed: Record<string, unknown> }) {
-  const keywords = kwRows(seed.keywords);
-  const counts =
-    seed.class_counts && typeof seed.class_counts === "object"
-      ? (seed.class_counts as Record<string, number>)
-      : {};
-  const missing = Array.isArray(seed.classes_missing)
-    ? (seed.classes_missing as string[])
-    : [];
+function FlatSeedClusters({
+  seeds,
+  analysis,
+  keywordFocus,
+}: {
+  seeds: Array<Record<string, unknown>>;
+  analysis: Map<string, Record<string, unknown>>;
+  keywordFocus: KeywordFocus;
+}) {
   return (
-    <details style={{ marginTop: 8 }}>
-      <summary
-        style={{
-          cursor: "pointer",
-          fontSize: 12,
-          fontWeight: 700,
-        }}
-      >
-        {String(seed.seed_label || "Seed")}: {String(seed.seed || "—")}{" "}
-        <span style={{ fontWeight: 500, color: "var(--muted)" }}>
-          ({Number(seed.keyword_count ?? keywords.length)} keywords)
-        </span>
-        <span
-          style={{
-            display: "block",
-            marginTop: 3,
-            marginLeft: 16,
-            fontSize: 11,
-            fontWeight: 500,
-            color: "var(--muted)",
-          }}
-        >
-          Exact {Number(counts.exact ?? 0)} · Phrase {Number(counts.phrase ?? 0)}{" "}
-          · Related {Number(counts.related ?? 0)} · Broad{" "}
-          {Number(counts.broad ?? 0)}
-          {missing.length ? ` · no results for: ${missing.join(", ")}` : ""}
-        </span>
-      </summary>
-      <div style={{ overflowX: "auto", paddingBottom: 8 }}>
-        <table
-          className="kw-report-table"
-          style={{
-            width: "100%",
-            fontSize: 11,
-            borderCollapse: "collapse",
-          }}
-        >
-          <thead>
-            <tr
-              style={{
-                textAlign: "left",
-                borderBottom: "1px solid var(--line)",
-              }}
-            >
-              <th style={{ padding: "3px 6px" }}>Class</th>
-              <th style={{ padding: "3px 6px" }}>Keyword</th>
-              <th style={{ padding: "3px 6px" }}>Intent</th>
-              <th style={{ padding: "3px 6px" }}>Funnel</th>
-              <th style={{ padding: "3px 6px" }}>Volume</th>
-              <th style={{ padding: "3px 6px" }}>KD</th>
-              <th style={{ padding: "3px 6px" }}>Gap</th>
-            </tr>
-          </thead>
-          <tbody>
-            {keywords.map((k, kj) => (
-              <tr
-                key={`${String(k.keyword)}-${kj}`}
-                style={{ borderBottom: "1px solid var(--line)" }}
-              >
-                <td
-                  style={{
-                    padding: "3px 6px",
-                    textTransform: "capitalize",
-                  }}
-                >
-                  {String(k.match_class || "—")}
-                </td>
-                <td style={{ padding: "3px 6px", fontWeight: 600 }}>
-                  {String(k.keyword || "—")}
-                </td>
-                <td
-                  style={{
-                    padding: "3px 6px",
-                    textTransform: "capitalize",
-                  }}
-                >
-                  {String(k.intent || "—")}
-                </td>
-                <td style={{ padding: "3px 6px" }}>
-                  <FunnelBadge stage={k.funnel} />
-                </td>
-                <td style={{ padding: "3px 6px" }}>{fmtVol(k.volume)}</td>
-                <td style={{ padding: "3px 6px" }}>{fmtNum(k.difficulty)}</td>
-                <td style={{ padding: "3px 6px" }}>
-                  {k.gap_flag ? (
-                    <span title={String((k.competitor_domains as string[])?.join(", ") || "")}>
-                      gap
-                    </span>
-                  ) : (
-                    "—"
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {keywords.length === 0 ? (
-          <p style={{ fontSize: 11, color: "var(--muted)" }}>
-            No keywords above the volume threshold were returned for this seed.
-          </p>
-        ) : null}
-      </div>
-    </details>
+    <>
+      {seeds.map((cluster, i) => {
+        const exact = kwRows(cluster.exact).map((r) => ({
+          ...enrichKeyword(r, analysis),
+          match_class: "exact",
+        }));
+        const phrase = kwRows(cluster.phrase).map((r) => ({
+          ...enrichKeyword(r, analysis),
+          match_class: "phrase",
+        }));
+        const related = kwRows(cluster.related).map((r) => ({
+          ...enrichKeyword(r, analysis),
+          match_class: "related",
+        }));
+        const broad = kwRows(cluster.broad).map((r) => ({
+          ...enrichKeyword(r, analysis),
+          match_class: "broad",
+        }));
+        const merged = [...exact, ...phrase, ...related, ...broad];
+        return (
+          <SeedKeywordBlock
+            key={`${String(cluster.seed)}-${i}`}
+            seed={{
+              ...cluster,
+              keywords: merged.length ? merged : kwRows(cluster.keywords),
+              class_counts: {
+                exact: exact.length,
+                phrase: phrase.length,
+                related: related.length,
+                broad: broad.length,
+              },
+            }}
+            analysis={analysis}
+            keywordFocus={keywordFocus}
+          />
+        );
+      })}
+    </>
   );
 }
 
@@ -336,8 +529,7 @@ function SubserviceCompetitorMatrix({
     <div style={{ marginBottom: 16 }}>
       <h4 style={{ marginBottom: 6 }}>Subservices vs competitors</h4>
       <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
-        Each sub-service page mapped to keyword gaps and which competitors rank
-        for those terms.
+        Gap counts and who ranks for those terms.
       </p>
       <div style={{ overflowX: "auto" }}>
         <table
@@ -345,9 +537,7 @@ function SubserviceCompetitorMatrix({
           style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
         >
           <thead>
-            <tr
-              style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}
-            >
+            <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
               <th style={{ padding: "6px 8px" }}>Service</th>
               <th style={{ padding: "6px 8px" }}>Subservice</th>
               <th style={{ padding: "6px 8px" }}>Keywords</th>
@@ -374,12 +564,8 @@ function SubserviceCompetitorMatrix({
                   <td style={{ padding: "6px 8px", fontWeight: 600 }}>
                     {String(row.subservice || "—")}
                   </td>
-                  <td style={{ padding: "6px 8px" }}>
-                    {fmtNum(row.keyword_count)}
-                  </td>
-                  <td style={{ padding: "6px 8px" }}>
-                    {fmtNum(row.gap_keyword_count)}
-                  </td>
+                  <td style={{ padding: "6px 8px" }}>{fmtNum(row.keyword_count)}</td>
+                  <td style={{ padding: "6px 8px" }}>{fmtNum(row.gap_keyword_count)}</td>
                   <td style={{ padding: "6px 8px" }}>
                     {leaders.length
                       ? leaders
@@ -403,178 +589,124 @@ function SubserviceCompetitorMatrix({
   );
 }
 
-function KeywordDetailTable({
-  rows,
-  empty,
+function ClusterSection({
+  clusterReport,
+  reportClusters,
+  orphans,
+  roadmap,
+  keywordFocus,
 }: {
-  rows: Array<Record<string, unknown>>;
-  empty: string;
+  clusterReport: Record<string, unknown>;
+  reportClusters: Array<Record<string, unknown>>;
+  orphans: Array<Record<string, unknown>>;
+  roadmap: Array<Record<string, unknown>>;
+  keywordFocus: KeywordFocus;
 }) {
-  if (!rows.length) {
-    return <p style={{ fontSize: 13, color: "var(--muted)" }}>{empty}</p>;
-  }
   return (
-    <div style={{ overflowX: "auto", marginBottom: 14 }}>
-      <table
-        className="kw-report-table"
-        style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
-      >
-        <thead>
-          <tr
-            style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}
+    <section style={{ marginTop: 8, marginBottom: 16 }}>
+      <h4 style={{ marginBottom: 6 }}>Keyword clusters</h4>
+      <p style={{ fontSize: 13, marginTop: 0 }}>
+        Total: {String(clusterReport.total_keywords ?? "—")} · Clusters:{" "}
+        {String(clusterReport.clusters_created ?? reportClusters.length)} · Orphans:{" "}
+        {String(clusterReport.orphan_count ?? orphans.length)}
+      </p>
+      {reportClusters.map((c, i) => {
+        const kws = kwRows(c.keywords);
+        return (
+          <details
+            key={`${String(c.name || c.primary_keyword)}-${i}`}
+            open={i === 0}
+            style={{ marginBottom: 8, fontSize: 13 }}
           >
-            <th style={{ padding: "6px 8px" }}>Keyword</th>
-            <th style={{ padding: "6px 8px" }}>Volume</th>
-            <th style={{ padding: "6px 8px" }}>KD</th>
-            <th style={{ padding: "6px 8px" }}>CPC</th>
-            <th style={{ padding: "6px 8px" }}>Score</th>
-            <th style={{ padding: "6px 8px" }}>Intent</th>
-            <th style={{ padding: "6px 8px" }}>Funnel</th>
-            <th style={{ padding: "6px 8px" }}>Competitors</th>
-            <th style={{ padding: "6px 8px", minWidth: 220 }}>
-              Competitor ranking titles
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, i) => {
-            const titles = serpTitles(r);
-            const comps = Array.isArray(r.competitor_domains)
-              ? (r.competitor_domains as string[])
-              : [];
-            const positions = kwRows(r.competitor_positions);
-            return (
-              <tr
-                key={`${String(r.keyword)}-${i}`}
-                style={{ borderBottom: "1px solid var(--line)" }}
-              >
-                <td
-                  style={{
-                    padding: "8px",
-                    verticalAlign: "top",
-                    fontWeight: 600,
-                  }}
-                >
-                  {String(r.keyword || "—")}
-                  {r.gap_flag ? (
-                    <div
-                      style={{
-                        fontSize: 10,
-                        color: "var(--amber, #b45309)",
-                        fontWeight: 500,
-                      }}
-                    >
-                      Gap opportunity
-                    </div>
-                  ) : null}
-                  {r.client_position != null ? (
-                    <div
-                      style={{
-                        fontSize: 10,
-                        color: "var(--muted)",
-                        fontWeight: 400,
-                      }}
-                    >
-                      Your pos: {String(r.client_position)}
-                    </div>
-                  ) : null}
-                </td>
-                <td
-                  style={{
-                    padding: "8px",
-                    verticalAlign: "top",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {fmtVol(r.volume)}
-                  {r.volume_ahrefs != null || r.volume_dataforseo != null ? (
-                    <div style={{ fontSize: 10, color: "var(--muted)" }}>
-                      {r.volume_ahrefs != null
-                        ? `A ${fmtVol(r.volume_ahrefs)}`
-                        : ""}
-                      {r.volume_ahrefs != null && r.volume_dataforseo != null
-                        ? " · "
-                        : ""}
-                      {r.volume_dataforseo != null
-                        ? `D ${fmtVol(r.volume_dataforseo)}`
-                        : ""}
-                    </div>
-                  ) : null}
-                </td>
-                <td style={{ padding: "8px", verticalAlign: "top" }}>
-                  {fmtNum(r.difficulty)}
-                </td>
-                <td style={{ padding: "8px", verticalAlign: "top" }}>
-                  {r.cpc != null ? `$${Number(r.cpc).toFixed(2)}` : "—"}
-                </td>
-                <td style={{ padding: "8px", verticalAlign: "top" }}>
-                  {r.opportunity_score != null
-                    ? `${r.opportunity_score}%`
-                    : "—"}
-                </td>
-                <td style={{ padding: "8px", verticalAlign: "top" }}>
-                  {String(r.intent || "—")}
-                </td>
-                <td style={{ padding: "8px", verticalAlign: "top" }}>
-                  <FunnelBadge stage={r.funnel} />
-                </td>
-                <td
-                  style={{ padding: "8px", verticalAlign: "top", fontSize: 11 }}
-                >
-                  {positions.length
-                    ? positions
-                        .slice(0, 4)
-                        .map(
-                          (p) => `${String(p.domain)} (#${String(p.position)})`,
-                        )
-                        .join(", ")
-                    : comps.slice(0, 3).join(", ") || "—"}
-                </td>
-                <td style={{ padding: "8px", verticalAlign: "top" }}>
-                  {titles.length ? (
-                    <ul
-                      style={{
-                        margin: 0,
-                        paddingLeft: 16,
-                        fontSize: 11,
-                        lineHeight: 1.35,
-                      }}
-                    >
-                      {titles.slice(0, 4).map((t, ti) => (
-                        <li
-                          key={`${String(t.title)}-${ti}`}
-                          style={{ marginBottom: 4 }}
-                        >
-                          <span style={{ fontWeight: 600 }}>
-                            {String(t.title)}
-                          </span>
-                          <span style={{ color: "var(--muted)" }}>
-                            {" "}
-                            — {String(t.domain || "—")}
-                            {t.position != null
-                              ? ` · #${String(t.position)}`
-                              : ""}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <span style={{ color: "var(--muted)" }}>—</span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+            <summary style={{ cursor: "pointer" }}>
+              <strong>{String(c.name || c.primary_keyword || `Cluster ${i + 1}`)}</strong>
+              <span style={{ color: "var(--muted)", fontWeight: 500 }}>
+                {" "}
+                · {kws.length} keywords
+                {c.est_traffic != null || c.total_volume != null
+                  ? ` · vol ${fmtVol(c.est_traffic ?? c.total_volume)}`
+                  : ""}
+              </span>
+            </summary>
+            <div style={{ color: "var(--muted)", marginTop: 4, fontSize: 12 }}>
+              Intent: {String(c.intent || "—")} ·{" "}
+              {String(c.recommended_content || c.content_type || "—")} ·{" "}
+              {String(c.recommended_url || "—")}
+            </div>
+            <ul className="missing-list" style={{ marginTop: 6 }}>
+              {kws.map((k) => {
+                const keyword = String(k.keyword || "");
+                const focused = keywordFocus.focused(keyword);
+                return (
+                  <li key={keyword} style={{ opacity: focused ? 1 : 0.45 }}>
+                    <label style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={focused}
+                        disabled={keywordFocus.disabled || !keyword}
+                        aria-label={`Focus ${keyword || "keyword"}`}
+                        onChange={() => keywordFocus.onToggle(keyword)}
+                      />
+                      <span>
+                        {keyword || "—"}
+                        {k.volume != null ? ` · vol ${fmtVol(k.volume)}` : ""}
+                        {k.role ? ` · ${String(k.role)}` : ""}
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </details>
+        );
+      })}
+      {roadmap.length ? (
+        <>
+          <h4 style={{ marginBottom: 6, marginTop: 12 }}>Content roadmap</h4>
+          <ol style={{ fontSize: 13, marginTop: 0, paddingLeft: 20 }}>
+            {roadmap.slice(0, 8).map((r, i) => (
+              <li key={`${String(r.cluster)}-${i}`}>
+                {String(r.cluster)} — {String(r.content_type || "")}
+                {r.target_keyword ? ` · ${String(r.target_keyword)}` : ""}
+                {r.est_traffic != null ? ` · est. ${fmtVol(r.est_traffic)}` : ""}
+              </li>
+            ))}
+          </ol>
+        </>
+      ) : null}
+      {orphans.length ? (
+        <div style={{ marginTop: 8 }}>
+          <h4 style={{ marginBottom: 6 }}>Orphan keywords</h4>
+          <ul className="missing-list">
+            {orphans.map((o) => {
+              const keyword = String(o.keyword || "");
+              const focused = keywordFocus.focused(keyword);
+              return (
+                <li key={keyword} style={{ opacity: focused ? 1 : 0.45 }}>
+                  <label style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={focused}
+                      disabled={keywordFocus.disabled || !keyword}
+                      aria-label={`Focus ${keyword || "keyword"}`}
+                      onChange={() => keywordFocus.onToggle(keyword)}
+                    />
+                    <span>
+                      {keyword || "—"}
+                      {o.volume != null ? ` · vol ${fmtVol(o.volume)}` : ""}
+                    </span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
 export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
-  const bestTable = kwRows(payload.keyword_table);
-  const topics = kwRows(payload.topics);
-  const clusters = kwRows(payload.clusters);
   const competitorDomains = Array.isArray(payload.competitor_domains)
     ? (payload.competitor_domains as string[])
     : [];
@@ -587,17 +719,16 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
   const subserviceMatrix = kwRows(payload.subservice_competitor_matrix);
   const orphans = kwRows(clusterReport?.orphans);
   const roadmap = kwRows(clusterReport?.content_roadmap);
-  const plan =
+  const topicPlan =
     payload.topic_plan && typeof payload.topic_plan === "object"
       ? (payload.topic_plan as Record<string, unknown>)
       : null;
-  const topicIdeas = kwRows(plan?.topic_ideas);
   const funnelBal =
-    (plan?.funnel_balance && typeof plan.funnel_balance === "object"
-      ? (plan.funnel_balance as Record<string, unknown>)
-      : null) ||
     (payload.funnel_balance && typeof payload.funnel_balance === "object"
       ? (payload.funnel_balance as Record<string, unknown>)
+      : null) ||
+    (topicPlan?.funnel_balance && typeof topicPlan.funnel_balance === "object"
+      ? (topicPlan.funnel_balance as Record<string, unknown>)
       : null);
   const funnelCounts =
     funnelBal?.counts && typeof funnelBal.counts === "object"
@@ -617,48 +748,45 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
   const intentWarnings = Array.isArray(intentBal?.warnings)
     ? (intentBal!.warnings as string[])
     : [];
-  const clusterMap =
-    plan?.cluster_map && typeof plan.cluster_map === "object"
-      ? (plan.cluster_map as Record<string, unknown>)
-      : null;
-  const publishing = kwRows(plan?.publishing_order);
-  const linking = kwRows(plan?.internal_linking);
   const providers = Array.isArray(payload.providers_used)
     ? (payload.providers_used as string[]).join(", ")
     : "—";
   const seedClusters = kwRows(payload.seed_clusters);
   const keywordDataset = kwRows(payload.keyword_dataset);
-  const seededKeywords = keywordDataset.length ? keywordDataset : bestTable;
-  const evergreenBase = kwRows(payload.strong_evergreen);
-  const trendsBase = kwRows(payload.trend_plays);
-  const avoidBase = kwRows(payload.avoid);
-  const evergreen = evergreenBase.length
-    ? evergreenBase
-    : seededKeywords
-        .filter((r) => {
+  const workbookRows = kwRows(payload.search_demand_analysis);
+  const analysis = useMemo(
+    () => buildAnalysisIndex(workbookRows, keywordDataset),
+    [workbookRows, keywordDataset],
+  );
+
+  const evergreen = (
+    kwRows(payload.strong_evergreen).length
+      ? kwRows(payload.strong_evergreen)
+      : keywordDataset.filter((r) => {
           const bucket = String(r.bucket || "").toLowerCase();
           const evergreenClass = String(r.evergreen_class || "").toLowerCase();
           return bucket === "evergreen" || evergreenClass === "evergreen";
         })
-        .slice(0, 12);
-  const trends = trendsBase.length
-    ? trendsBase
-    : seededKeywords
-        .filter((r) => {
+  ).slice(0, 8);
+  const trends = (
+    kwRows(payload.trend_plays).length
+      ? kwRows(payload.trend_plays)
+      : keywordDataset.filter((r) => {
           const bucket = String(r.bucket || "").toLowerCase();
           const trend = String(r.trend || "").toLowerCase();
           return bucket === "trend" || trend === "rising";
         })
-        .slice(0, 12);
-  const avoid = avoidBase.length
-    ? avoidBase
-    : seededKeywords
-        .filter((r) => {
+  ).slice(0, 6);
+  const avoid = (
+    kwRows(payload.avoid).length
+      ? kwRows(payload.avoid)
+      : keywordDataset.filter((r) => {
           const bucket = String(r.bucket || "").toLowerCase();
           const priority = String(r.priority || r.priority_tier || "").toLowerCase();
           return bucket === "avoid" || priority === "avoid";
         })
-        .slice(0, 12);
+  ).slice(0, 6);
+
   const seedingMeta =
     payload.keyword_seeding && typeof payload.keyword_seeding === "object"
       ? (payload.keyword_seeding as Record<string, unknown>)
@@ -681,54 +809,145 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
       ? (cleaning.removed_by_reason as Record<string, number>)
       : null;
   const cleaningSample = kwRows(cleaning?.sample);
-  const workbookRows = kwRows(payload.search_demand_analysis);
-  const workbook =
-    payload.workbook && typeof payload.workbook === "object"
-      ? (payload.workbook as Record<string, unknown>)
+  const dataQuality =
+    payload.keyword_data_quality && typeof payload.keyword_data_quality === "object"
+      ? (payload.keyword_data_quality as {
+          has_estimated_volumes?: boolean;
+          estimated_count?: number;
+          total?: number;
+          warning?: string | null;
+        })
       : null;
-  const workbookColumns = Array.isArray(workbook?.columns)
-    ? (workbook!.columns as string[])
-    : [
-        "keyword",
-        "search_volume_mo",
-        "cpc",
-        "competition",
-        "category_dimension",
-        "parent_category",
-        "target_url",
-        "status",
-        "funnel_stage",
-        "secondary_keywords",
-        "combined_cluster_volume",
-        "priority",
-      ];
+
+  const [deselected, setDeselected] = useState<Set<string>>(() => {
+    const initial = new Set<string>();
+    for (const item of kwRows(payload.deselected_keywords)) {
+      const key = normKw(item.keyword || item);
+      if (key) initial.add(key);
+    }
+    if (Array.isArray(payload.deselected_keywords)) {
+      for (const item of payload.deselected_keywords) {
+        const key = normKw(typeof item === "string" ? item : "");
+        if (key) initial.add(key);
+      }
+    }
+    return initial;
+  });
+  const [manualKeywords, setManualKeywords] = useState<ManualCompetitorKeyword[]>(() =>
+    kwRows(payload.manual_competitor_keywords)
+      .map((row) => ({
+        keyword: String(row.keyword || "").trim(),
+        competitor: String(row.competitor || "").trim(),
+      }))
+      .filter((row) => row.keyword),
+  );
+  const [manualKeyword, setManualKeyword] = useState("");
+  const [manualCompetitor, setManualCompetitor] = useState("");
+
+  function toggleFocus(keyword: string) {
+    const key = normKw(keyword);
+    if (!key) return;
+    setDeselected((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function addManualCompetitorKeyword() {
+    const keyword = manualKeyword.trim();
+    const competitor = manualCompetitor.trim();
+    if (!keyword) return;
+    const key = normKw(keyword);
+    setManualKeywords((rows) => {
+      if (rows.some((row) => normKw(row.keyword) === key)) return rows;
+      return [...rows, { keyword, competitor }];
+    });
+    setDeselected((current) => {
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+    setManualKeyword("");
+    setManualCompetitor("");
+  }
+
+  const keywordFocus: KeywordFocus = {
+    focused: (keyword) => !deselected.has(normKw(keyword)),
+    onToggle: toggleFocus,
+    disabled: !canAct,
+  };
+
+  const focusEdits = {
+    deselected_keywords: [...deselected],
+    manual_competitor_keywords: manualKeywords,
+  };
 
   return (
     <div className="structured-card structured-card--report">
       <h3 className="card-title">{String(payload.title || "Search Demand")}</h3>
       <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
         Providers: {providers} · Keywords:{" "}
-        {String(payload.keyword_count ?? "—")} · Country:{" "}
+        {String(payload.keyword_count ?? keywordDataset.length ?? "—")} · Country:{" "}
         {String(payload.country || "us")}
         {competitorDomains.length
           ? ` · Competitors: ${competitorDomains.slice(0, 5).join(", ")}`
           : ""}
       </p>
+      {dataQuality?.has_estimated_volumes ? (
+        <div
+          role="status"
+          style={{
+            margin: "10px 0 6px",
+            padding: "10px 12px",
+            borderRadius: 6,
+            border: "1px solid var(--warning, #d29922)",
+            background: "color-mix(in srgb, var(--warning, #d29922) 12%, transparent)",
+            fontSize: 13,
+            lineHeight: 1.5,
+          }}
+        >
+          <strong>Estimated search volumes.</strong>{" "}
+          {dataQuality.warning ||
+            `${dataQuality.estimated_count ?? 0} of ${dataQuality.total ?? 0} keywords carry estimated volume.`}
+        </div>
+      ) : null}
       {payload.note ? (
         <p style={{ fontSize: 13, marginTop: 4 }}>{String(payload.note)}</p>
       ) : null}
 
-      <WorkbookTable
-        title="Search Demand Analysis (workbook)"
-        columns={workbookColumns}
-        rows={workbookRows}
-        maxRows={25}
-      />
+      {(funnelCounts || intentCounts) && (
+        <div style={{ fontSize: 12, margin: "8px 0" }}>
+          {funnelCounts ? (
+            <p style={{ margin: "0 0 4px" }}>
+              Funnel: TOFU {funnelCounts.TOFU ?? 0} · MOFU {funnelCounts.MOFU ?? 0} · BOFU{" "}
+              {funnelCounts.BOFU ?? 0}
+              {funnelBal?.balanced ? " · balanced" : ""}
+            </p>
+          ) : null}
+          {intentCounts ? (
+            <p style={{ margin: 0 }}>
+              Intent: informational {intentCounts.informational ?? 0} · navigational{" "}
+              {intentCounts.navigational ?? 0} · commercial {intentCounts.commercial ?? 0} ·
+              transactional {intentCounts.transactional ?? 0}
+              {intentBal?.balanced ? " · balanced" : ""}
+            </p>
+          ) : null}
+        </div>
+      )}
+      {funnelWarnings.length || intentWarnings.length ? (
+        <ul className="missing-list">
+          {[...funnelWarnings, ...intentWarnings].slice(0, 4).map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+        </ul>
+      ) : null}
 
       {cleaning && cleaning.input_count != null ? (
         <details style={{ margin: "8px 0 12px", fontSize: 12 }}>
           <summary style={{ cursor: "pointer", fontWeight: 600 }}>
-            Cleaned to CDD / services / pages: kept {String(cleaning.kept_count ?? "—")} of{" "}
+            Cleaning: kept {String(cleaning.kept_count ?? "—")} of{" "}
             {String(cleaning.input_count)} · removed {String(cleaning.removed_count ?? 0)}
           </summary>
           {cleaningReasons ? (
@@ -744,47 +963,16 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
                 <li key={`${String(row.keyword)}-${i}`}>
                   <strong>{String(row.keyword || "—")}</strong>
                   {row.reason ? ` · ${String(row.reason).replace(/_/g, " ")}` : ""}
-                  {row.match_class ? ` · ${String(row.match_class)}` : ""}
-                  {row.seed ? ` · seed ${String(row.seed)}` : ""}
                 </li>
               ))}
             </ul>
           ) : null}
         </details>
       ) : null}
-      {funnelCounts ? (
-        <p style={{ fontSize: 12, marginTop: 6 }}>
-          Funnel balance: TOFU {funnelCounts.TOFU ?? 0} · MOFU{" "}
-          {funnelCounts.MOFU ?? 0} · BOFU {funnelCounts.BOFU ?? 0}
-          {funnelBal?.balanced ? " · balanced" : ""}
-        </p>
-      ) : null}
-      {funnelWarnings.length ? (
-        <ul className="missing-list">
-          {funnelWarnings.slice(0, 3).map((w) => (
-            <li key={w}>{w}</li>
-          ))}
-        </ul>
-      ) : null}
-      {intentCounts ? (
-        <p style={{ fontSize: 12, marginTop: 6 }}>
-          Intent balance: informational {intentCounts.informational ?? 0} · navigational{" "}
-          {intentCounts.navigational ?? 0} · commercial {intentCounts.commercial ?? 0} · transactional{" "}
-          {intentCounts.transactional ?? 0}
-          {intentBal?.balanced ? " · balanced" : ""}
-        </p>
-      ) : null}
-      {intentWarnings.length ? (
-        <ul className="missing-list">
-          {intentWarnings.slice(0, 3).map((w) => (
-            <li key={w}>{w}</li>
-          ))}
-        </ul>
-      ) : null}
 
       <SubserviceCompetitorMatrix rows={subserviceMatrix} />
 
-      {seedClusters.length > 0 ? (
+      {seedClusters.length > 0 || serviceClusters.length > 0 ? (
         <>
           <h4 style={{ marginBottom: 6 }}>
             Multi-mode keyword seeding
@@ -815,626 +1003,124 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
             </p>
           ) : null}
           <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
-            {serviceClusters.length
-              ? "Seeds are grouped under their service. Open a service, then a seed, to view its complete keyword set."
-              : "Select a seed to view its complete keyword set."}
+            Open a service → seed to see every keyword with Search Demand Analysis
+            fields (volume, CPC, competition, category, URL, status, funnel,
+            secondaries, priority). Uncheck Focus to drop a term.
           </p>
           {serviceClusters.length ? (
-            <ServiceSeedGroups services={serviceClusters} />
+            <ServiceSeedGroups
+              services={serviceClusters}
+              analysis={analysis}
+              keywordFocus={keywordFocus}
+            />
           ) : (
-            seedClusters.map((cluster, i) => {
-              const exact = kwRows(cluster.exact);
-              const phrase = kwRows(cluster.phrase);
-              const related = kwRows(cluster.related);
-              const broad = kwRows(cluster.broad);
-              return (
-                <details
-                  key={`${String(cluster.seed)}-${i}`}
-                  style={{
-                    marginBottom: 8,
-                    border: "1px solid var(--line)",
-                    borderRadius: 8,
-                    overflow: "hidden",
-                  }}
-                >
-                  <summary
-                    style={{
-                      cursor: "pointer",
-                      padding: "10px 12px",
-                      fontSize: 13,
-                      fontWeight: 700,
-                      background: "var(--surface, transparent)",
-                    }}
-                  >
-                    {cluster.target_type ? (
-                      <span
-                        style={{
-                          fontSize: 10,
-                          fontWeight: 600,
-                          textTransform: "uppercase",
-                          color: "var(--muted)",
-                          marginRight: 6,
-                        }}
-                      >
-                        {String(cluster.target_type)}
-                      </span>
-                    ) : null}
-                    Seed: {String(cluster.seed || "—")}{" "}
-                    {cluster.target && cluster.target !== cluster.seed ? (
-                      <span style={{ fontWeight: 500, color: "var(--muted)" }}>
-                        → {String(cluster.target)}
-                      </span>
-                    ) : null}{" "}
-                    <span style={{ fontWeight: 500, color: "var(--muted)" }}>
-                      ({Number(cluster.keyword_count ?? 0)} keywords)
-                    </span>
-                    <span
-                      style={{
-                        display: "block",
-                        marginTop: 4,
-                        marginLeft: 18,
-                        fontSize: 11,
-                        fontWeight: 500,
-                        color: "var(--muted)",
-                      }}
-                    >
-                      Exact {exact.length} · Phrase {phrase.length} · Related{" "}
-                      {related.length} · Broad {broad.length}
-                      {Array.isArray(cluster.classes_missing) &&
-                      cluster.classes_missing.length
-                        ? ` · no results for: ${(cluster.classes_missing as string[]).join(", ")}`
-                        : ""}
-                    </span>
-                  </summary>
-                  <div style={{ overflowX: "auto", padding: "0 12px 10px" }}>
-                    <table
-                      className="kw-report-table"
-                      style={{
-                        width: "100%",
-                        fontSize: 12,
-                        borderCollapse: "collapse",
-                      }}
-                    >
-                      <thead>
-                        <tr
-                          style={{
-                            textAlign: "left",
-                            borderBottom: "1px solid var(--line)",
-                          }}
-                        >
-                          <th style={{ padding: "4px 6px" }}>Class</th>
-                          <th style={{ padding: "4px 6px" }}>Keyword</th>
-                          <th style={{ padding: "4px 6px" }}>Intent</th>
-                          <th style={{ padding: "4px 6px" }}>Funnel</th>
-                          <th style={{ padding: "4px 6px" }}>Volume</th>
-                          <th style={{ padding: "4px 6px" }}>KD</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(
-                          [
-                            ["exact", exact],
-                            ["phrase", phrase],
-                            ["related", related],
-                            ["broad", broad],
-                          ] as const
-                        ).flatMap(([cls, rows]) =>
-                          rows.map((r, j) => (
-                            <tr
-                              key={`${cls}-${String(r.keyword)}-${j}`}
-                              style={{ borderBottom: "1px solid var(--line)" }}
-                            >
-                              <td
-                                style={{
-                                  padding: "6px 8px",
-                                  textTransform: "capitalize",
-                                }}
-                              >
-                                {cls}
-                              </td>
-                              <td
-                                style={{ padding: "6px 8px", fontWeight: 600 }}
-                              >
-                                {String(r.keyword || "—")}
-                              </td>
-                              <td
-                                style={{
-                                  padding: "6px 8px",
-                                  textTransform: "capitalize",
-                                }}
-                              >
-                                {String(r.intent || "—")}
-                              </td>
-                              <td style={{ padding: "6px 8px" }}>
-                                <FunnelBadge stage={r.funnel} />
-                              </td>
-                              <td style={{ padding: "6px 8px" }}>
-                                {fmtVol(r.volume)}
-                              </td>
-                              <td style={{ padding: "6px 8px" }}>
-                                {fmtNum(r.difficulty)}
-                              </td>
-                            </tr>
-                          )),
-                        )}
-                      </tbody>
-                    </table>
-                    {exact.length +
-                      phrase.length +
-                      related.length +
-                      broad.length ===
-                    0 ? (
-                      <p style={{ fontSize: 12, color: "var(--muted)" }}>
-                        No keywords above the volume threshold were returned for
-                        this seed.
-                      </p>
-                    ) : null}
-                  </div>
-                </details>
-              );
-            })
+            <FlatSeedClusters
+              seeds={seedClusters}
+              analysis={analysis}
+              keywordFocus={keywordFocus}
+            />
           )}
         </>
-      ) : null}
+      ) : (
+        <p style={{ fontSize: 13, color: "var(--muted)" }}>
+          No multi-mode seed clusters in this report yet.
+        </p>
+      )}
 
-      {plan ? (
-        <>
-          <h4 style={{ marginBottom: 6 }}>
-            Topic Plan: {String(plan.seed || "Seed")}
-            {plan.audience && typeof plan.audience === "string"
-              ? ` · Audience: ${plan.audience}`
-              : plan.audience && typeof plan.audience === "object"
-                ? (() => {
-                    const aud = plan.audience as Record<string, unknown>;
-                    const primary =
-                      aud.primary && typeof aud.primary === "object"
-                        ? (aud.primary as Record<string, unknown>)
-                        : aud;
-                    const titles = Array.isArray(primary.job_titles)
-                      ? (primary.job_titles as unknown[])
-                          .slice(0, 3)
-                          .map((t) => String(t))
-                          .join(", ")
-                      : "";
-                    const age = primary.age_range
-                      ? `ages ${String(primary.age_range)}`
-                      : "";
-                    const label = [titles, age].filter(Boolean).join(" · ");
-                    return label ? ` · Audience: ${label}` : "";
-                  })()
-                : ""}
-          </h4>
-          {plan.created_after_sitemap_classification || plan.selection_mode === "new_clusters_vs_sitemap" ? (
-            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
-              Topics drafted for new clusters after sitemap classification
-              {plan.sitemap_classification &&
-              typeof plan.sitemap_classification === "object"
-                ? ` · ${(plan.sitemap_classification as Record<string, unknown>).existing_topic_count ?? 0} existing / ${(plan.sitemap_classification as Record<string, unknown>).new_topic_count ?? 0} new`
-                : ""}
-              {Array.isArray(plan.assigned_services) && plan.assigned_services.length
-                ? ` · Services: ${(plan.assigned_services as unknown[])
-                    .slice(0, 8)
-                    .map((s) => String(s))
-                    .join(", ")}`
-                : ""}
-              .
-            </p>
-          ) : plan.selection_mode || plan.selection_version ? (
-            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
-              Selection: {String(plan.selection_mode || "seeded")} ·{" "}
-              {String(plan.selection_version || "")}
-              {Array.isArray(plan.assigned_services) &&
-              plan.assigned_services.length
-                ? ` · Services: ${(plan.assigned_services as unknown[])
-                    .slice(0, 8)
-                    .map((s) => String(s))
-                    .join(", ")}`
-                : ""}
-            </p>
-          ) : (
-            <p style={{ fontSize: 12, color: "var(--danger, #b42318)", marginTop: 0 }}>
-              This Topic Plan is from an older run. Re-run Search Demand to rebuild
-              topics from sitemap-classified clusters.
-            </p>
-          )}
-          {Array.isArray(plan.existing_on_site) && plan.existing_on_site.length ? (
-            <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0, marginBottom: 8 }}>
-              Already on site (optimize/review, not re-drafted):{" "}
-              {(plan.existing_on_site as Array<Record<string, unknown>>)
-                .slice(0, 6)
-                .map((e) => String(e.primary_keyword || e.cluster || ""))
-                .filter(Boolean)
-                .join(", ")}
-              {(plan.existing_on_site as unknown[]).length > 6 ? "…" : ""}
-            </p>
-          ) : null}
-          <div style={{ overflowX: "auto", marginBottom: 12 }}>
-            <table
-              style={{
-                width: "100%",
-                fontSize: 12,
-                borderCollapse: "collapse",
-              }}
-            >
-              <thead>
-                <tr
-                  style={{
-                    textAlign: "left",
-                    borderBottom: "1px solid var(--line)",
-                  }}
-                >
-                  <th style={{ padding: "4px 6px" }}>#</th>
-                  <th style={{ padding: "4px 6px" }}>Suggested title</th>
-                  <th style={{ padding: "4px 6px" }}>Primary keyword</th>
-                  <th style={{ padding: "4px 6px", minWidth: 180 }}>
-                    Secondary keywords
-                  </th>
-                  <th style={{ padding: "4px 6px" }}>Type</th>
-                  <th style={{ padding: "4px 6px" }}>Traffic</th>
-                  <th style={{ padding: "4px 6px" }}>Volume</th>
-                  <th style={{ padding: "4px 6px" }}>KD</th>
-                  <th style={{ padding: "4px 6px" }}>Intent</th>
-                  <th style={{ padding: "4px 6px" }}>Funnel</th>
-                  <th style={{ padding: "4px 6px", minWidth: 180 }}>
-                    Competitor titles
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {topicIdeas.slice(0, 12).map((t, i) => {
-                  const titles = serpTitles(t);
-                  return (
-                    <tr
-                      key={`${String(t.title)}-${i}`}
-                      style={{ borderBottom: "1px solid var(--line)" }}
-                    >
-                      <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                        {i + 1}
-                      </td>
-                      <td
-                        style={{
-                          padding: "6px 8px",
-                          verticalAlign: "top",
-                          fontWeight: 600,
-                        }}
-                      >
-                        {String(t.title || "")}
-                      </td>
-                      <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                        {String(t.primary_keyword || t.keyword || "")}
-                      </td>
-                      <td
-                        style={{
-                          padding: "6px 8px",
-                          verticalAlign: "top",
-                          fontSize: 11,
-                        }}
-                      >
-                        {Array.isArray(t.secondary_keywords) &&
-                        t.secondary_keywords.length
-                          ? (t.secondary_keywords as unknown[])
-                              .slice(0, 4)
-                              .map((x) => String(x))
-                              .join(" · ")
-                          : Array.isArray(t.supporting_keywords) &&
-                              t.supporting_keywords.length
-                            ? (t.supporting_keywords as unknown[])
-                                .slice(0, 4)
-                                .map((x) => String(x))
-                                .join(" · ")
-                            : "—"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "6px 8px",
-                          verticalAlign: "top",
-                          textTransform: "capitalize",
-                        }}
-                      >
-                        {String(t.match_class || "—")}
-                      </td>
-                      <td
-                        style={{
-                          padding: "6px 8px",
-                          verticalAlign: "top",
-                          textTransform: "capitalize",
-                        }}
-                      >
-                        {String(t.traffic || "—")}
-                      </td>
-                      <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                        {fmtVol(t.volume)}
-                      </td>
-                      <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                        {fmtNum(t.difficulty)}
-                      </td>
-                      <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                        {String(t.intent || "")}
-                      </td>
-                      <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
-                        {String(t.funnel || "")}
-                      </td>
-                      <td
-                        style={{
-                          padding: "6px 8px",
-                          verticalAlign: "top",
-                          fontSize: 11,
-                        }}
-                      >
-                        {titles.length
-                          ? titles
-                              .slice(0, 2)
-                              .map((x) => String(x.title))
-                              .join(" · ")
-                          : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+      {(evergreen.length || trends.length || avoid.length) && (
+        <section style={{ margin: "16px 0 12px" }}>
+          <h4 style={{ marginBottom: 6 }}>Priority highlights</h4>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+              gap: 12,
+            }}
+          >
+            <HighlightList title="Evergreen" rows={evergreen} />
+            <HighlightList title="Trend plays" rows={trends} />
+            <HighlightList title="Avoid" rows={avoid} showRationale />
           </div>
-
-          {topicIdeas[0] ? (
-            <details style={{ marginBottom: 12, fontSize: 13 }}>
-              <summary style={{ cursor: "pointer", fontWeight: 600 }}>
-                Topic details (first idea)
-              </summary>
-              <ul className="missing-list" style={{ marginTop: 8 }}>
-                <li>
-                  <strong>{String(topicIdeas[0].title)}</strong>
-                </li>
-                <li>
-                  Primary keyword: {String(topicIdeas[0].primary_keyword || topicIdeas[0].keyword || "—")} · Volume:{" "}
-                  {fmtVol(topicIdeas[0].volume)} · KD:{" "}
-                  {fmtNum(topicIdeas[0].difficulty)}
-                </li>
-                {(Array.isArray(topicIdeas[0].secondary_keywords) &&
-                  topicIdeas[0].secondary_keywords.length) ||
-                (Array.isArray(topicIdeas[0].supporting_keywords) &&
-                  topicIdeas[0].supporting_keywords.length) ? (
-                  <li>
-                    Secondary keywords:{" "}
-                    {(
-                      (Array.isArray(topicIdeas[0].secondary_keywords)
-                        ? (topicIdeas[0].secondary_keywords as unknown[])
-                        : Array.isArray(topicIdeas[0].supporting_keywords)
-                          ? (topicIdeas[0].supporting_keywords as unknown[])
-                          : [])
-                    )
-                      .slice(0, 6)
-                      .map((x) => String(x))
-                      .join(" · ")}
-                  </li>
-                ) : null}
-                <li>Why: {String(topicIdeas[0].why || "—")}</li>
-                <li>Angle: {String(topicIdeas[0].angle || "—")}</li>
-                {Array.isArray(topicIdeas[0].key_sections) ? (
-                  <li>
-                    Sections:{" "}
-                    {(topicIdeas[0].key_sections as string[])
-                      .slice(0, 5)
-                      .join(" · ")}
-                  </li>
-                ) : null}
-                {serpTitles(topicIdeas[0]).length ? (
-                  <li>
-                    Competitor titles:{" "}
-                    {serpTitles(topicIdeas[0])
-                      .slice(0, 3)
-                      .map(
-                        (t) =>
-                          `${String(t.title)} (${String(t.domain || "?")})`,
-                      )
-                      .join(" · ")}
-                  </li>
-                ) : null}
-              </ul>
-            </details>
-          ) : null}
-
-          {clusterMap?.pillar ? (
-            <p style={{ fontSize: 13, margin: "0 0 8px" }}>
-              <strong>Pillar:</strong> {String(clusterMap.pillar)}
-              {Array.isArray(clusterMap.supporting) &&
-              clusterMap.supporting.length
-                ? ` · ${clusterMap.supporting.length} supporting`
-                : ""}
-            </p>
-          ) : null}
-
-          {publishing.length ? (
-            <>
-              <h4 style={{ marginBottom: 6 }}>Publishing order</h4>
-              <ol style={{ fontSize: 13, marginTop: 0, paddingLeft: 20 }}>
-                {publishing.slice(0, 6).map((p, i) => (
-                  <li key={`${String(p.title)}-${i}`}>
-                    {String(p.title)}
-                    {p.reason ? ` — ${String(p.reason)}` : ""}
-                  </li>
-                ))}
-              </ol>
-            </>
-          ) : null}
-
-          {linking.length ? (
-            <>
-              <h4 style={{ marginBottom: 6 }}>Internal linking</h4>
-              <ul className="missing-list">
-                {linking.slice(0, 5).map((l, i) => (
-                  <li key={`${String(l.from)}-${i}`}>
-                    {String(l.from)} →{" "}
-                    {Array.isArray(l.to)
-                      ? (l.to as string[]).slice(0, 3).join(", ")
-                      : "—"}
-                  </li>
-                ))}
-              </ul>
-            </>
-          ) : null}
-        </>
-      ) : null}
-
-      <h4 style={{ marginBottom: 6 }}>Strong evergreen</h4>
-      <KeywordDetailTable rows={evergreen.slice(0, 8)} empty="—" />
-
-      <h4 style={{ marginBottom: 6 }}>Trend plays</h4>
-      <ul className="missing-list">
-        {trends.slice(0, 6).map((r) => (
-          <li key={`t-${String(r.keyword)}`}>
-            <strong>{String(r.keyword)}</strong>
-            {r.volume != null ? ` · vol ${fmtVol(r.volume)}` : ""}
-            {r.opportunity_score != null ? ` · ${r.opportunity_score}%` : ""}
-          </li>
-        ))}
-        {!trends.length ? <li>—</li> : null}
-      </ul>
+        </section>
+      )}
 
       {clusterReport ? (
-        <>
-          <h4 style={{ marginBottom: 6 }}>Keyword Cluster Report</h4>
-          <p style={{ fontSize: 13, marginTop: 0 }}>
-            Total: {String(clusterReport.total_keywords ?? "—")} · Clusters:{" "}
-            {String(clusterReport.clusters_created ?? reportClusters.length)} ·
-            Orphans: {String(clusterReport.orphan_count ?? orphans.length)}
-          </p>
-          {reportClusters.slice(0, 5).map((c, i) => {
-            const kws = kwRows(c.keywords);
-            return (
-              <div
-                key={`${String(c.name)}-${i}`}
-                style={{ marginBottom: 10, fontSize: 13 }}
-              >
-                <strong>
-                  Cluster {i + 1}:{" "}
-                  {String(c.name || c.primary_keyword || "Untitled")}
-                </strong>
-                <div style={{ color: "var(--muted)" }}>
-                  Intent: {String(c.intent || "—")} ·{" "}
-                  {String(c.recommended_content || c.content_type || "—")} ·{" "}
-                  {String(c.recommended_url || "—")}
-                  {c.est_traffic != null || c.total_volume != null
-                    ? ` · est. traffic/vol ${fmtVol(c.est_traffic ?? c.total_volume)}`
-                    : ""}
-                </div>
-                <div style={{ overflowX: "auto", marginTop: 6 }}>
-                  <table
-                    style={{
-                      width: "100%",
-                      fontSize: 11,
-                      borderCollapse: "collapse",
-                    }}
-                  >
-                    <thead>
-                      <tr
-                        style={{
-                          textAlign: "left",
-                          borderBottom: "1px solid var(--line)",
-                        }}
-                      >
-                        <th style={{ padding: "3px 6px" }}>Keyword</th>
-                        <th style={{ padding: "3px 6px" }}>Volume</th>
-                        <th style={{ padding: "3px 6px" }}>KD</th>
-                        <th style={{ padding: "3px 6px" }}>Funnel</th>
-                        <th style={{ padding: "3px 6px" }}>Role</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {kws.slice(0, 6).map((k) => (
-                        <tr
-                          key={String(k.keyword)}
-                          style={{ borderBottom: "1px solid var(--line)" }}
-                        >
-                          <td style={{ padding: "3px 6px" }}>
-                            {String(k.keyword)}
-                          </td>
-                          <td style={{ padding: "3px 6px" }}>
-                            {fmtVol(k.volume)}
-                          </td>
-                          <td style={{ padding: "3px 6px" }}>
-                            {fmtNum(k.difficulty)}
-                          </td>
-                          <td style={{ padding: "3px 6px" }}>
-                            <FunnelBadge stage={k.funnel} />
-                          </td>
-                          <td style={{ padding: "3px 6px" }}>
-                            {String(k.role || "—")}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            );
-          })}
-          {roadmap.length ? (
-            <>
-              <h4 style={{ marginBottom: 6 }}>Content roadmap</h4>
-              <ol style={{ fontSize: 13, marginTop: 0, paddingLeft: 20 }}>
-                {roadmap.slice(0, 6).map((r, i) => (
-                  <li key={`${String(r.cluster)}-${i}`}>
-                    {String(r.cluster)} — {String(r.content_type || "")} ·{" "}
-                    {String(r.target_keyword || "")}
-                    {r.est_traffic != null
-                      ? ` · est. ${fmtVol(r.est_traffic)}`
-                      : ""}
-                  </li>
-                ))}
-              </ol>
-            </>
-          ) : null}
-          {orphans.length ? (
-            <p style={{ fontSize: 12, color: "var(--muted)" }}>
-              Orphans:{" "}
-              {orphans
-                .slice(0, 5)
-                .map(
-                  (o) =>
-                    `${String(o.keyword)}${o.volume != null ? ` (${fmtVol(o.volume)})` : ""}`,
-                )
-                .join(", ")}
-              {orphans.length > 5 ? "…" : ""}
-            </p>
-          ) : null}
-        </>
+        <ClusterSection
+          clusterReport={clusterReport}
+          reportClusters={reportClusters}
+          orphans={orphans}
+          roadmap={roadmap}
+          keywordFocus={keywordFocus}
+        />
       ) : null}
 
-      {avoid.length ? (
-        <>
-          <h4 style={{ marginBottom: 6 }}>Avoid / low priority</h4>
+      <section className="report-section" style={{ marginTop: 8 }}>
+        <h4 style={{ marginBottom: 6 }}>Add a competitor keyword</h4>
+        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
+          Add a term research missed. Drop terms via Focus in the seed tables.
+          {deselected.size ? ` ${deselected.size} deselected.` : ""}
+        </p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+          <input
+            placeholder="Competitor keyword"
+            value={manualKeyword}
+            disabled={!canAct}
+            onChange={(e) => setManualKeyword(e.target.value)}
+            style={{ flex: 2, minWidth: 160 }}
+          />
+          <input
+            placeholder="Competitor name or domain"
+            value={manualCompetitor}
+            disabled={!canAct}
+            onChange={(e) => setManualCompetitor(e.target.value)}
+            style={{ flex: 2, minWidth: 160 }}
+          />
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={!canAct || !manualKeyword.trim()}
+            onClick={addManualCompetitorKeyword}
+          >
+            Add competitor keyword
+          </button>
+        </div>
+        {manualKeywords.length ? (
           <ul className="missing-list">
-            {avoid.slice(0, 6).map((r) => (
-              <li key={`a-${String(r.keyword)}`}>
-                {String(r.keyword)}
-                {r.volume != null ? ` · vol ${fmtVol(r.volume)}` : ""}
-                {r.rationale ? ` — ${String(r.rationale)}` : ""}
-              </li>
-            ))}
+            {manualKeywords.map((row) => {
+              const focused = !deselected.has(normKw(row.keyword));
+              return (
+                <li key={normKw(row.keyword)} style={{ opacity: focused ? 1 : 0.45 }}>
+                  <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input
+                      type="checkbox"
+                      checked={focused}
+                      disabled={!canAct}
+                      aria-label={`Focus ${row.keyword}`}
+                      onChange={() => toggleFocus(row.keyword)}
+                    />
+                    <span>
+                      <strong>{row.keyword}</strong>
+                      {row.competitor ? ` · ${row.competitor}` : ""}
+                      <span style={{ color: "var(--muted)" }}> · added manually</span>
+                    </span>
+                  </label>
+                </li>
+              );
+            })}
           </ul>
-        </>
-      ) : null}
-
-      <h4 style={{ marginBottom: 6 }}>Topics / clusters</h4>
-      <p style={{ fontSize: 13 }}>
-        {topics.length} topics · {clusters.length} clusters
-        {avoid.length ? ` · ${avoid.length} avoid` : ""}
-      </p>
+        ) : null}
+      </section>
 
       {canAct && (
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           <button
             type="button"
             className="btn btn-primary"
-            onClick={() => onAction("approve")}
+            onClick={() => onAction("approve", focusEdits)}
           >
             Approve into memory
           </button>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => onAction("reject")}
-          >
+          <button type="button" className="btn btn-ghost" onClick={() => onAction("reject")}>
             Reject
           </button>
         </div>

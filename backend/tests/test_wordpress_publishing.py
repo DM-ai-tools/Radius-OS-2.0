@@ -1064,6 +1064,9 @@ def test_verify_explains_persistent_waf_challenge(monkeypatch):
     assert "202" in (result.get("detail") or "")
 
 
+# The Chromium fallback is opt-in since 4162a50 ("Railway-safe public URL") —
+# verify_connection(use_browser=False) by default so production never launches a
+# browser unasked. These four tests exercise that fallback, so they opt in.
 def test_verify_uses_chromium_when_httpx_stays_on_waf(monkeypatch):
     calls = {"n": 0}
 
@@ -1084,7 +1087,7 @@ def test_verify_uses_chromium_when_httpx_stays_on_waf(monkeypatch):
 
     monkeypatch.setattr(wordpress, "_xmlrpc_post_via_chromium", chromium)
     mock_wp(monkeypatch, handler)
-    result = asyncio.run(wordpress.verify_connection(CONN))
+    result = asyncio.run(wordpress.verify_connection(CONN, use_browser=True))
     assert result["ok"] is True
     assert result["auth_transport"] == "xmlrpc"
     assert calls["n"] >= 1
@@ -1119,7 +1122,7 @@ def test_verify_chromium_runs_off_the_uvicorn_event_loop(monkeypatch):
         )
 
     mock_wp(monkeypatch, handler)
-    result = asyncio.run(wordpress.verify_connection(CONN))
+    result = asyncio.run(wordpress.verify_connection(CONN, use_browser=True))
     assert result["ok"] is True
     assert result["auth_transport"] == "xmlrpc"
 
@@ -1146,7 +1149,7 @@ def test_verify_explains_chromium_launch_failure(monkeypatch):
 
     monkeypatch.setattr(wordpress, "_xmlrpc_post_via_chromium", boom)
     mock_wp(monkeypatch, handler)
-    result = asyncio.run(wordpress.verify_connection(CONN))
+    result = asyncio.run(wordpress.verify_connection(CONN, use_browser=True))
     assert result["ok"] is False
     assert "could not start" in (result.get("detail") or "").lower()
     assert "NotImplementedError" in (result.get("detail") or "")
@@ -1209,7 +1212,7 @@ def test_verify_explains_chromium_socket_hang_up(monkeypatch):
 
     monkeypatch.setattr(wordpress, "_xmlrpc_post_via_chromium", boom)
     mock_wp(monkeypatch, handler)
-    result = asyncio.run(wordpress.verify_connection(CONN))
+    result = asyncio.run(wordpress.verify_connection(CONN, use_browser=True))
     assert result["ok"] is False
     detail = (result.get("detail") or "").lower()
     assert "restart the api" not in detail

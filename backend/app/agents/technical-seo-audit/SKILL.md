@@ -72,6 +72,7 @@ Hand off measurement you cannot prove from HTML:
 - Sitemap URL is referenced
 - User-agent rules are correct
 - No accidental `Disallow: /` blocking everything
+- When the robots.txt body is already in the audit, list `GPTBot`, `Google-Extended`, `PerplexityBot`, and `ClaudeBot` as informational only. A full GEO review is Phase 17 `ai_visibility`, not this audit.
 
 **XML Sitemap**
 
@@ -127,6 +128,8 @@ You cannot measure these by fetching a page. Reading HTML tells you what's likel
 Diagnose against real data, not assumptions. A site can fail every heuristic below and still pass CWV, and vice versa.
 
 **Performance Checks**
+
+From HTML already fetched, flag each image for: missing or empty alt, missing width and height, a raster URL that is not WebP or AVIF, and a first image with no srcset. Those are hints. Measured LCP, INP, and CLS belong to **cwv-measurement**.
 
 - Images optimized (WebP/AVIF, lazy loaded, sized correctly)
 - CSS and JS minified and compressed (gzip/brotli)

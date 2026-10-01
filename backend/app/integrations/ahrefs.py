@@ -17,26 +17,29 @@ BASE = "https://api.ahrefs.com/v3"
 # Kept well under the per-agent turn budget so one slow endpoint cannot stall a phase.
 REQUEST_TIMEOUT = 35
 
-# Keywords Explorer 403 "Insufficient plan" is plan-wide. After the first hit,
-# skip every later explorer call in this process instead of retrying per seed.
-_keywords_explorer_blocked: str | None = None
+# Keywords Explorer plan/credit/rate-limit failures are rechecked after a short
+# window. A past 403 or 429 is not treated as still active, and it is not
+# treated as resolved until a later call succeeds.
+_EXPLORER = "ahrefs-keywords-explorer"
 
 
 def keywords_explorer_blocked() -> str | None:
-    return _keywords_explorer_blocked
+    from app.integrations.provider_access import active_access_block
+
+    return active_access_block(_EXPLORER)
 
 
 def reset_keywords_explorer_block() -> None:
-    global _keywords_explorer_blocked
-    _keywords_explorer_blocked = None
+    from app.integrations.provider_access import clear_access_failure
+
+    clear_access_failure(_EXPLORER)
 
 
-def _mark_keywords_explorer_blocked(reason: str) -> None:
-    global _keywords_explorer_blocked
-    if _keywords_explorer_blocked:
-        return
-    _keywords_explorer_blocked = reason
-    log.warning("ahrefs_keywords_explorer_disabled", reason=reason)
+def _mark_keywords_explorer_blocked(reason: str, *, kind: str) -> None:
+    from app.integrations.provider_access import note_access_failure
+
+    note_access_failure(_EXPLORER, kind, reason)
+    log.warning("ahrefs_keywords_explorer_recheck_scheduled", reason=reason)
 
 
 def _configured() -> bool:
@@ -70,8 +73,10 @@ async def _get_with_error(
         return None, "ahrefs_unavailable"
     if settings.use_mock_providers:
         return None, "ahrefs_unavailable"
-    if _keywords_explorer_blocked and path.startswith("/keywords-explorer"):
-        return None, _keywords_explorer_blocked
+    if path.startswith("/keywords-explorer"):
+        blocked = keywords_explorer_blocked()
+        if blocked:
+            return None, blocked
     clean = {k: v for k, v in params.items() if v is not None}
 
     for attempt in range(max_attempts):
@@ -115,6 +120,10 @@ async def _get_with_error(
             if attempt < max_attempts - 1:
                 await asyncio.sleep(2**attempt)
                 continue
+            if resp.status_code == 429 and path.startswith("/keywords-explorer"):
+                from app.integrations.provider_access import RATE_LIMIT
+
+                _mark_keywords_explorer_blocked("ahrefs_rate_limited", kind=RATE_LIMIT)
             return None, "ahrefs_http_retry_exhausted"
 
         if resp.status_code >= 400:
@@ -135,7 +144,9 @@ async def _get_with_error(
             lowered = body.lower()
             if resp.status_code == 403 and "insufficient plan" in lowered:
                 if path.startswith("/keywords-explorer"):
-                    _mark_keywords_explorer_blocked("ahrefs_insufficient_plan")
+                    from app.integrations.provider_access import PLAN
+
+                    _mark_keywords_explorer_blocked("ahrefs_insufficient_plan", kind=PLAN)
                 return None, "ahrefs_insufficient_plan"
             if resp.status_code in (401, 403):
                 return None, "ahrefs_forbidden"
@@ -147,6 +158,8 @@ async def _get_with_error(
             latency_ms=int((time.perf_counter() - t0) * 1000),
             status="success",
         )
+        if path.startswith("/keywords-explorer"):
+            reset_keywords_explorer_block()
         return resp.json(), None
 
     return None, "ahrefs_request_failed"

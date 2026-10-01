@@ -174,6 +174,27 @@ def test_differentiation_passes_create_content_gate():
     assert g["ok"] is True
 
 
+def test_differentiation_scopes_to_keyword_not_offtopic_intake():
+    """Email positioning must not become the angle for an HVAC (or any other) page."""
+    angle = differentiation_angle(
+        client_name="CoolAir Pros",
+        keyword="hvac maintenance",
+        serp={"validated": False, "dominant_format": "service", "organic": []},
+        marketing={
+            "client_intake": {
+                "positioning": "behaviour-based email journeys and deliverability",
+                "geographic_focus": "Texas",
+                "products": ["Email Marketing", "HVAC Maintenance"],
+            }
+        },
+        industry="HVAC",
+    )
+    low = angle.lower()
+    assert "email" not in low
+    assert "hvac" in low or "coolair" in low
+    assert len(angle) >= 24
+
+
 @pytest.mark.asyncio
 async def test_planning_blocked_without_strategy_queue():
     out = await run_content_planning_plan(
@@ -502,8 +523,14 @@ async def test_ui_topic_selection_reaches_each_existing_page_type_draft():
                 selected_keyword=f"{page_type} seo",
                 prior_briefs=briefs,
             )
-        assert drafted["draft_count"] == 1
-        assert drafted["drafts"][0]["keyword"] == f"{page_type} seo"
+        if page_type == "comparison":
+            assert drafted["draft_count"] == 0
+            refusal = drafted["write_refusal"]
+            assert refusal["refused"] is True
+            assert "no competitor page" in str(refusal["reason"]).lower()
+        else:
+            assert drafted["draft_count"] == 1
+            assert drafted["drafts"][0]["keyword"] == f"{page_type} seo"
 
 
 def test_briefable_pages_keep_locked_creates_after_memory_slim():

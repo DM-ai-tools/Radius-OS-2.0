@@ -29,6 +29,10 @@ _META_HEADINGS = (
     "notes for the editor",
 )
 
+_IMG_SRC_RE = re.compile(
+    r"""(?is)(\bsrc\s*=\s*)(["'])([^"']+)\2"""
+)
+
 
 def _esc(value: Any) -> str:
     return html.escape(str(value or ""), quote=True)
@@ -38,6 +42,108 @@ def _path(url: str) -> str:
     if not url:
         return "/"
     return urlparse(url).path or "/" if "://" in url else url
+
+
+def _draft_media_filename(src: str) -> str | None:
+    """Return the draft image filename when src points at /media/drafts/…"""
+    raw = str(src or "").strip()
+    if not raw or raw.startswith("data:"):
+        return None
+    path = urlparse(raw).path if "://" in raw else raw
+    path = path.split("?", 1)[0]
+    marker = "/media/drafts/"
+    if marker not in path.replace("\\", "/"):
+        return None
+    name = path.replace("\\", "/").rsplit(marker, 1)[-1].lstrip("/")
+    if not name or "/" in name or name.startswith(".") or ".." in name:
+        return None
+    return name
+
+
+def _bytes_to_data_uri(raw: bytes, mime: str = "image/png") -> str:
+    import base64
+
+    kind = (mime or "image/png").split(";")[0].strip() or "image/png"
+    if not kind.startswith("image/"):
+        kind = "image/png"
+    return f"data:{kind};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def _local_draft_data_uri(src: str) -> str | None:
+    name = _draft_media_filename(src)
+    if not name:
+        return None
+    from app.integrations.llm import draft_images_dir
+
+    path = draft_images_dir() / name
+    if not path.is_file():
+        return None
+    ext = path.suffix.lower().lstrip(".")
+    mime = {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "webp": "image/webp",
+        "gif": "image/gif",
+        "svg": "image/svg+xml",
+    }.get(ext, "image/png")
+    try:
+        return _bytes_to_data_uri(path.read_bytes(), mime)
+    except OSError:
+        return None
+
+
+async def _remote_data_uri(src: str, *, timeout: float = 8.0) -> str | None:
+    url = str(src or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return None
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            resp = await client.get(url)
+        if resp.status_code >= 400:
+            return None
+        mime = (resp.headers.get("content-type") or "image/png").split(";")[0].strip()
+        if not mime.startswith("image/") and not resp.content[:8]:
+            return None
+        if len(resp.content) > 4_000_000:
+            return None
+        return _bytes_to_data_uri(resp.content, mime if mime.startswith("image/") else "image/png")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def embed_preview_images(html: str) -> str:
+    """Rewrite <img src> to data URIs so a downloaded HTML file still shows images.
+
+    Local /media/drafts/* files are read from disk; remote http(s) assets are fetched
+    once. Already-inlined data URIs are left alone.
+    """
+    if not html or "src=" not in html.lower():
+        return html
+    cache: dict[str, str | None] = {}
+    parts: list[str] = []
+    last = 0
+    for match in _IMG_SRC_RE.finditer(html):
+        parts.append(html[last : match.start()])
+        prefix, quote, src = match.group(1), match.group(2), match.group(3)
+        last = match.end()
+        if src.startswith("data:"):
+            parts.append(match.group(0))
+            continue
+        if src not in cache:
+            data = _local_draft_data_uri(src)
+            if not data:
+                data = await _remote_data_uri(src)
+            cache[src] = data
+        data = cache[src]
+        if data:
+            parts.append(f"{prefix}{quote}{data}{quote}")
+        else:
+            parts.append(match.group(0))
+    parts.append(html[last:])
+    return "".join(parts)
 
 
 def _title_of(page: dict[str, Any]) -> str:
@@ -276,9 +382,17 @@ def render_preview_html(
         else ""
     )
     chrome_header = design.get("header_html") or ""
+    if chrome_header and client_name:
+        # Scraped logos often carry wrong partner/client alts (e.g. "Aimbo").
+        chrome_header = re.sub(
+            r'(?is)(<img\b[^>]*\balt\s*=\s*)(["\'])([^"\']*)\2',
+            rf'\1\2{_esc(client_name)}\2',
+            chrome_header,
+            count=3,
+        )
     chrome_footer = design.get("footer_html") or ""
     generic_header = (
-        f'<img src="{_esc(logo)}" alt="" onerror="this.remove()">'
+        f'<img src="{_esc(logo)}" alt="{_esc(client_name)}" onerror="this.remove()">'
         f'<strong class="hdr-fallback">{_esc(client_name)}</strong>'
         if logo
         else f"<strong>{_esc(client_name)}</strong>"
@@ -644,34 +758,144 @@ def pick_reference_url(site_architecture: dict[str, Any] | None, primary_url: st
     return primary_url
 
 
+async def claude_mirror_previous_page_layout(
+    *,
+    markdown: str,
+    design_md: str,
+    previous_page_url: str,
+    page_title: str = "",
+    images: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Ask Claude to structure draft body HTML like the previous page on the plan.
+
+    Colors/fonts stay measured (Context.dev / CSS). Claude only rearranges section
+    order and semantic markup so the new page mirrors the prior page's bands.
+    """
+    from app.config import get_settings
+    from app.integrations.llm import synthesize_json
+
+    settings = get_settings()
+    body = draft_body_markdown(markdown)
+    if not body.strip() or not str(design_md or "").strip():
+        return None
+
+    image_notes = []
+    for img in (images or [])[:8]:
+        if not isinstance(img, dict):
+            continue
+        image_notes.append(
+            {
+                "role": img.get("role") or "",
+                "alt": img.get("alt") or "",
+                "src": img.get("src") or "",
+            }
+        )
+
+    system = (
+        "You are a senior web designer working only from a measured client design sheet. "
+        "Mirror the PREVIOUS page's section sequence for this new draft. "
+        "Never invent colors, fonts, gradients, or decorative CSS — those come from the "
+        "live site chrome. Return JSON only."
+    )
+    user = (
+        f"Previous page URL (design to copy): {previous_page_url or 'unknown'}\n"
+        f"New page title: {page_title or 'untitled'}\n\n"
+        f"Measured design sheet from the previous page:\n{design_md[:6000]}\n\n"
+        f"Draft markdown to lay out:\n{body[:10000]}\n\n"
+        f"Available images (use src as-is when present):\n{json.dumps(image_notes)}\n\n"
+        "Return JSON with keys:\n"
+        '- content_html: string of semantic HTML fragments only (h1/h2/p/ul/ol/figure/section). '
+        "Wrap major bands in <section data-band=\"...\"> matching the design sheet's "
+        "Page structure sequence when available.\n"
+        "- bands_used: array of band names you mirrored\n"
+        "- note: one short sentence on what you copied from the previous page\n"
+        "Rules: keep the draft facts; do not add marketing fluff; no <style> or inline "
+        "color/font CSS; no invented brand assets."
+    )
+    parsed = await synthesize_json(
+        system,
+        user,
+        model=settings.skill_model,
+        max_tokens=6000,
+    )
+    if not isinstance(parsed, dict):
+        return None
+    html_out = str(parsed.get("content_html") or "").strip()
+    if not html_out or "<" not in html_out:
+        return None
+    # Strip accidental full documents / style blocks — chrome owns the look.
+    html_out = re.sub(r"(?is)<style\b[^>]*>.*?</style>", "", html_out)
+    html_out = re.sub(r"(?is)<script\b[^>]*>.*?</script>", "", html_out)
+    html_out = re.sub(r'(?i)\sstyle\s*=\s*"[^"]*"', "", html_out)
+    html_out = re.sub(r"(?i)\sstyle\s*=\s*'[^']*'", "", html_out)
+    return {
+        "content_html": html_out,
+        "bands_used": list(parsed.get("bands_used") or [])[:12],
+        "note": str(parsed.get("note") or "").strip()[:240],
+        "source": "claude",
+    }
+
+
 async def build_draft_site_preview(
     *,
     client_name: str,
     primary_url: str,
     draft: dict[str, Any],
     site_architecture: dict[str, Any] | None = None,
+    on_page_seo: dict[str, Any] | None = None,
+    content_planning: dict[str, Any] | None = None,
+    topic_plan: dict[str, Any] | None = None,
+    embed_images: bool = False,
 ) -> dict[str, Any]:
-    """Render a Phase 10 draft inside the client's brand frame (Brandfetch + Firecrawl)."""
+    """Render a Phase 10 draft inside the client's brand frame.
+
+    Design source preference: previous page on the internal-linking / publish plan
+    (Claude mirrors its section layout), then measured capture from that URL.
+
+    embed_images: when True, rewrite img src to data URIs so a downloaded HTML
+    file still shows draft images offline.
+    """
     from app.integrations import brandfetch, firecrawl
+    from app.services.design_capture import (
+        capture_page_design,
+        design_source_url,
+        merge_site_design,
+        resolve_previous_design_page,
+    )
     from app.services.wp_site_design import fetch_wordpress_design
 
     brand = await brandfetch.fetch_brand(primary_url)
     site_design = await fetch_wordpress_design(primary_url)
-    from app.services.design_capture import capture_page_design, design_source_url, merge_site_design
 
     page_url = str(draft.get("url") or "")
     if page_url and not page_url.startswith("http"):
         page_url = primary_url.rstrip("/") + (page_url if page_url.startswith("/") else f"/{page_url}")
     existing = str(draft.get("existing_page_url") or "")
-    ref_url = pick_reference_url(site_architecture, primary_url)
+    keyword = str(draft.get("keyword") or "")
+
+    previous = resolve_previous_design_page(
+        page_url=page_url,
+        page_keyword=keyword,
+        primary_url=primary_url,
+        on_page_seo=on_page_seo,
+        content_planning=content_planning,
+        topic_plan=topic_plan,
+        site_architecture=site_architecture,
+    )
+    previous_url = str(previous.get("url") or "")
+    ref_url = previous_url or pick_reference_url(site_architecture, primary_url)
     source_url = design_source_url(
+        previous_page_url=previous_url,
         existing_page_url=existing if existing.startswith("http") else "",
+        parent_pillar_page_url=str((site_architecture or {}).get("parent_pillar_page_url") or ""),
         reference_design_source=ref_url,
         client_website_url=primary_url,
     )
-    site_design = merge_site_design(site_design, await capture_page_design(source_url))
+    capture = await capture_page_design(source_url)
+    site_design = merge_site_design(site_design, capture)
+
     scrape: dict[str, Any] = {"available": False}
-    for candidate in [page_url, ref_url, primary_url]:
+    for candidate in [previous_url, source_url, page_url, ref_url, primary_url]:
         if not candidate:
             continue
         scrape = await firecrawl.scrape_page(candidate)
@@ -686,13 +910,31 @@ async def build_draft_site_preview(
         "meta_description": sanitize_meta_description(draft.get("meta_description")),
         "keyword": draft.get("keyword"),
     }
+    images = draft.get("images") if isinstance(draft.get("images"), list) else None
     content_html = markdown_to_content_html(
         str(draft.get("markdown") or ""),
-        images=draft.get("images") if isinstance(draft.get("images"), list) else None,
+        images=images,
         media_base=str(draft.get("media_base") or "") or None,
     )
+    layout_pass: dict[str, Any] | None = None
+    design_md = str((capture or {}).get("design_md") or "")
+    if previous_url and design_md.strip():
+        layout_pass = await claude_mirror_previous_page_layout(
+            markdown=str(draft.get("markdown") or ""),
+            design_md=design_md,
+            previous_page_url=previous_url,
+            page_title=str(draft.get("title") or keyword),
+            images=images,
+        )
+        if layout_pass and layout_pass.get("content_html"):
+            content_html = str(layout_pass["content_html"])
+
     style = _preview_style(brand, site_design)
-    if style["source"] == "measured":
+    if style["source"] == "measured" and previous_url:
+        banner_subtitle = (
+            f"Content Production — design copied from previous plan page ({previous.get('reason') or 'linked'})"
+        )
+    elif style["source"] == "measured":
         banner_subtitle = "Content Production — measured from the live page"
     elif style["source"] == "wordpress" and style.get("fallback") == "brandfetch":
         banner_subtitle = "Content Production — WordPress site design, Brandfetch filled the gaps"
@@ -702,6 +944,9 @@ async def build_draft_site_preview(
         banner_subtitle = "Content Production — Brandfetch fallback"
     else:
         banner_subtitle = "Content Production — neutral styling"
+    if layout_pass and layout_pass.get("note"):
+        banner_subtitle = f"{banner_subtitle} · Claude layout: {layout_pass['note']}"
+
     preview_html = render_preview_html(
         client_name=client_name,
         page=page,
@@ -713,13 +958,23 @@ async def build_draft_site_preview(
         banner_label="SITE PREVIEW",
         banner_subtitle=banner_subtitle,
     )
+    images_embedded = False
+    if embed_images and preview_html:
+        preview_html = await embed_preview_images(preview_html)
+        images_embedded = "data:image" in preview_html
     return {
         "url": page_url,
         "reference_url": layout.get("reference_url") or ref_url,
+        "design_source_url": source_url,
+        "previous_page_url": previous_url or None,
+        "previous_page_reason": previous.get("reason") or None,
         "preview_html": preview_html,
         "brand_applied": style["brand_applied"] == "yes",
         "design_source": style["source"],
         "design_fallback": style.get("fallback") or None,
+        "layout_mirrored_by_claude": bool(layout_pass and layout_pass.get("content_html")),
+        "claude_layout_note": (layout_pass or {}).get("note") if layout_pass else None,
+        "images_embedded": images_embedded,
         "wordpress_kit_id": site_design.get("kit_id") or None,
         "layout_available": bool(layout.get("available") or site_design.get("chrome")),
         "has_written_copy": bool(content_html and "data-placeholder" not in content_html),

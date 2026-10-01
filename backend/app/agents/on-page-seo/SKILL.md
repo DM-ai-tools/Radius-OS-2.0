@@ -76,11 +76,12 @@ Read the page and evaluate:
 - Natural keyword usage (not stuffed)
 - LSI (related) keywords included
 
-**Images**
-- Descriptive alt text with keywords where natural
-- Optimized file names (not IMG_001.jpg)
-- Compressed and properly sized
-- Featured/hero image present
+**Images** (from the HTML already fetched — do not start a new crawl)
+- Missing or empty `alt`
+- Missing `width` and `height` (CLS risk)
+- Raster URL that is not WebP or AVIF
+- First image missing `srcset` (hero / LCP candidate)
+- If the page was not fetched, leave `images` empty and say so. Lab CWV numbers belong to **cwv-measurement**.
 
 **Internal Links**
 - Links to related pages on the site
@@ -111,7 +112,7 @@ For a page whose live content was never fetched, optimize from the brief and mar
 - Write for humans first, search engines second
 - Match the content depth to the search intent
 - Consider featured snippet opportunities (lists, tables, definitions)
-- E-E-A-T signals: demonstrate Experience, Expertise, Authoritativeness, Trustworthiness
+- E-E-A-T checklist: copy the brief `who_how_why` and `people_first_gates` onto the page row as pass or gap for Experience, Expertise, Authoritativeness, and Trust. Do not score the live page with a Quality Rater model.
 - Nothing here publishes. Phase 11 output is a reviewable package; the live change is
   Phase 12 and requires human approval.
 

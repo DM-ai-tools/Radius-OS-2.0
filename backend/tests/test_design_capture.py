@@ -18,12 +18,62 @@ from app.services.design_tokens import (
 
 def test_design_source_url_preference_order():
     assert design_source_url(
+        previous_page_url="https://client.example/services/seo",
+        existing_page_url="https://client.example/services/ppc",
+        parent_pillar_page_url="https://client.example/services",
+        client_website_url="https://client.example",
+    ) == "https://client.example/services/seo"
+    assert design_source_url(
         existing_page_url="https://client.example/services/seo",
         parent_pillar_page_url="https://client.example/services",
         client_website_url="https://client.example",
     ) == "https://client.example/services/seo"
     assert design_source_url(client_website_url="https://client.example") == "https://client.example"
     assert design_source_url(profile_website_url="not-a-url") == ""
+
+
+def test_resolve_previous_design_page_from_internal_linking():
+    from app.services.design_capture import resolve_previous_design_page
+
+    found = resolve_previous_design_page(
+        page_url="/services/local-seo",
+        page_keyword="local seo",
+        primary_url="https://client.example",
+        on_page_seo={
+            "internal_linking": {
+                "links": [
+                    {
+                        "from": "/services",
+                        "to": "/services/local-seo",
+                        "anchor": "Local SEO",
+                        "reason": "hub_to_spoke",
+                        "target_status": "planned",
+                    }
+                ]
+            }
+        },
+    )
+    assert found["url"] == "https://client.example/services"
+    assert found["reason"] == "internal_linking_parent"
+
+
+def test_resolve_previous_design_page_from_publishing_order():
+    from app.services.design_capture import resolve_previous_design_page
+
+    found = resolve_previous_design_page(
+        page_url="/guides/two",
+        page_keyword="topic two",
+        primary_url="https://client.example",
+        content_planning={
+            "pages": [
+                {"url": "/guides/one", "keyword": "topic one", "priority_rank": 1},
+                {"url": "/guides/two", "keyword": "topic two", "priority_rank": 2},
+            ]
+        },
+        topic_plan={"publishing_order": ["topic one", "topic two"]},
+    )
+    assert found["url"] == "https://client.example/guides/one"
+    assert found["reason"] == "publishing_order_previous"
 
 
 def test_css_vars_resolve_and_normalize():

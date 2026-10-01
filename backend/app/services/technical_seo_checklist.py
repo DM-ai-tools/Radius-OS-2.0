@@ -117,8 +117,12 @@ def build_audit_coverage(
     rendering_available: bool = False,
     sitemap_available: bool = False,
     homepage_checked: bool = False,
+    sitemap_audit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Coverage matrix for the 12 targeting groups. Does not invent measurements."""
+    from app.services.sitemap_audit import sitemap_field_statuses
+
+    sitemap_statuses = sitemap_field_statuses(sitemap_audit) if sitemap_audit else {}
     rows = [i for i in (issues or []) if isinstance(i, dict)]
     blob = " ".join(
         f"{i.get('rule_id') or ''} {i.get('title') or ''} {normalize_category(str(i.get('category') or ''))}"
@@ -144,6 +148,10 @@ def build_audit_coverage(
                 sitemap_available=sitemap_available,
                 homepage_checked=homepage_checked,
             )
+            if group == "Sitemap":
+                override = sitemap_statuses.get(field)
+                if override:
+                    status, note = override
             if status == "issue":
                 issues_found += 1
                 measured += 1

@@ -8,8 +8,12 @@ from app.models.findings import (
     WebsiteAudit,
 )
 from app.models.governance import (
+    DEFAULT_RUN_ID,
     AuditTrail,
+    CddVersion,
     FindingsLedger,
+    KeywordRejection,
+    PhaseState,
     PhaseValidation,
     ReadinessScore,
 )
@@ -22,6 +26,8 @@ __all__ = [
     "ApiCredential",
     "ApiUsageLog",
     "AuditTrail",
+    "CddVersion",
+    "DEFAULT_RUN_ID",
     "BacklinkSnapshot",
     "ChatMessage",
     "ChatSession",
@@ -31,6 +37,8 @@ __all__ = [
     "ContentEmbedding",
     "DiscoveryResponse",
     "FindingsLedger",
+    "KeywordRejection",
+    "PhaseState",
     "PhaseValidation",
     "ReadinessScore",
     "Role",

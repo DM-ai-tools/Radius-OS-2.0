@@ -147,6 +147,33 @@ async def clear_phases(
         r = await session.execute(text(sql), {"cid": str(cid)})
         print(f"cdp_columns_reset={r.rowcount}")
 
+        # Phase 5's service picker keys off confirmed_at. Wiping the keyword
+        # output without reopening that confirmation makes the next run skip
+        # the selection card and reuse the old 80/20 picks.
+        if from_phase <= 5:
+            r = await session.execute(
+                text(
+                    """
+                    UPDATE client_digital_profiles
+                    SET commercial_scope = jsonb_set(
+                        jsonb_set(
+                            commercial_scope,
+                            '{service_prioritization,confirmed_at}',
+                            'null'::jsonb,
+                            true
+                        ),
+                        '{service_prioritization,reopened_reason}',
+                        '"phase_reset"'::jsonb,
+                        true
+                    )
+                    WHERE client_id = :cid
+                      AND commercial_scope->'service_prioritization' ? 'confirmed_at'
+                    """
+                ),
+                {"cid": str(cid)},
+            )
+            print(f"service_selection_reopened={r.rowcount}")
+
         # --- Competitor tables (phase 4+) ------------------------------------
         if from_phase <= 4:
             comp_rows = await session.execute(

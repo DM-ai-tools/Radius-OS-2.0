@@ -154,9 +154,9 @@ async def test_fetch_serp_urls_asks_once_per_keyword():
 
     async def fake_serp(keyword, **kwargs):
         seen.append(keyword)
-        return {"organic": [{"url": f"https://site.com/{keyword}"}]}, []
+        return [{"url": f"https://site.com/{keyword}"}], []
 
-    with patch.object(ksc.dataforseo, "serp_advanced", fake_serp):
+    with patch.object(ksc.dataforseo, "serp_overview", fake_serp):
         serps, errors, _snapshots = await ksc.fetch_serp_urls(
             ["a", "b"], location_code=2036, language_code="en"
         )
@@ -169,10 +169,10 @@ async def test_fetch_serp_urls_asks_once_per_keyword():
 async def test_fetch_serp_urls_reports_failures_without_losing_the_rest():
     async def fake_serp(keyword, **kwargs):
         if keyword == "bad":
-            return {"organic": []}, ["dataforseo_serp_failed"]
-        return {"organic": [{"url": "https://site.com/ok"}]}, []
+            return [], ["dataforseo_serp_failed"]
+        return [{"url": "https://site.com/ok"}], []
 
-    with patch.object(ksc.dataforseo, "serp_advanced", fake_serp):
+    with patch.object(ksc.dataforseo, "serp_overview", fake_serp):
         serps, errors, _snapshots = await ksc.fetch_serp_urls(
             ["ok", "bad"], location_code=2036, language_code="en"
         )
@@ -187,9 +187,9 @@ async def test_fetch_serp_urls_makes_no_calls_for_an_empty_head():
 
     async def fake_serp(keyword, **kwargs):
         called["n"] += 1
-        return {"organic": []}, []
+        return [], []
 
-    with patch.object(ksc.dataforseo, "serp_advanced", fake_serp):
+    with patch.object(ksc.dataforseo, "serp_overview", fake_serp):
         serps, _, _snapshots = await ksc.fetch_serp_urls([], location_code=2036, language_code="en")
 
     assert called["n"] == 0
@@ -218,9 +218,9 @@ async def test_refine_merges_head_term_clusters_and_reports_what_it_did():
             {"url": "https://d.com/4"},
         ]
         other = [{"url": "https://x.com/9"}, {"url": "https://y.com/8"}, {"url": "https://z.com/7"}]
-        return {"organic": shared if "drain" in keyword else other}, []
+        return (shared if "drain" in keyword else other), []
 
-    with patch.object(ksc.dataforseo, "serp_advanced", fake_serp):
+    with patch.object(ksc.dataforseo, "serp_overview", fake_serp):
         refined, meta = await ksc.refine_clusters_with_serp(
             clusters, rows, location_code=2036, language_code="en"
         )
@@ -239,9 +239,9 @@ async def test_refine_is_skipped_without_a_locale():
 
     async def fake_serp(keyword, **kwargs):
         called["n"] += 1
-        return {"organic": []}, []
+        return [], []
 
-    with patch.object(ksc.dataforseo, "serp_advanced", fake_serp):
+    with patch.object(ksc.dataforseo, "serp_overview", fake_serp):
         refined, meta = await ksc.refine_clusters_with_serp(
             clusters, _rows(("a", 10)), location_code=None, language_code="en"
         )
@@ -257,9 +257,9 @@ async def test_refine_is_skipped_when_disabled():
 
     async def fake_serp(keyword, **kwargs):
         called["n"] += 1
-        return {"organic": []}, []
+        return [], []
 
-    with patch.object(ksc.dataforseo, "serp_advanced", fake_serp):
+    with patch.object(ksc.dataforseo, "serp_overview", fake_serp):
         _refined, meta = await ksc.refine_clusters_with_serp(
             clusters, _rows(("a", 10)), location_code=2036, language_code="en", enabled=False
         )
@@ -278,9 +278,9 @@ async def test_refine_never_spends_more_calls_than_the_head_term_budget():
 
     async def fake_serp(keyword, **kwargs):
         called["n"] += 1
-        return {"organic": []}, []
+        return [], []
 
-    with patch.object(ksc.dataforseo, "serp_advanced", fake_serp):
+    with patch.object(ksc.dataforseo, "serp_overview", fake_serp):
         await ksc.refine_clusters_with_serp(
             clusters, rows, location_code=2036, language_code="en", head_terms=10
         )

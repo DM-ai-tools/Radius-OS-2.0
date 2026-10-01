@@ -50,7 +50,7 @@ No extra packages — this is pure JSON merging.
 3. **Derive the coarse action** — `create | refresh | retire | no_action` — from the audit pack's seven-value disposition (`REFRESH`/`OPTIMISE`/`RETITLE` → `refresh`; `CONSOLIDATE`/`NOINDEX`/`DELETE_CANDIDATE` → `retire`; `KEEP` → `no_action`; absent → `create`). **Both views survive** — the coarse `action` and the full `disposition` + `reason` are both on every row
 4. **Detect cannibalisation conflicts** — a page whose cluster has a different declared owner in the architecture pack's `cluster_owners[]`
 5. **Detect structural flags** — high-priority pages buried past click depth 4, non-indexable pages with an active `create`/`refresh` action, breadcrumb length not matching `depth + 1`
-6. **Rank** by priority tier, then action (refresh before create — recovering proven demand beats a fresh page), then priority score
+6. **Rank** by page hierarchy, one service family at a time: **pillar page → blogs on that pillar → sub-pillar pages → blogs on those sub-pillars**. Priority tier, then action (refresh before create), then priority score only break ties inside the same slot. `hierarchy_role` on each row records which slot it landed in.
 7. **Validate and lock**
 
 ## Validation and locking

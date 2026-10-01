@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.prompts import load_skill
+from app.integrations.google_oauth import credential_grant_status
 from app.integrations.providers import validate_tracking
 from app.integrations.web_fetch import (
     CrossRegistrableDomain,
@@ -18,6 +19,7 @@ from app.integrations.web_fetch import (
 )
 from app.ml.scoring import tracking_anomaly_flags
 from app.models import ApiCredential, Client, FindingsLedger, TrackingAudit
+from app.security import decrypt_token
 from app.services.agent_runtime import get_profile
 from app.services.audit import log_event
 from app.services.readiness import compute_tracking_score, recompute_readiness
@@ -49,12 +51,6 @@ def _scoped_providers(message: str) -> list[str] | None:
         found.append("gtm")
     if "search console" in lowered or re.search(r"\bgsc\b", lowered):
         found.append("search_console")
-    if (
-        "google business" in lowered
-        or re.search(r"\bgbp\b", lowered)
-        or "business profile" in lowered
-    ):
-        found.append("google_business")
     return found or None
 
 
@@ -115,8 +111,15 @@ async def run_tracking(
             )
         )
     ).scalars().all()
-    has = {c.provider: True for c in creds}
-    oauth_providers = ("ga4", "search_console", "gtm", "google_business")
+    has: dict[str, bool] = {}
+    for cred in creds:
+        try:
+            blob = decrypt_token(cred.encrypted_token)
+        except Exception:  # noqa: BLE001
+            blob = ""
+        if credential_grant_status(cred.expires_at, blob) in ("active", "refreshable"):
+            has[cred.provider] = True
+    oauth_providers = ("ga4", "search_console", "gtm")
     provider_status = {
         p: ("Granted" if has.get(p) else "Not granted") for p in oauth_providers
     }
@@ -141,7 +144,7 @@ async def run_tracking(
                 "content": (
                     "Google APIs not connected ("
                     + ", ".join(missing_oauth)
-                    + "). Continuing without GA4 / GSC / GTM / Business Profile — "
+                    + "). Continuing without GA4 / GSC / GTM — "
                     "tag checks use live-site HTML only. Historical metrics stay empty."
                 ),
             }

@@ -17,7 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.integrations.llm import extract_domain
-from app.integrations.web_fetch import discover_site_urls, fetch_url, parse_html
+from app.integrations.web_fetch import (
+    discover_site_urls,
+    fetch_url,
+    is_non_business_host,
+    parse_html,
+)
 from app.models import CompetitorProfile
 from app.config import get_settings
 
@@ -343,6 +348,8 @@ async def resolve_competitors(
             return
         d = (item.get("domain") or "").lower()
         n = (item.get("name") or "").strip().lower()
+        if d and is_non_business_host(d):
+            return
         if d and d in seen_domains:
             return
         if not d and n and n in seen_names:
@@ -413,6 +420,8 @@ def competitor_domains(competitors: list[dict[str, Any]]) -> list[str]:
     seen: set[str] = set()
     for c in competitors:
         d = (c.get("domain") or extract_domain(c.get("url") or "") or "").lower()
+        if d and is_non_business_host(d):
+            continue
         if d and d not in seen:
             seen.add(d)
             out.append(d)

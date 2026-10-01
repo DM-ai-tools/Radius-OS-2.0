@@ -182,6 +182,16 @@ export default function DiscoveryCard({
     );
   }
 
+  if (cardType === "discovery_cdd_prompt") {
+    return (
+      <CddUploadPrompt
+        payload={payload}
+        canSubmit={canSubmit}
+        onUploadCdd={onUploadCdd}
+      />
+    );
+  }
+
   if (cardType === "discovery_questionnaire") {
     const reportPayload = {
       ...payload,
@@ -222,12 +232,17 @@ export default function DiscoveryCard({
         }
       : payload;
   const fromResearch = (confirmationPayload.from_research || {}) as Record<string, unknown>;
+  const fromCdd = (confirmationPayload.from_cdd || {}) as Record<string, unknown>;
   const confirmed = (confirmationPayload.confirmed_by_client || {}) as Record<string, unknown>;
   const discrepancies = (confirmationPayload.discrepancies || []) as {
     field_key: string;
     explanation: string;
   }[];
   const discMap = Object.fromEntries(discrepancies.map((d) => [d.field_key, d.explanation]));
+  const aiFilled = (confirmationPayload.ai_filled || {}) as Record<
+    string,
+    { value?: unknown; confidence?: number; rationale?: string }
+  >;
 
   return (
     <div className="structured-card checkpoint">
@@ -240,6 +255,10 @@ export default function DiscoveryCard({
         Completeness: {Math.round(Number(confirmationPayload.completeness_score || 0))}% · Sign-off requires{" "}
         <strong>{String(confirmationPayload.required_role || "client_success_manager")}</strong>
       </p>
+      <div className="source-legend">
+        <span className="source-legend-item cdd">From CDD</span>
+        <span className="source-legend-item ai">Filled by AI</span>
+      </div>
       <div className="two-col">
         <div className="col-box">
           <h4>From research</h4>
@@ -247,8 +266,14 @@ export default function DiscoveryCard({
             <p className="pv-muted">No research fields yet.</p>
           ) : (
             Object.entries(fromResearch).map(([k, v]) => (
-              <div key={k} className={`present-field ${discMap[k] ? "has-discrepancy" : ""}`}>
-                <div className="present-key">{humanLabel(k)}</div>
+              <div
+                key={k}
+                className={`present-field ${k in fromCdd ? "source-cdd" : k in aiFilled ? "source-ai" : ""} ${discMap[k] ? "has-discrepancy" : ""}`}
+              >
+                <div className="present-key">
+                  {humanLabel(k)}
+                  {k in fromCdd ? <span className="q-badge cdd">CDD</span> : k in aiFilled ? <span className="q-badge ai">AI</span> : null}
+                </div>
                 <div className="present-val">
                   <PresentableValue value={v} />
                 </div>
@@ -265,8 +290,14 @@ export default function DiscoveryCard({
             </div>
           ) : (
             Object.entries(confirmed).map(([k, v]) => (
-              <div key={k} className={`present-field ${discMap[k] ? "has-discrepancy" : ""}`}>
-                <div className="present-key">{humanLabel(k)}</div>
+              <div
+                key={k}
+                className={`present-field ${k in fromCdd ? "source-cdd" : k in aiFilled ? "source-ai" : ""} ${discMap[k] ? "has-discrepancy" : ""}`}
+              >
+                <div className="present-key">
+                  {humanLabel(k)}
+                  {k in fromCdd ? <span className="q-badge cdd">CDD</span> : k in aiFilled ? <span className="q-badge ai">AI</span> : null}
+                </div>
                 <div className="present-val">
                   <PresentableValue value={v} />
                 </div>
@@ -283,6 +314,27 @@ export default function DiscoveryCard({
           ) : null}
         </div>
       </div>
+      {Object.keys(aiFilled).length > 0 && (
+        <div className="col-box" style={{ marginTop: 12 }}>
+          <h4>AI-filled · unverified</h4>
+          <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
+            Drafted because the questionnaire left these blank. They count as
+            low confidence until someone confirms them.
+          </p>
+          {Object.entries(aiFilled).map(([k, entry]) => (
+            <div key={k} className="present-field source-ai">
+              <div className="present-key">
+                {humanLabel(k)}
+                <span className="q-badge ai">AI</span>
+              </div>
+              <div className="present-val">
+                <PresentableValue value={entry?.value} />
+              </div>
+              {entry?.rationale ? <div className="disc-note">{entry.rationale}</div> : null}
+            </div>
+          ))}
+        </div>
+      )}
       {canAct && (
         <div className="card-actions">
           <button className="btn btn-primary" onClick={() => onAction("approve")}>
@@ -295,6 +347,72 @@ export default function DiscoveryCard({
             Reject
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+function CddUploadPrompt({
+  payload,
+  canSubmit,
+  onUploadCdd,
+}: {
+  payload: Record<string, unknown>;
+  canSubmit: boolean;
+  onUploadCdd?: (file: File) => Promise<Record<string, unknown>>;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [uploadNote, setUploadNote] = useState("");
+
+  async function handleUpload(file: File | null) {
+    if (!file || !onUploadCdd) return;
+    setUploading(true);
+    setUploadNote("");
+    try {
+      await onUploadCdd(file);
+      setUploadNote(`Imported ${file.name} — questionnaire unlocked below.`);
+    } catch (e) {
+      setUploadNote(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div className="structured-card">
+      <p className="page-kicker" style={{ marginBottom: 6 }}>
+        {String(payload.step || "Phase 1")} · Upload CDD first
+      </p>
+      <h3 className="card-title">
+        {String(payload.title || "Upload Client Discovery Document")}
+      </h3>
+      <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
+        {String(
+          payload.subtitle ||
+            "Upload the CDD to extract business fields. Confirm them, fill blanks, then submit — AI drafts only what is still missing."
+        )}
+      </p>
+      {payload.hint ? (
+        <p className="hint-line" style={{ marginTop: 0 }}>
+          {String(payload.hint)}
+        </p>
+      ) : null}
+      {canSubmit && onUploadCdd ? (
+        <div className="cdd-upload-bar" style={{ marginTop: 12 }}>
+          <label className="btn btn-primary" style={{ cursor: "pointer" }}>
+            {uploading ? "Importing…" : "Upload CDD file"}
+            <input
+              type="file"
+              accept=".xlsx,.xlsm,.csv,.docx,.pdf,.txt,.md"
+              hidden
+              disabled={uploading}
+              onChange={(e) => handleUpload(e.target.files?.[0] || null)}
+            />
+          </label>
+          {uploadNote ? <span className="field-hint">{uploadNote}</span> : null}
+        </div>
+      ) : (
+        <p className="hint-line">CDD upload requires Discovery edit permission.</p>
       )}
     </div>
   );
@@ -326,6 +444,7 @@ function QuestionnaireForm({
     section?: string;
     from_intake?: boolean;
     from_cdd_upload?: boolean;
+    from_ai?: boolean;
   };
 
   const fieldsMeta = (payload.fields || {}) as Record<string, FieldMeta>;
@@ -424,8 +543,8 @@ function QuestionnaireForm({
       <h3 className="card-title">{String(payload.title || "D2 — CDD questionnaire")}</h3>
       <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
         {reportMode
-          ? "Public research and client context are combined below. Complete any client-only fields, then submit for the confirmation gate — Approve happens on the next card."
-          : "Fields match the APSA Discovery Document — including system access credentials (Analytics, Ads, GTM, CMS, hosting). Confirm research, complete client-only metrics, or upload an existing CDD (Excel, Word, or PDF)."}
+          ? "CDD fields are prefilled below. Confirm them, complete any blanks, then submit — AI drafts only what is still missing before the confirmation gate."
+          : "Fields match the APSA Discovery Document — including system access credentials (Analytics, Ads, GTM, CMS, hosting). Confirm extracted values, complete blanks, or re-upload a CDD."}
       </p>
       {!canSubmit ? (
         <p className="hint-line" style={{ marginTop: 0 }}>
@@ -433,6 +552,10 @@ function QuestionnaireForm({
           Approve button to finish Phase 1.
         </p>
       ) : null}
+      <div className="source-legend">
+        <span className="source-legend-item cdd">From CDD</span>
+        <span className="source-legend-item ai">Filled by AI</span>
+      </div>
       {canSubmit && onUploadCdd ? (
         <div className="cdd-upload-bar">
           <label className="btn btn-secondary" style={{ cursor: "pointer" }}>
@@ -464,18 +587,28 @@ function QuestionnaireForm({
                 const help = meta.help;
                 const input = meta.input || (k === "objectives" ? "objectives" : "textarea");
                 const options = meta.options || [];
+                const sourceClass = meta.from_cdd_upload
+                  ? "q-source-cdd"
+                  : meta.from_ai
+                    ? "q-source-ai"
+                    : meta.client_only
+                      ? "q-client-only"
+                      : "";
                 return (
-                  <div
-                    key={k}
-                    className={`field q-field ${meta.client_only ? "q-client-only" : ""}`}
-                  >
+                  <div key={k} className={`field q-field ${sourceClass}`}>
                     <label>
                       {label}
-                      {meta.client_only ? (
+                      {meta.from_cdd_upload ? <span className="q-badge cdd">CDD</span> : null}
+                      {meta.from_ai ? <span className="q-badge ai">AI</span> : null}
+                      {meta.client_only && !meta.from_cdd_upload && !meta.from_ai ? (
                         <span className="q-badge">Needs client</span>
                       ) : null}
-                      {meta.prefilled ? <span className="q-badge muted">Pre-filled</span> : null}
-                      {meta.from_intake ? <span className="q-badge muted">From intake</span> : null}
+                      {meta.prefilled && !meta.from_cdd_upload && !meta.from_ai ? (
+                        <span className="q-badge muted">Pre-filled</span>
+                      ) : null}
+                      {meta.from_intake && !meta.from_cdd_upload && !meta.from_ai ? (
+                        <span className="q-badge muted">From intake</span>
+                      ) : null}
                     </label>
                     {help ? <p className="q-help">{help}</p> : null}
                     {input === "objectives" && objectiveOptions.length > 0 ? (

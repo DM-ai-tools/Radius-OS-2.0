@@ -41,6 +41,53 @@ def _seed_cluster(
     return cluster
 
 
+def test_google_ads_seed_does_not_nest_under_meta_ads():
+    groups = build_service_seed_clusters(
+        [
+            _seed_cluster(
+                "Google Ads",
+                target="Google Ads/PPC Management",
+                target_type="service",
+                phrase=["google ads management"],
+            ),
+            _seed_cluster(
+                "Google Ads PPC Management",
+                target="Google Ads/PPC Management",
+                target_type="service",
+                broad=["ppc management agency"],
+            ),
+            _seed_cluster(
+                "Meta Ads",
+                target="Meta Ads",
+                target_type="service",
+                phrase=["meta ads agency"],
+            ),
+        ],
+        ["Meta Ads", "Google Ads/PPC Management"],
+    )
+    by_service = {g["service"]: g for g in groups}
+    meta_seeds = {s["seed"] for s in by_service["Meta Ads"]["seeds"]}
+    google_seeds = {s["seed"] for s in by_service["Google Ads/PPC Management"]["seeds"]}
+    assert meta_seeds == {"Meta Ads"}
+    assert google_seeds == {"Google Ads", "Google Ads PPC Management"}
+
+
+def test_google_ads_seed_goes_to_other_when_only_meta_in_services():
+    groups = build_service_seed_clusters(
+        [
+            _seed_cluster(
+                "Google Ads",
+                target_type="keyword",
+                phrase=["google ads management"],
+            )
+        ],
+        ["Meta Ads"],
+    )
+    by_service = {g["service"]: g for g in groups}
+    assert "Meta Ads" not in by_service or not by_service["Meta Ads"]["seeds"]
+    assert by_service["Other website topics"]["seeds"][0]["seed"] == "Google Ads"
+
+
 def test_groups_explicit_service_seed_with_all_extracted_keywords():
     groups = build_service_seed_clusters(
         [
@@ -56,9 +103,8 @@ def test_groups_explicit_service_seed_with_all_extracted_keywords():
         ["Lead Generation", "SEO Services"],
     )
 
-    assert len(groups) == 1
-    group = groups[0]
-    assert group["service"] == "Lead Generation"
+    assert {g["service"] for g in groups} == {"Lead Generation", "SEO Services"}
+    group = next(g for g in groups if g["service"] == "Lead Generation")
     assert group["seed_count"] == 1
     assert group["keyword_count"] == 4
     seed = group["seeds"][0]
@@ -72,6 +118,9 @@ def test_groups_explicit_service_seed_with_all_extracted_keywords():
         "generation of qualified leads",
         "sales prospecting",
     }
+    empty = next(g for g in groups if g["service"] == "SEO Services")
+    assert empty["seeds"] == []
+    assert empty["keyword_count"] == 0
 
 
 def test_nests_subservice_seeds_under_parent_service():
@@ -191,14 +240,21 @@ def test_empty_cleaned_seed_still_appears_once():
                 "classes_missing": ["exact", "phrase", "related", "broad"],
             }
         ],
-        ["SEO Services"],
+        ["SEO Services", "Lead Generation"],
     )
-    assert len(groups) == 1
-    seed = groups[0]["seeds"][0]
+    names = [g["service"] for g in groups]
+    assert "SEO Services" in names
+    # Selected services with no matching seed still appear as empty shells.
+    assert "Lead Generation" in names
+    seo = next(g for g in groups if g["service"] == "SEO Services")
+    seed = seo["seeds"][0]
     assert seed["seed"] == "SEO Services"
     assert seed["seed_index"] == 1
     assert seed["keyword_count"] == 0
     assert seed["class_counts"] == {"exact": 0, "phrase": 0, "related": 0, "broad": 0}
+    lead = next(g for g in groups if g["service"] == "Lead Generation")
+    assert lead["seeds"] == []
+    assert lead["keyword_count"] == 0
 
 
 def test_enrich_subservice_competitor_matrix():

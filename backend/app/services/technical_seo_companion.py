@@ -37,12 +37,116 @@ def _count_links(html: str) -> int:
     return len(re.findall(r'<a\s[^>]*href=', html or "", re.IGNORECASE))
 
 
+_CANONICAL_RE = re.compile(
+    r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_CANONICAL_RE_ALT = re.compile(
+    r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']canonical["\']',
+    re.IGNORECASE,
+)
+
+_hreflang_code_problem = None
+
+
+def _validate_hreflang_code(code: str) -> str | None:
+    """Reuse scripts/hreflang_check.py so Phase 7 and the CLI share code rules."""
+    global _hreflang_code_problem
+    if _hreflang_code_problem is None:
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[3] / "scripts" / "hreflang_check.py"
+        spec = importlib.util.spec_from_file_location("hreflang_check_cli", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot load {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _hreflang_code_problem = module.validate_hreflang_code
+    return _hreflang_code_problem(code)
+
+
+def _host(url: str) -> str:
+    return urlparse(url).netloc.lower().removeprefix("www.")
+
+
+def _same_document(left: str, right: str) -> bool:
+    if _host(left) != _host(right):
+        return False
+    return urlparse(left).path.rstrip("/") == urlparse(right).path.rstrip("/")
+
+
+def _extract_canonical(html: str, base_url: str) -> str | None:
+    for pattern in (_CANONICAL_RE, _CANONICAL_RE_ALT):
+        found = pattern.search(html or "")
+        if found:
+            return urljoin(base_url, found.group(1).strip())
+    return None
+
+
 def _extract_hreflang(html: str, base_url: str) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for pattern in (_HREFLANG_RE, _HREFLANG_RE_ALT):
         for lang, href in pattern.findall(html or ""):
-            out.append({"hreflang": lang.strip(), "href": urljoin(base_url, href.strip())})
+            item = (lang.strip(), urljoin(base_url, href.strip()))
+            if item in seen:
+                continue
+            seen.add(item)
+            out.append({"hreflang": item[0], "href": item[1]})
     return out
+
+
+def hreflang_findings_for_html(page_url: str, html: str) -> list[dict[str, str]]:
+    """Checks Phase 7 can make from one fetched page. The full cluster stays on the CLI."""
+    tags = _extract_hreflang(html, page_url)
+    if not tags:
+        return []
+    issues: list[dict[str, str]] = []
+    for tag in tags:
+        problem = _validate_hreflang_code(tag["hreflang"])
+        if problem:
+            issues.append(
+                {
+                    "source": page_url,
+                    "target": tag["href"],
+                    "hreflang": tag["hreflang"],
+                    "issue": problem,
+                    "check": "invalid_code",
+                }
+            )
+        if _host(tag["href"]) and _host(tag["href"]) != _host(page_url):
+            issues.append(
+                {
+                    "source": page_url,
+                    "target": tag["href"],
+                    "hreflang": tag["hreflang"],
+                    "issue": "hreflang target host differs from the page host",
+                    "check": "cross_host",
+                }
+            )
+    if not any(_same_document(page_url, tag["href"]) for tag in tags):
+        issues.append(
+            {
+                "source": page_url,
+                "target": page_url,
+                "hreflang": "",
+                "issue": "page does not list itself in hreflang",
+                "check": "missing_self_reference",
+            }
+        )
+    canonical = _extract_canonical(html, page_url)
+    if canonical and not _same_document(page_url, canonical):
+        issues.append(
+            {
+                "source": page_url,
+                "target": canonical,
+                "hreflang": "",
+                "issue": "hreflang page canonicalises to a different URL",
+                "check": "canonical_conflict",
+            }
+        )
+    return issues
 
 
 async def run_rendering_snapshot(url: str) -> dict[str, Any]:
@@ -119,6 +223,7 @@ async def run_hreflang_surface_check(
             break
 
     annotations: dict[str, list[dict[str, str]]] = {}
+    page_html: dict[str, str] = {}
     errors: list[str] = []
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
@@ -128,7 +233,8 @@ async def run_hreflang_surface_check(
                         page_url if "://" in page_url else f"https://{page_url}"
                     )
                     base = str(resp.url)
-                    tags = _extract_hreflang(resp.text or "", base)
+                    page_html[base] = resp.text or ""
+                    tags = _extract_hreflang(page_html[base], base)
                     if tags:
                         annotations[base] = tags
                 except httpx.HTTPError as exc:
@@ -168,7 +274,11 @@ async def run_hreflang_surface_check(
                     }
                 )
 
-    issues = missing_returns[:20]
+    sample_issues: list[dict[str, str]] = []
+    for source, html in page_html.items():
+        if source in annotations:
+            sample_issues.extend(hreflang_findings_for_html(source, html))
+    issues = (missing_returns + sample_issues)[:20]
     return {
         "status": "available",
         "pages_checked": len(unique),
@@ -177,8 +287,17 @@ async def run_hreflang_surface_check(
         "annotations": {k: v[:10] for k, v in list(annotations.items())[:5]},
         "issues": issues,
         "issue_count": len(issues),
+        "checks_run": [
+            "invalid_code",
+            "missing_self_reference",
+            "cross_host",
+            "canonical_conflict",
+            "return_tag_on_sample",
+        ],
         "note": (
-            "Surface check on sample only — full reciprocity matrix needs hreflang-validator."
+            "Surface check on the fetched sample: invalid codes, self-reference, "
+            "cross-host, and canonical conflict. Return tags outside the sample, "
+            "non-200 targets, x-default, and cluster integrity stay on hreflang-validator."
         ),
     }
 

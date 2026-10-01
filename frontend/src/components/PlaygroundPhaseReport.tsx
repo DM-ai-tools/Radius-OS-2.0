@@ -177,90 +177,88 @@ function KeywordReportTable({ list }: { list: Array<Record<string, unknown>> }) 
 
 function SearchDemandReport({ data }: { data: Record<string, unknown> }) {
   const table = rows(data.keyword_table);
-  const best = table.length ? table : rows(data.best_opportunities);
+  const dataset = rows(data.keyword_dataset);
+  const best = table.length ? table : dataset.length ? dataset.slice(0, 15) : rows(data.best_opportunities);
   const evergreen = rows(data.strong_evergreen);
-  const plan = isObj(data.topic_plan) ? data.topic_plan : null;
-  const ideas = rows(plan?.topic_ideas);
+  const trends = rows(data.trend_plays);
+  const avoid = rows(data.avoid);
   const clusterReport = isObj(data.cluster_report) ? data.cluster_report : null;
   const clusters = rows(clusterReport?.clusters);
+  const funnel = isObj(data.funnel_balance) ? data.funnel_balance : null;
+  const funnelCounts = isObj(funnel?.counts) ? (funnel!.counts as Record<string, number>) : null;
 
   return (
     <div className="pg-report">
       <MetaLine data={data} />
       <CompetitorSitesSection data={data} />
-      <Section title="Best opportunities">
+      {funnelCounts ? (
+        <p className="pg-report-meta">
+          Funnel: TOFU {funnelCounts.TOFU ?? 0} · MOFU {funnelCounts.MOFU ?? 0} · BOFU{" "}
+          {funnelCounts.BOFU ?? 0}
+          {data.keyword_count != null ? ` · ${String(data.keyword_count)} keywords` : ""}
+        </p>
+      ) : null}
+      <Section title="Keyword inventory">
         <KeywordReportTable list={best} />
       </Section>
-      {ideas.length ? (
-        <Section title="Topic plan">
-          <div className="pg-report-table-wrap">
-            <table className="pg-report-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Title</th>
-                  <th>Keyword</th>
-                  <th>Volume</th>
-                  <th>KD</th>
-                  <th>Funnel</th>
-                  <th>Competitor titles</th>
-                </tr>
-              </thead>
-              <tbody>
-                {ideas.slice(0, 12).map((t, i) => (
-                  <tr key={`${String(t.title)}-${i}`}>
-                    <td>{i + 1}</td>
-                    <td>
-                      <strong>{String(t.title || "—")}</strong>
-                    </td>
-                    <td>{String(t.keyword || "—")}</td>
-                    <td>{fmtVol(t.volume)}</td>
-                    <td>{fmtNum(t.difficulty)}</td>
-                    <td>{String(t.funnel || "—")}</td>
-                    <td className="pg-report-small">
-                      {rows(t.serp_titles)
-                        .slice(0, 2)
-                        .map((x) => String(x.title))
-                        .join(" · ") || "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Section>
-      ) : null}
-      {evergreen.length ? (
-        <Section title="Strong evergreen">
-          <KeywordReportTable list={evergreen.slice(0, 8)} />
+      {(evergreen.length || trends.length || avoid.length) ? (
+        <Section title="Priority highlights">
+          {evergreen.length ? (
+            <p className="pg-text">
+              <strong>Evergreen:</strong>{" "}
+              {evergreen
+                .slice(0, 6)
+                .map((r) => String(r.keyword || "—"))
+                .join(" · ")}
+            </p>
+          ) : null}
+          {trends.length ? (
+            <p className="pg-text">
+              <strong>Trends:</strong>{" "}
+              {trends
+                .slice(0, 5)
+                .map((r) => String(r.keyword || "—"))
+                .join(" · ")}
+            </p>
+          ) : null}
+          {avoid.length ? (
+            <p className="pg-text">
+              <strong>Avoid:</strong>{" "}
+              {avoid
+                .slice(0, 5)
+                .map((r) => String(r.keyword || "—"))
+                .join(" · ")}
+            </p>
+          ) : null}
         </Section>
       ) : null}
       {clusters.length ? (
         <Section title="Clusters">
-          {clusters.slice(0, 5).map((c, i) => (
-            <div key={`${String(c.name)}-${i}`} className="pg-report-cluster">
-              <strong>
-                {String(c.name || c.primary_keyword || `Cluster ${i + 1}`)}
-              </strong>
-              <div className="pg-report-meta">
-                Intent: {String(c.intent || "—")} · {String(c.recommended_content || c.content_type || "—")}
-                {c.est_traffic != null || c.total_volume != null
-                  ? ` · vol ${fmtVol(c.est_traffic ?? c.total_volume)}`
-                  : ""}
+          {clusters.slice(0, 8).map((c, i) => {
+            const kws = rows(c.keywords);
+            return (
+              <div key={`${String(c.name)}-${i}`} className="pg-report-cluster">
+                <strong>
+                  {String(c.name || c.primary_keyword || `Cluster ${i + 1}`)}
+                </strong>
+                <div className="pg-report-meta">
+                  Intent: {String(c.intent || "—")} ·{" "}
+                  {String(c.recommended_content || c.content_type || "—")}
+                  {c.est_traffic != null || c.total_volume != null
+                    ? ` · vol ${fmtVol(c.est_traffic ?? c.total_volume)}`
+                    : ""}
+                  {` · ${kws.length} keywords`}
+                </div>
+                <p className="pg-report-small" style={{ margin: "4px 0 0" }}>
+                  {kws
+                    .slice(0, 6)
+                    .map((k) => String(k.keyword || ""))
+                    .filter(Boolean)
+                    .join(" · ") || "—"}
+                </p>
               </div>
-              <ul className="missing-list">
-                {rows(c.keywords)
-                  .slice(0, 5)
-                  .map((k) => (
-                    <li key={String(k.keyword)}>
-                      {String(k.keyword)}
-                      {k.volume != null ? ` · vol ${fmtVol(k.volume)}` : ""}
-                      {k.difficulty != null ? ` · KD ${fmtNum(k.difficulty)}` : ""}
-                    </li>
-                  ))}
-              </ul>
-            </div>
-          ))}
+            );
+          })}
         </Section>
       ) : null}
     </div>
@@ -268,7 +266,25 @@ function SearchDemandReport({ data }: { data: Record<string, unknown> }) {
 }
 
 function CompetitorsReport({ data }: { data: Record<string, unknown> }) {
-  const comps = rows(data.competitors || data.competitor_set || data.tier_overview);
+  const listed = rows(data.competitors || data.competitor_set);
+  const tierRows = rows(data.tier_overview);
+  const urlByName = new Map(
+    listed
+      .filter((c) => c.name && (c.url || c.domain))
+      .map((c) => [String(c.name), String(c.url || c.domain)])
+  );
+  const tierByName = new Map(tierRows.filter((t) => t.name).map((t) => [String(t.name), t]));
+  const comps = (tierRows.length ? tierRows : listed).map((row) => {
+    const name = String(row.name || "");
+    const tier = tierByName.get(name);
+    return {
+      ...row,
+      url: row.url || row.domain || row.website || (name ? urlByName.get(name) : "") || "",
+      tier: row.tier || row.tier_label || tier?.tier,
+      tier_name: row.tier_name || tier?.tier_name,
+      composite: row.composite ?? row.score ?? row.maturity_score ?? tier?.composite ?? tier?.score,
+    };
+  });
   const tiers = isObj(data.tiers) ? data.tiers : null;
   const service =
     (isObj(data.service_level) && data.service_level) ||
@@ -315,8 +331,8 @@ function CompetitorsReport({ data }: { data: Record<string, unknown> }) {
                     <td className="pg-report-small">
                       {String(c.url || c.domain || c.website || "—")}
                     </td>
-                    <td>{String(c.tier || c.tier_label || "—")}</td>
-                    <td>{fmtNum(c.score ?? c.maturity_score ?? c.total)}</td>
+                    <td>{String(c.tier_name || c.tier || c.tier_label || "—")}</td>
+                    <td>{fmtNum(c.composite ?? c.score ?? c.maturity_score ?? c.total)}</td>
                     <td>{String(c.positioning_cluster || c.cluster || "—")}</td>
                   </tr>
                 ))}
@@ -414,6 +430,7 @@ function StrategyReport({ data }: { data: Record<string, unknown> }) {
               <thead>
                 <tr>
                   <th>#</th>
+                  <th>Work</th>
                   <th>Title</th>
                   <th>Keyword</th>
                   <th>Vol</th>
@@ -425,6 +442,7 @@ function StrategyReport({ data }: { data: Record<string, unknown> }) {
                 {queue.slice(0, 15).map((r, i) => (
                   <tr key={i}>
                     <td>{i + 1}</td>
+                    <td>{String(r.work_label || r.action || "—")}</td>
                     <td>
                       <strong>{String(r.title || r.keyword || "—")}</strong>
                     </td>
@@ -447,6 +465,7 @@ function StrategyReport({ data }: { data: Record<string, unknown> }) {
                 <tr>
                   <th>Week</th>
                   <th>Month</th>
+                  <th>Work</th>
                   <th>Title</th>
                   <th>Keyword</th>
                   <th>Type</th>
@@ -454,13 +473,14 @@ function StrategyReport({ data }: { data: Record<string, unknown> }) {
                 </tr>
               </thead>
               <tbody>
-                {weekRows.slice(0, 12).map((r, i) => (
+                {weekRows.slice(0, 24).map((r, i) => (
                   <tr key={i}>
                     <td>{String(r.week || "—")}</td>
                     <td>
                       {String(r.month || "—")}
                       {r.month_label ? ` · ${String(r.month_label)}` : ""}
                     </td>
+                    <td>{String(r.work_label || r.action || "—")}</td>
                     <td>
                       <strong>{String(r.title || r.keyword || "—")}</strong>
                     </td>

@@ -1,7 +1,10 @@
+import FocusBox from "./FocusBox";
+import { useStageFocus } from "../../lib/stageFocus";
+
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
 };
 
 function asRows(raw: unknown): Array<Record<string, unknown>> {
@@ -20,6 +23,7 @@ const COUNT_KEYS = [
 ] as const;
 
 export default function ContentAuditCard({ payload, canAct, onAction }: Props) {
+  const focus = useStageFocus(payload);
   const inventory = asRows(payload.inventory);
   const cannibalization = asRows(payload.cannibalization || payload.cannibalisation);
   const refreshQueue = asRows(payload.refresh_queue);
@@ -72,6 +76,7 @@ export default function ContentAuditCard({ payload, canAct, onAction }: Props) {
           <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+                <th style={{ padding: "6px 8px" }}>Focus</th>
                 <th style={{ padding: "6px 8px" }}>Title</th>
                 <th style={{ padding: "6px 8px" }}>Path</th>
                 <th style={{ padding: "6px 8px" }}>Disposition</th>
@@ -81,7 +86,10 @@ export default function ContentAuditCard({ payload, canAct, onAction }: Props) {
             </thead>
             <tbody>
               {inventory.slice(0, 40).map((row, i) => (
-                <tr key={`${String(row.path || row.url)}-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
+                <tr key={`${String(row.path || row.url)}-${i}`} style={{ borderBottom: "1px solid var(--line)", opacity: focus.focused(row) ? 1 : 0.45 }}>
+                  <td style={{ padding: "6px 8px" }}>
+                    <FocusBox row={row} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />
+                  </td>
                   <td style={{ padding: "6px 8px", fontWeight: 600 }}>{String(row.title || "—")}</td>
                   <td style={{ padding: "6px 8px", fontSize: 11, color: "var(--muted)" }}>
                     {String(row.path || row.url || "—")}
@@ -238,7 +246,7 @@ export default function ContentAuditCard({ payload, canAct, onAction }: Props) {
 
       {canAct && (
         <div className="card-actions">
-          <button type="button" className="btn btn-primary" onClick={() => onAction("approve")}>
+          <button type="button" className="btn btn-primary" onClick={() => onAction("approve", focus.edits)}>
             Approve audit
           </button>
           <button type="button" className="btn btn-ghost" onClick={() => onAction("reject")}>

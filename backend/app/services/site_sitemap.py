@@ -93,13 +93,15 @@ def _guess_cluster(path: str, *, is_home: bool = False) -> tuple[str, str]:
         return "location", "Locations"
     if segments and segments[-1].lower() in _UTILITY_SLUGS:
         return "other", "Other pages"
-    # Shallow commercial paths look like hubs; deeper like services.
-    depth = _depth(path)
-    if depth <= 1:
-        return "service_hub", "Service hubs"
-    if depth == 2:
-        return "service", "Service pages"
-    if depth >= 3:
+    # Service hierarchy only under explicit commercial prefixes — bare
+    # depth-1 paths like /about-team or /pricing are not service hubs.
+    head = segments[0].lower() if segments else ""
+    if head in {"services", "service", "solutions", "products", "product", "offerings", "what-we-do"}:
+        depth = _depth(path)
+        if depth <= 1:
+            return "service_hub", "Service hubs"
+        if depth == 2:
+            return "service", "Service pages"
         return "sub_service", "Sub-service pages"
     return "other", "Other pages"
 

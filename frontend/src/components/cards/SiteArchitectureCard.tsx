@@ -1,9 +1,10 @@
 import WorkbookTable from "./WorkbookTable";
+import { useStageFocus } from "../../lib/stageFocus";
 
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
 };
 
 function asRows(raw: unknown): Array<Record<string, unknown>> {
@@ -215,6 +216,7 @@ function strList(raw: unknown, n = 4): string {
 }
 
 export default function SiteArchitectureCard({ payload, canAct, onAction }: Props) {
+  const focus = useStageFocus(payload);
   const current =
     payload.current_state && typeof payload.current_state === "object"
       ? (payload.current_state as Record<string, unknown>)
@@ -342,7 +344,11 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
         columns={categoryColumns}
         rows={(categoryMapping.length ? categoryMapping : urlMap).map(normalizeUrlMapRow)}
         maxRows={25}
+        stageFocus={{ focused: focus.focused, onToggle: focus.toggle, disabled: !canAct }}
       />
+      <p style={{ fontSize: 12, color: "var(--muted)", marginTop: -8 }}>
+        Uncheck Focus to leave a URL out of later stages.
+      </p>
 
       <div className="cs-funnel-strip">
         <span>
@@ -937,7 +943,7 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
 
       {canAct && (
         <div className="card-actions">
-          <button type="button" className="btn btn-primary" onClick={() => onAction("approve")}>
+          <button type="button" className="btn btn-primary" onClick={() => onAction("approve", focus.edits)}>
             Approve architecture
           </button>
           <button type="button" className="btn btn-ghost" onClick={() => onAction("reject")}>

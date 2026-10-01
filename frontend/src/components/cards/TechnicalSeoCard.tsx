@@ -1,5 +1,7 @@
 import { Fragment, useState } from "react";
 import { api } from "../../api";
+import FocusBox from "./FocusBox";
+import { useStageFocus } from "../../lib/stageFocus";
 
 type Fix = { priority?: string; issue?: string; fix?: string; source?: string };
 
@@ -8,7 +10,7 @@ type Section = { score?: number; findings?: string[] };
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
   clientId?: string;
   token?: string | null;
 };
@@ -28,6 +30,7 @@ const SECTION_LABELS: Record<string, string> = {
 };
 
 export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, token }: Props) {
+  const focus = useStageFocus(payload);
   const sections = (payload.sections || payload.technical_sections || {}) as Record<
     string,
     Section
@@ -365,6 +368,7 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
             >
               <thead>
                 <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+                  <th style={{ padding: "6px 8px" }}>Focus</th>
                   <th style={{ padding: "6px 8px" }}>Priority</th>
                   <th style={{ padding: "6px 8px" }}>Severity</th>
                   <th style={{ padding: "6px 8px" }}>Issue</th>
@@ -384,7 +388,10 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
                   );
                   return (
                     <Fragment key={ruleId}>
-                      <tr key={ruleId} style={{ borderBottom: "1px solid var(--line)" }}>
+                      <tr key={ruleId} style={{ borderBottom: "1px solid var(--line)", opacity: focus.focused(row) ? 1 : 0.45 }}>
+                        <td style={{ padding: "6px 8px" }}>
+                          <FocusBox row={row} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />
+                        </td>
                         <td style={{ padding: "6px 8px" }}>{String(row.priority ?? "—")}</td>
                         <td style={{ padding: "6px 8px" }}>{String(row.severity ?? "—")}</td>
                         <td style={{ padding: "6px 8px" }}>{String(row.title ?? "—")}</td>
@@ -543,7 +550,8 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
           <h4 style={{ margin: "12px 0 6px", fontSize: 13 }}>Priority backlog</h4>
           <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
             {fixes.slice(0, 20).map((f, i) => (
-              <li key={i} style={{ marginBottom: 6 }}>
+              <li key={i} style={{ marginBottom: 6, opacity: focus.focused(f) ? 1 : 0.45 }}>
+                <FocusBox row={f} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />{" "}
                 <strong>[{f.priority || "Medium"}]</strong> {f.issue}
                 {f.fix ? ` — ${f.fix}` : ""}
                 {f.source ? (
@@ -620,7 +628,7 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
 
       {canAct && (
         <div className="card-actions">
-          <button type="button" className="btn btn-primary" onClick={() => onAction("approve")}>
+          <button type="button" className="btn btn-primary" onClick={() => onAction("approve", focus.edits)}>
             Approve
           </button>
           <button type="button" className="btn btn-ghost" onClick={() => onAction("reject")}>

@@ -8,6 +8,13 @@ import re
 from typing import Any
 
 from app.config import get_settings
+from app.integrations.provider_status import (
+    NOT_CONFIGURED,
+    OK,
+    AttemptLog,
+    classify_exception,
+    scrub,
+)
 from app.integrations.retry import with_retry
 from app.logging_config import get_logger
 
@@ -190,46 +197,72 @@ async def pull_backlinks(domain: str) -> tuple[dict[str, Any], str]:
         parser = parse_html(fetched.get("text") or "")
         external = absolute_links(fetched.get("url") or f"https://{domain}", parser.hrefs)
         external = [u for u in external if domain not in u]
-        # Conservative public estimates — not Ahrefs DR
+        # Homepage link count. Not a Domain Rating — the caller labels it as an estimate.
         authority = min(70.0, 15 + len(parser.hrefs) * 0.4 + len(parser.json_ld) * 5)
         return {
             "referring_domains": None,
-            "authority_score": round(authority, 2),
+            "estimated_authority_score": round(authority, 2),
             "top_anchor_text": {"outbound_sample": min(40, len(external))},
             "sample_links": [{"from": u, "anchor": "outbound", "spammy": False} for u in external[:8]],
-            "note": (
-                "SEMrush/Ahrefs/Moz keys not set — authority estimated from live page signals only; "
-                "referring_domains unavailable."
-            ),
             "live_fetch_status": fetched.get("status_code"),
         }
 
     if settings.use_mock_providers:
-        return _mock_backlinks(domain, "ahrefs"), "ahrefs"
+        mocked = _mock_backlinks(domain, "ahrefs")
+        mocked["source"] = "provider"
+        mocked["provider"] = "ahrefs"
+        return mocked, "ahrefs"
 
-    try:
-        if settings.semrush_api_key:
-            data = await with_retry(semrush, attempts=2, label="semrush")
-            return data, "semrush"
-    except Exception as exc:  # noqa: BLE001
-        log.warning("semrush_failed", error=str(exc), domain=domain)
+    attempts = AttemptLog()
 
-    try:
-        if settings.ahrefs_api_key:
-            data = await with_retry(ahrefs, attempts=2, label="ahrefs")
-            return data, "ahrefs"
-    except Exception as exc:  # noqa: BLE001
-        log.warning("ahrefs_failed", error=str(exc), domain=domain)
+    async def _try(name: str, configured: bool, fn) -> tuple[dict[str, Any], str] | None:
+        if not configured:
+            attempts.record(name, NOT_CONFIGURED)
+            return None
+        try:
+            payload = await with_retry(fn, attempts=2, label=name)
+        except Exception as exc:  # noqa: BLE001
+            status = classify_exception(exc)
+            attempts.record(name, status, detail=str(exc))
+            log.warning(f"{name}_failed", error=scrub(str(exc)), domain=domain, status=status)
+            return None
+        attempts.record(name, OK)
+        data = dict(payload or {})
+        data["source"] = "provider"
+        data["provider"] = name
+        data["provider_status"] = attempts.to_list()
+        data["estimated_authority_score"] = None
+        return data, name
 
-    try:
-        if settings.moz_api_key:
-            data = await with_retry(moz, attempts=2, label="moz")
-            return data, "moz"
-    except Exception as exc:  # noqa: BLE001
-        log.warning("moz_failed", error=str(exc), domain=domain)
+    for name, configured, fn in (
+        ("semrush", bool(settings.semrush_api_key), semrush),
+        ("ahrefs", bool(settings.ahrefs_api_key), ahrefs),
+        ("moz", bool(settings.moz_api_key), moz),
+    ):
+        hit = await _try(name, configured, fn)
+        if hit is not None:
+            return hit
 
-    data = await live_signals()
-    return data, "live_site_signals"
+    estimate = await live_signals()
+    reason = attempts.fallback_reason()
+    score = estimate.get("estimated_authority_score")
+    note = (
+        "ESTIMATE from the homepage (link count and structured data), not a Domain Rating. "
+        f"{reason} Referring domains are unavailable."
+    )
+    return {
+        **estimate,
+        "authority_score": score,
+        "source": "heuristic",
+        "provider": None,
+        "heuristic": {
+            "is_estimate": True,
+            "method": "homepage_links_and_structured_data",
+        },
+        "fallback_reason": reason,
+        "note": note,
+        "provider_status": attempts.to_list(),
+    }, "live_site_signals"
 
 
 def _mock_backlinks(domain: str, provider: str) -> dict[str, Any]:
@@ -1053,6 +1086,8 @@ async def optimize_on_page(
             "target_keyword": target,
             "current_score": 0,
             "optimized_score": 0,
+            "images": [],
+            "images_note": "Page was not fetched — image checks were not run.",
             "error": safe_url,
             "severity": "warning",
         }
@@ -1091,6 +1126,9 @@ async def optimize_on_page(
         after_meta = (
             f"Learn about {target} with {display_name}. Get clear next steps and trusted guidance."
         )[:160]
+        from app.services.html_seo_signals import inspect_images
+
+        image_report = inspect_images(resp.text or "")
         return {
             "page_name": page_name,
             "page_url": url,
@@ -1108,7 +1146,8 @@ async def optimize_on_page(
             "url_slug": {"before": url, "after": url, "notes": "Review slug for keyword fit."},
             "headings": {"h1": f"{target.title()}", "h2s": [], "notes": "Full heading crawl not run live."},
             "content_gaps": ["Expand content to match search intent depth"],
-            "images": [],
+            "images": image_report["images"],
+            "images_note": image_report["note"],
             "internal_links": [],
             "schema_json_ld": {
                 "@context": "https://schema.org",
@@ -1126,6 +1165,8 @@ async def optimize_on_page(
             "target_keyword": target,
             "current_score": 0,
             "optimized_score": 0,
+            "images": [],
+            "images_note": "Page was not fetched — image checks were not run.",
             "error": str(exc),
             "severity": "warning",
         }
@@ -1289,23 +1330,27 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
             findings_crawl.append(f"Sitemap referenced in robots.txt ({len(sitemap_refs)})")
         else:
             findings_crawl.append("No Sitemap: line in robots.txt")
+        from app.services.html_seo_signals import ai_crawler_notes
+
+        findings_crawl.extend(ai_crawler_notes(robots_text))
     else:
         findings_crawl.append(f"robots.txt status {r_status or 'unreachable'}")
 
-    sitemap_urls = re.findall(r"(?im)^sitemap:\s*(\S+)", robots_text) or [
-        f"https://{domain}/sitemap.xml",
-        f"https://{domain}/sitemap_index.xml",
-    ]
-    sitemap_ok = False
-    for sm_url in sitemap_urls[:4]:
-        sm = await fetch_url(sm_url, follow=True, timeout=15)
-        sm_status = int(sm.get("status_code") or 0)
-        if sm_status == 200 and ("<urlset" in (sm.get("text") or "") or "<sitemapindex" in (sm.get("text") or "")):
-            findings_crawl.append(f"Sitemap OK: {sm_url}")
-            sitemap_ok = True
-            break
-        findings_crawl.append(f"Sitemap probe {sm_url}: status {sm_status}")
-    if not sitemap_ok:
+    from app.services.sitemap_audit import fetch_sitemap_audit
+
+    try:
+        sitemap_audit = await fetch_sitemap_audit(seed if seed.startswith("http") else f"https://{domain}")
+    except Exception:  # noqa: BLE001
+        sitemap_audit = {"status": "not_available", "issues": [], "urls": [], "summary": {}}
+    if sitemap_audit.get("status") == "available":
+        findings_crawl.append(
+            f"Sitemap parsed: {sitemap_audit.get('summary', {}).get('url_count', 0)} URL(s)"
+        )
+        for issue in (sitemap_audit.get("issues") or [])[:8]:
+            if isinstance(issue, dict) and issue.get("detail"):
+                findings_crawl.append(str(issue["detail"]))
+    else:
+        findings_crawl.append("XML sitemap not confirmed")
         priority_fixes.append(
             {
                 "priority": "High",
@@ -1478,6 +1523,7 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
         "priority_fixes": priority_fixes[:12],
         "severity": "warning" if overall is not None and overall < 70 else "info",
         "fetch_source": home_meta.get("source") if homepage_fetched else None,
+        "sitemap_audit": sitemap_audit,
     }
 
 
@@ -1642,13 +1688,18 @@ async def run_seo_audit(
     display_name: str,
     commercial_scope: dict[str, Any] | None = None,
     max_pages: int | None = None,
+    time_budget_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Comprehensive SEO audit across discovered site pages (sitemap + crawl).
 
     When commercial_scope (CDD) is provided, page selection and scoring follow
     business hierarchy: Home → service hubs → services → sub-services, with
     primary focus on URLs matching products / promotion list / keywords / geo.
+
+    time_budget_seconds: when set, stop auditing further pages before the budget
+    expires and return whatever was measured (homepage first).
     """
+    import time
     from urllib.parse import urlparse
 
     from app.integrations.llm import extract_domain
@@ -1659,6 +1710,16 @@ async def run_seo_audit(
     page_cap = int(max_pages) if max_pages is not None and int(max_pages) > 0 else settings.effective_seo_audit_max_pages
     max_pages = page_cap
     commercial = dict(commercial_scope or {})
+    deadline = (
+        time.monotonic() + float(time_budget_seconds)
+        if time_budget_seconds is not None and float(time_budget_seconds) > 0
+        else None
+    )
+
+    def _budget_left() -> float | None:
+        if deadline is None:
+            return None
+        return deadline - time.monotonic()
 
     def _done(report: dict[str, Any]) -> dict[str, Any]:
         from app.services.page_clusters import finalize_seo_audit_clusters
@@ -1996,15 +2057,19 @@ async def run_seo_audit(
                 warnings.append({"issue": f"Expected 1 H1, found {p.h1_count}", "ref": "headings"})
             else:
                 passing.append("Single H1")
-            if p.imgs_missing_alt:
-                warnings.append(
-                    {
-                        "issue": f"{p.imgs_missing_alt} image(s) missing alt text",
-                        "ref": "images",
-                    }
-                )
+            from app.services.html_seo_signals import inspect_images
+
+            image_report = inspect_images(html or "")
+            if image_report["findings"]:
+                for finding in image_report["findings"]:
+                    warnings.append(
+                        {
+                            "issue": f"{finding['src'] or '(no src)'}: {', '.join(finding['issues'])}",
+                            "ref": "images",
+                        }
+                    )
             else:
-                passing.append("Images have alt text (or no images)")
+                passing.append(image_report["note"])
             if not p.has_canonical:
                 opportunities.append({"issue": "Add canonical link", "ref": "canonical"})
             else:
@@ -2263,7 +2328,14 @@ async def run_seo_audit(
 
     from app.services.page_clusters import prioritize_urls_for_audit
 
-    discovered = await discover_site_urls(url, max_pages=max(max_pages * 3, max_pages))
+    left = _budget_left()
+    budget_skipped_discovery = False
+    # Leave time for at least the homepage audit if discovery is slow.
+    if left is not None and left < 20:
+        discovered = [url if url.startswith("http") else f"https://{domain}"]
+        budget_skipped_discovery = True
+    else:
+        discovered = await discover_site_urls(url, max_pages=max(max_pages * 3, max_pages))
     if not discovered:
         discovered = [url if url.startswith("http") else f"https://{domain}"]
     page_urls = prioritize_urls_for_audit(
@@ -2277,7 +2349,8 @@ async def run_seo_audit(
     # Perplexity only when the live crawl found almost nothing (JS / WAF).
     from app.integrations.site_research import research_ready, research_site_crawl
 
-    if research_ready() and len(page_urls) < 8:
+    left = _budget_left()
+    if research_ready() and len(page_urls) < 8 and (left is None or left > 25):
         research = await research_site_crawl(url, max_pages=max_pages)
         research_pages = research.get("pages") or []
         if research_pages:
@@ -2324,7 +2397,13 @@ async def run_seo_audit(
         async with sem:
             from app.integrations.web_fetch import fetch_page_html
 
-            html, meta = await fetch_page_html(page_url, timeout=15)
+            # Cap per-page wait when the overall budget is nearly gone.
+            left_now = _budget_left()
+            page_timeout = 15
+            if left_now is not None:
+                page_timeout = max(5, min(15, int(left_now - 1)))
+
+            html, meta = await fetch_page_html(page_url, timeout=page_timeout)
             final_url = str(meta.get("final_url") or page_url)
             status_code = int(meta.get("status_code") or 0)
             if not html:
@@ -2349,8 +2428,28 @@ async def run_seo_audit(
                 }
             return _audit_html(final_url, html, status_code or 200)
 
-    page_reports = await asyncio.gather(*[_audit_one(u) for u in page_urls])
-    pages_list = list(page_reports)
+    # Wave through pages so we can stop with a partial report before the outer
+    # wait_for cancels the whole coroutine (which would leave pages_analyzed=0).
+    pages_list: list[dict[str, Any]] = []
+    partial_timeout = budget_skipped_discovery
+    wave = 5
+    for i in range(0, len(page_urls), wave):
+        left_now = _budget_left()
+        if left_now is not None and pages_list and left_now < 3:
+            partial_timeout = True
+            break
+        batch = page_urls[i : i + wave]
+        if left_now is not None and left_now < 8 and pages_list:
+            # Finish at most one more page so the homepage/early pages survive.
+            batch = batch[:1]
+            partial_timeout = True
+        batch_reports = await asyncio.gather(*[_audit_one(u) for u in batch])
+        pages_list.extend(batch_reports)
+        if partial_timeout and i + wave < len(page_urls):
+            break
+        if partial_timeout and budget_skipped_discovery:
+            # Single homepage pass under a tight budget — done.
+            break
 
     # Site aggregates (with page refs)
     critical: list[dict] = list(site_critical)
@@ -2383,12 +2482,35 @@ async def run_seo_audit(
     else:
         score = _page_score(critical, warnings, opportunities)
 
+    if partial_timeout:
+        if budget_skipped_discovery:
+            warnings.append(
+                {
+                    "issue": (
+                        "Time budget was too tight for a full crawl — audited the homepage first. "
+                        "Re-run for a deeper multi-page pass."
+                    ),
+                    "ref": domain,
+                }
+            )
+        elif len(pages_list) < len(page_urls):
+            warnings.append(
+                {
+                    "issue": (
+                        f"Time budget reached after {len(pages_list)} of {len(page_urls)} pages — "
+                        "earlier pages (home/services) were prioritized."
+                    ),
+                    "ref": domain,
+                }
+            )
+
     return _done({
         "site": domain,
         "display_name": display_name,
         "pages_analyzed": len(pages_list),
         "overall_score": score,
         "score_band": _score_band(score) if score is not None else "Not measured (WAF)",
+        "partial_timeout": bool(partial_timeout),
         "critical": critical,
         "warnings": warnings,
         "opportunities": opportunities,
@@ -2514,7 +2636,13 @@ async def discover_competitors(
         ]
 
     from app.integrations.llm import _skill_chat
-    from app.integrations.web_fetch import fetch_url, page_text_excerpt, parse_html
+    from app.integrations.web_fetch import (
+        fetch_url,
+        is_non_business_host,
+        page_text_excerpt,
+        parse_html,
+        site_is_dead,
+    )
 
     client_host = domain.lower().removeprefix("www.")
     client_aliases = {client_host}
@@ -2536,6 +2664,8 @@ async def discover_competitors(
         if not host or host in client_aliases:
             return
         if "example" in host or "localhost" in host:
+            return
+        if is_non_business_host(host):
             return
         if host in seen:
             return
@@ -2587,7 +2717,7 @@ async def discover_competitors(
             "Add MORE real competitors using these angles (adapt wording to the vertical):\n"
             f'- "{industry_focus}" peers / providers in the same country/region\n'
             f'- "{display_name} alternatives" / "vs" style peers\n'
-            f'- Category leaders and directories for {industry_focus} (Clutch/G2/industry awards only if relevant)\n'
+            f"- Category leaders in {industry_focus} (the businesses themselves, not Clutch/G2/review directories)\n"
             f"- Larger aspirational leaders one level above in {industry_focus}\n"
             "Do NOT return unrelated marketing agencies unless the client is an agency. "
             "Return at least 8 ADDITIONAL competitors not in the already-have list. "
@@ -2644,6 +2774,26 @@ async def discover_competitors(
             total=len(comps),
             domain=client_host,
         )
+
+    if comps:
+        async def _alive(comp: dict[str, str]) -> bool:
+            try:
+                fetched = await fetch_url(comp["url"], timeout=8)
+            except Exception as exc:  # noqa: BLE001
+                log.info("discover_competitors_reachability_failed", url=comp["url"], error=str(exc)[:160])
+                return True
+            if site_is_dead(fetched):
+                log.info(
+                    "discover_competitors_dropped_dead_site",
+                    url=comp["url"],
+                    error=fetched.get("error"),
+                    status=fetched.get("status_code"),
+                )
+                return False
+            return True
+
+        alive = await asyncio.gather(*[_alive(c) for c in comps])
+        comps = [c for c, ok in zip(comps, alive) if ok]
 
     log.info("discover_competitors_skill", count=len(comps), domain=client_host, error=last_error or None)
     if not comps:

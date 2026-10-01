@@ -12,6 +12,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.agents.prompts import load_skill, load_skill_file
+from app.logging_config import get_logger
+
+log = get_logger("content_audit")
 
 PHASE8_SKILL_DIR = "existing-content-audit"
 
@@ -33,6 +36,61 @@ def _path(url: str) -> str:
     if "://" in url:
         return urlparse(url).path or "/"
     return url if url.startswith("/") else f"/{url}"
+
+
+def _attach_rival_urls(inventory: list[dict[str, Any]], rankings: list[dict[str, Any]]) -> None:
+    """Set rival_ranking_url when a rival's top search is this page's keyword."""
+    best: dict[str, dict[str, Any]] = {}
+    for block in rankings:
+        domain = block.get("domain")
+        for row in block.get("top_searches") or []:
+            if not isinstance(row, dict):
+                continue
+            key = _norm_kw(row.get("keyword"))
+            url = str(row.get("url") or "").strip()
+            if not key or not url:
+                continue
+            position = row.get("position")
+            current = best.get(key)
+            if current is None or (
+                isinstance(position, int)
+                and (not isinstance(current.get("position"), int) or position < current["position"])
+            ):
+                best[key] = {"url": url, "domain": domain, "position": position}
+    for item in inventory:
+        match = best.get(_norm_kw(item.get("keyword")))
+        if not match:
+            continue
+        item["rival_ranking_url"] = match["url"]
+        item["rival_domain"] = match["domain"]
+
+
+async def _competitor_rankings(search_demand: dict[str, Any]) -> list[dict[str, Any]]:
+    """Relevant pages and top searches for rivals already stored on the demand pack."""
+    from app.integrations import dataforseo
+
+    sites = [s for s in (search_demand.get("competitor_sites") or []) if isinstance(s, dict)]
+    out: list[dict[str, Any]] = []
+    for snap in sites[:3]:
+        domain = str(snap.get("domain") or snap.get("url") or "")
+        if not dataforseo.normalize_target(domain):
+            continue
+        try:
+            pages, _page_errors = await dataforseo.relevant_pages(domain, limit=10)
+            searches, _search_errors = await dataforseo.top_searches(domain, limit=10)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("competitor_rankings_failed", domain=domain, error=str(exc)[:200])
+            continue
+        if not pages and not searches:
+            continue
+        out.append(
+            {
+                "domain": dataforseo.normalize_target(domain),
+                "relevant_pages": pages,
+                "top_searches": searches,
+            }
+        )
+    return out
 
 
 def _pages_from_website(website: dict[str, Any]) -> list[dict[str, Any]]:
@@ -458,6 +516,13 @@ async def run_content_audit_plan(
         counts[d] = counts.get(d, 0) + 1
 
     themes = _group_by_theme(inventory)
+    rankings: list[dict[str, Any]] = []
+    try:
+        rankings = await _competitor_rankings(demand)
+        _attach_rival_urls(inventory, rankings)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("content_audit_rankings_failed", error=str(exc)[:200])
+        rankings = []
 
     refresh_queue = [i for i in inventory if i.get("disposition") == "refresh"]
     quick_wins = [i for i in inventory if i.get("disposition") in ("retitle", "optimise")]
@@ -509,6 +574,7 @@ async def run_content_audit_plan(
         "qualitative": qualitative,
         "executive_summary": executive_summary,
         "inventory": inventory,
+        "competitor_ranking_pages": rankings,
         "themes": themes,
         "cannibalization": cannibalization[:15],
         "cannibalisation": cannibalization[:15],

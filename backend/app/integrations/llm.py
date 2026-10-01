@@ -566,6 +566,133 @@ def extract_domain(url: str) -> str:
     return url.split("/")[0].lower()
 
 
+def _json_stack_state(text: str) -> tuple[list[str], bool]:
+    """Return (closers_needed, in_string) after scanning ``text``."""
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+    return stack, in_string
+
+
+def _is_json_key_string(text: str, after_quote: int) -> bool:
+    """True when the string that just ended is an object key (next token is ':')."""
+    j = after_quote
+    n = len(text)
+    while j < n and text[j] in " \t\n\r":
+        j += 1
+    return j < n and text[j] == ":"
+
+
+def _last_complete_json_end(text: str) -> int:
+    """Exclusive index of the last complete value inside a truncated JSON blob.
+
+    Nested objects/arrays only count once closed. Root-level primitives (e.g.
+    ``"summary": "ok"``) count when their value finishes so a cut mid-sibling
+    field can still yield a valid object. Incomplete nested rows are dropped.
+    """
+    in_string = False
+    escape = False
+    stack: list[str] = []
+    last_good = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+                # Root object string values only — not keys, not nested fields.
+                if len(stack) == 1 and not _is_json_key_string(text, i + 1):
+                    last_good = i + 1
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            i += 1
+            continue
+        if ch in " \t\n\r":
+            i += 1
+            continue
+        if ch == "{":
+            stack.append("}")
+            i += 1
+            continue
+        if ch == "[":
+            stack.append("]")
+            i += 1
+            continue
+        if ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+                last_good = i + 1
+            i += 1
+            continue
+        if ch == ",":
+            i += 1
+            continue
+        if ch == ":":
+            i += 1
+            continue
+        # true / false / null / number — root values only
+        if ch in "tfn" or ch == "-" or ch.isdigit():
+            if text.startswith("true", i):
+                i += 4
+            elif text.startswith("false", i):
+                i += 5
+            elif text.startswith("null", i):
+                i += 4
+            else:
+                i += 1
+                while i < n and text[i] in "0123456789.eE+-":
+                    i += 1
+            if len(stack) == 1:
+                last_good = i
+            continue
+        i += 1
+    return last_good
+
+
+def _repair_truncated_json(text: str) -> Any | None:
+    """Best-effort parse of JSON cut off by max_tokens (Unterminated string, etc.)."""
+    end = _last_complete_json_end(text)
+    if end < 2:
+        return None
+    fragment = text[:end].rstrip().rstrip(",")
+    stack, in_string = _json_stack_state(fragment)
+    if in_string:
+        fragment += '"'
+        stack, _ = _json_stack_state(fragment)
+    fragment = fragment.rstrip().rstrip(",")
+    while stack:
+        fragment += stack.pop()
+    try:
+        return json.loads(fragment)
+    except json.JSONDecodeError:
+        return None
+
+
 def _parse_json_content(text: str) -> dict[str, Any] | None:
     text = text.strip()
     if text.startswith("```"):
@@ -576,7 +703,16 @@ def _parse_json_content(text: str) -> dict[str, Any] | None:
         match = re.search(r"\{[\s\S]*\}", text)
         if match:
             text = match.group(0)
-    return json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        repaired = _repair_truncated_json(text)
+        if repaired is None:
+            raise
+        parsed = repaired
+    if not isinstance(parsed, dict):
+        raise json.JSONDecodeError("Expected a JSON object", text, 0)
+    return parsed
 
 
 async def synthesize_json(
@@ -590,28 +726,37 @@ async def synthesize_json(
     """Ask skill model for JSON only; returns parsed dict or None.
 
     Pass ``model`` to override (e.g. competitor_model / Gemini for P4).
+    Retries once when the first reply is empty or unparseable (truncated JSON
+    is repaired in-place; a second call covers hard truncations past salvage).
     """
     if not _skill_provider_ready():
         if raise_on_error:
             raise RuntimeError("LLM provider not ready (mock mode or missing API key)")
         return None
-    try:
-        text = await _skill_chat(
-            system=system + "\nRespond with valid JSON only. No markdown fences.",
-            user=user,
-            max_tokens=max_tokens,
-            model=model,
-        )
-        if not text:
-            if raise_on_error:
-                raise RuntimeError("LLM returned empty content")
-            return None
-        return _parse_json_content(text)
-    except Exception as exc:
-        log.warning("synthesize_json_failed", error=str(exc), provider=get_settings().llm_provider)
-        if raise_on_error:
-            raise
-        return None
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            text = await _skill_chat(
+                system=system + "\nRespond with valid JSON only. No markdown fences.",
+                user=user,
+                max_tokens=max_tokens,
+                model=model,
+            )
+            if not text:
+                last_exc = RuntimeError("LLM returned empty content")
+                continue
+            return _parse_json_content(text)
+        except Exception as exc:
+            last_exc = exc
+            log.warning(
+                "synthesize_json_failed",
+                error=str(exc) or type(exc).__name__,
+                attempt=attempt + 1,
+                provider=get_settings().llm_provider,
+            )
+    if raise_on_error and last_exc is not None:
+        raise last_exc
+    return None
 
 
 async def live_pre_research(
@@ -628,29 +773,29 @@ async def live_pre_research(
     )
 
     if not _skill_provider_ready():
-        return mock_pre_research(display_name, primary_url, industry=industry)
+        return unavailable_pre_research(
+            display_name,
+            primary_url,
+            industry=industry,
+            reason=(
+                "Discovery model is unavailable. Needs review. "
+                "No products, positioning, or reviews were inferred."
+            ),
+        )
 
     # Client-resolution: a redirect onto another registrable domain must stop the
     # run, not be researched as if it were the client (see P0-2).
     fetched = await fetch_url(primary_url, enforce_registrable_domain=True)
     if fetched.get("error") or not fetched.get("text"):
-        base = mock_pre_research(display_name, primary_url, industry=industry)
-        for k, v in list(base.items()):
-            if isinstance(v, dict) and "confidence" in v:
-                v["confidence"] = min(float(v["confidence"]), 0.25)
-                if k in ("business_model", "products", "positioning"):
-                    v["value"] = (
-                        f"Live fetch failed ({fetched.get('error') or 'empty'}). "
-                        "No research available from the site — confirm with client."
-                    )
-                    v["confidence"] = 0.1
-        base["discrepancies"] = [
-            {
-                "field_key": "business_model",
-                "explanation": f"Could not fetch {primary_url}: {fetched.get('error')}",
-            }
-        ]
-        return base
+        return unavailable_pre_research(
+            display_name,
+            primary_url,
+            industry=industry,
+            reason=(
+                f"Could not fetch {primary_url}: {fetched.get('error') or 'empty'}. "
+                "Needs review. No products, positioning, or reviews were inferred."
+            ),
+        )
 
     parser = parse_html(fetched["text"])
     excerpt = page_text_excerpt(parser, 4500)
@@ -724,7 +869,15 @@ async def live_pre_research(
     )
     parsed = await synthesize_json(system, user)
     if not parsed:
-        return mock_pre_research(display_name, primary_url, industry=industry)
+        return unavailable_pre_research(
+            display_name,
+            primary_url,
+            industry=industry,
+            reason=(
+                "Discovery JSON could not be parsed. Needs review. "
+                "No products, positioning, or reviews were inferred."
+            ),
+        )
 
     from app.services.discovery_fields import CLIENT_ONLY_FIELDS, RESEARCH_FIELDS
 
@@ -793,65 +946,59 @@ def _normalize_discrepancies(raw: Any) -> list[dict[str, str]]:
     return out
 
 
+def unavailable_pre_research(
+    display_name: str,
+    primary_url: str,
+    industry: str | None = None,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Empty discovery payload when research cannot be supported.
+
+    Every field is null. Nothing here is a business claim — products, positioning,
+    and reviews stay blank until a person reviews them.
+    """
+    from app.services.discovery_fields import CLIENT_ONLY_FIELDS, RESEARCH_FIELDS
+
+    del display_name, industry
+    note = " ".join(str(reason or "").split()).strip()
+    if not note:
+        note = (
+            f"Discovery research for {primary_url} is unavailable. "
+            "Needs review. No business claims were inferred."
+        )
+    out: dict[str, Any] = {}
+    for key in tuple(RESEARCH_FIELDS) + tuple(CLIENT_ONLY_FIELDS):
+        out[key] = {
+            "value": None,
+            "confidence": 0.0,
+            "status": "unavailable",
+            "needs_review": True,
+        }
+    out["status"] = "unavailable"
+    out["needs_review"] = True
+    out["unavailable_reason"] = note
+    out["discrepancies"] = [
+        {"field_key": "business_model", "explanation": note},
+    ]
+    return out
+
+
 def mock_pre_research(
     display_name: str,
     primary_url: str,
     industry: str | None = None,
 ) -> dict[str, Any]:
-    domain = extract_domain(primary_url)
-    vertical = (industry or "General / multi-category").strip()
-    return {
-        "inferred_industry": {
-            "value": vertical,
-            "confidence": 0.8 if industry else 0.4,
-        },
-        "business_model": {
-            "value": (
-                f"{display_name} appears to operate in {vertical} via {domain}"
-            ),
-            "confidence": 0.72,
-        },
-        "products": {
-            "value": [
-                f"Core {vertical} offering",
-                "Complementary services",
-                "Support / aftercare",
-            ],
-            "confidence": 0.65,
-        },
-        "positioning": {
-            "value": f"Mid-market {vertical} brand with quality-focused messaging",
-            "confidence": 0.60,
-        },
-        "public_reviews_summary": {
-            "value": "Public reviews lean mixed: service praised; price sensitivity mentioned.",
-            "confidence": 0.45,
-        },
-        "social_presence": {
-            "value": "LinkedIn and Instagram likely; confirm handles with client.",
-            "confidence": 0.35,
-        },
-        "google_business_signals": {
-            "value": "Local / regional presence suggested by site copy — confirm listing.",
-            "confidence": 0.35,
-        },
-        "revenue_split": {"value": None, "confidence": 0.1},
-        "average_order_value": {"value": None, "confidence": 0.1},
-        "sales_cycle": {"value": None, "confidence": 0.1},
-        "seasonality": {"value": None, "confidence": 0.1},
-        "objectives": {"value": None, "confidence": 0.1},
-        "compliance_constraints": {"value": None, "confidence": 0.1},
-        "other_marketing_spend": {"value": None, "confidence": 0.1},
-        "discrepancies": [
-            {
-                "field_key": "positioning",
-                "explanation": (
-                    "Public reviews suggest price-sensitive buyers while site copy "
-                    "emphasizes premium positioning."
-                ),
-            }
-        ],
-    }
+    """Kept for callers that still import this name. Does not invent a business."""
+    return unavailable_pre_research(
+        display_name,
+        primary_url,
+        industry,
+        reason=(
+            "Discovery research is unavailable. Needs review. "
+            "No products, positioning, or reviews were inferred."
+        ),
+    )
 
 
 def draft_images_dir() -> Path:

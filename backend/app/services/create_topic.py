@@ -83,10 +83,11 @@ def _kd_to_difficulty(kd: Any) -> str:
 def _parse_args_from_message(message: str) -> dict[str, Any]:
     """Extract optional count / audience / funnel from chat text."""
     lowered = (message or "").lower()
-    count = 10
+    # Default 4 (not 10): enough for ≥2 blogs + service angles without flooding Phase 9.
+    count = 4
     m = re.search(r"\b(\d{1,2})\s+topics?\b", lowered)
     if m:
-        count = max(3, min(20, int(m.group(1))))
+        count = max(2, min(20, int(m.group(1))))
     audience = None
     am = re.search(r"audience[:\s]+([^\n.;]+)", message or "", flags=re.IGNORECASE)
     if am:
@@ -565,6 +566,49 @@ def _normalize_plan(raw: dict[str, Any], *, seed: str, count: int) -> dict[str, 
         "internal_linking": raw.get("internal_linking") or [],
         "source": "create_topic_skill",
     }
+
+
+def resolve_topic_plan(
+    *,
+    demand: dict[str, Any] | None,
+    architecture: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The topic plan a consumer should use, from whichever phase owns it.
+
+    Phase 5 drafts the plan; Phase 6 stamps URL-map actions onto it and keeps
+    the stamped copy in its own summary. Phase 6 used to also write that copy
+    back into ``search_demand_summary``, which Phase 5 fully replaces on its
+    next run — so the refinement was silently lost. Reading it from its owner
+    removes the need for that back-write.
+    """
+    stamped = (architecture or {}).get("topic_plan")
+    if isinstance(stamped, dict) and (
+        stamped.get("topic_ideas") or stamped.get("existing_on_site")
+    ):
+        return stamped
+    draft = (demand or {}).get("topic_plan")
+    return draft if isinstance(draft, dict) else {}
+
+
+def resolve_topics(
+    *,
+    demand: dict[str, Any] | None,
+    architecture: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Topic rows matching whichever plan ``resolve_topic_plan`` selected."""
+    stamped_plan = (architecture or {}).get("topic_plan")
+    if isinstance(stamped_plan, dict) and (
+        stamped_plan.get("topic_ideas") or stamped_plan.get("existing_on_site")
+    ):
+        rows = (architecture or {}).get("topics")
+        if isinstance(rows, list) and rows:
+            return [r for r in rows if isinstance(r, dict)]
+        return topics_from_plan(stamped_plan)
+    rows = (demand or {}).get("topics")
+    if isinstance(rows, list) and rows:
+        return [r for r in rows if isinstance(r, dict)]
+    draft = (demand or {}).get("topic_plan")
+    return topics_from_plan(draft) if isinstance(draft, dict) else []
 
 
 def topics_from_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:

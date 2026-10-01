@@ -522,7 +522,9 @@ async def _rollup_to_profile(
                     summary["sample_urls"] = list(crawl_sum.get("discovered_urls") or [])[:40]
                 if crawl_sum.get("pages_found") is not None and summary.get("pages_found") is None:
                     summary["pages_found"] = crawl_sum.get("pages_found")
-        profile.website_situation_summary = summary
+        from app.services.keyword_focus import focus_and_slim
+
+        profile.website_situation_summary = focus_and_slim(summary, edits, lambda current: current)
 
     elif agent_key == "competitor_market_agent":
         comps = (
@@ -530,14 +532,21 @@ async def _rollup_to_profile(
                 select(CompetitorProfile).where(CompetitorProfile.client_id == client_id)
             )
         ).scalars().all()
+        from app.services.keyword_focus import selection_keys
+
+        skipped = selection_keys(edits)
         for c in comps:
-            c.confirmed = True
+            name_key = " ".join(str(c.name or "").strip().lower().split())
+            url_key = " ".join(str(c.url or "").strip().lower().split())
+            c.confirmed = not (name_key in skipped or url_key in skipped)
         from app.services.cache import cache_get, competitor_cache_key
 
         cached = await cache_get(competitor_cache_key(str(client_id))) or {}
         from app.services.memory_packs import slim_competitor_memory
 
-        profile.competitive_landscape_summary = slim_competitor_memory(
+        from app.services.keyword_focus import focus_and_slim
+
+        profile.competitive_landscape_summary = focus_and_slim(
             {
                 "analysis_mode": cached.get("analysis_mode", "tiered_16_parameter"),
                 "tier_overview": cached.get("tier_overview", []),
@@ -554,80 +563,93 @@ async def _rollup_to_profile(
                     }
                     for c in comps
                 ],
-            }
+            },
+            edits,
+            slim_competitor_memory,
         )
 
     elif agent_key == "search_demand":
+        from app.services.keyword_focus import apply_keyword_focus
         from app.services.memory_packs import slim_search_demand_memory
 
         current = dict(profile.search_demand_summary or {})
         if edits:
             current.update(edits)
+            current = apply_keyword_focus(current, edits)
         # Keep full detail on the chat card; store essentials in shared memory
         profile.search_demand_summary = slim_search_demand_memory(current)
 
     elif agent_key == "content_strategy":
+        from app.services.keyword_focus import focus_and_slim
         from app.services.memory_packs import slim_seo_strategy_memory
 
-        current = dict(profile.seo_strategy_summary or {})
-        if edits:
-            current.update(edits)
-        profile.seo_strategy_summary = slim_seo_strategy_memory(current)
+        profile.seo_strategy_summary = focus_and_slim(
+            profile.seo_strategy_summary, edits, slim_seo_strategy_memory
+        )
 
     elif agent_key == "site_architecture":
         from app.services.memory_packs import slim_site_architecture_memory
+        from app.services.keyword_focus import focus_and_slim
 
-        current = dict(profile.site_architecture_summary or {})
-        if edits:
-            current.update(edits)
-        profile.site_architecture_summary = slim_site_architecture_memory(current)
+        profile.site_architecture_summary = focus_and_slim(
+            profile.site_architecture_summary, edits, slim_site_architecture_memory
+        )
 
     elif agent_key == "technical_seo":
+        from app.services.keyword_focus import focus_and_slim
         from app.services.memory_packs import slim_technical_seo_memory
 
-        current = dict(profile.technical_seo_summary or {})
-        if edits:
-            current.update(edits)
-        profile.technical_seo_summary = slim_technical_seo_memory(current)
+        profile.technical_seo_summary = focus_and_slim(
+            profile.technical_seo_summary, edits, slim_technical_seo_memory
+        )
 
     elif agent_key == "content_audit":
+        from app.services.keyword_focus import focus_and_slim
         from app.services.memory_packs import slim_content_audit_memory
 
-        current = dict(profile.content_audit_summary or {})
-        if edits:
-            current.update(edits)
-        profile.content_audit_summary = slim_content_audit_memory(current)
+        profile.content_audit_summary = focus_and_slim(
+            profile.content_audit_summary, edits, slim_content_audit_memory
+        )
 
     elif agent_key == "content_planning":
+        from app.services.keyword_focus import focus_and_slim
         from app.services.memory_packs import slim_content_planning_memory
 
-        current = dict(profile.content_planning_summary or {})
-        if edits:
-            current.update(edits)
-        profile.content_planning_summary = slim_content_planning_memory(current)
+        profile.content_planning_summary = focus_and_slim(
+            profile.content_planning_summary, edits, slim_content_planning_memory
+        )
 
     elif agent_key == "content_production":
+        from app.services.keyword_focus import focus_and_slim
         from app.services.memory_packs import slim_content_production_memory
 
-        current = dict(profile.content_production_summary or {})
-        if edits:
-            current.update(edits)
-        profile.content_production_summary = slim_content_production_memory(current)
+        profile.content_production_summary = focus_and_slim(
+            profile.content_production_summary, edits, slim_content_production_memory
+        )
 
     elif agent_key == "on_page_seo":
+        from app.services.keyword_focus import focus_and_slim
         from app.services.memory_packs import slim_on_page_seo_memory
 
-        current = dict(profile.on_page_seo_summary or {})
-        if edits:
-            current.update(edits)
-        profile.on_page_seo_summary = slim_on_page_seo_memory(current)
+        profile.on_page_seo_summary = focus_and_slim(
+            profile.on_page_seo_summary, edits, slim_on_page_seo_memory
+        )
 
     elif agent_key == "publishing":
+        from app.services.keyword_focus import focus_and_slim
         from app.services.memory_packs import slim_publishing_memory
 
-        current = dict(profile.publishing_summary or {})
-        if edits:
-            current.update(edits)
-        profile.publishing_summary = slim_publishing_memory(current)
+        profile.publishing_summary = focus_and_slim(
+            profile.publishing_summary, edits, slim_publishing_memory
+        )
+
+    if edits and agent_key != "search_demand" and profile.search_demand_summary:
+        from app.services.keyword_focus import drop_focused_items, selection_keys
+
+        keys = selection_keys(edits)
+        if keys:
+            profile.search_demand_summary = drop_focused_items(
+                dict(profile.search_demand_summary), keys
+            )
 
     await db.flush()

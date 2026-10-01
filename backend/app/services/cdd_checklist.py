@@ -111,7 +111,7 @@ FIELD_BLOCKS_PHASE: dict[str, tuple[str, ...]] = {
     "cms_access": ("publishing",),
     "hosting_access": ("publishing", "technical_seo"),
     "google_ads_access": ("tracking",),
-    "google_business_access": ("tracking", "site_architecture"),
+    "google_business_access": ("site_architecture",),
     "access_level": ("tracking",),
 }
 

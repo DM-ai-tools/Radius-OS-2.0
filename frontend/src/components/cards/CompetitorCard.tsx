@@ -1,4 +1,6 @@
 import { useState } from "react";
+import FocusBox from "./FocusBox";
+import { useStageFocus } from "../../lib/stageFocus";
 
 type ParamScore = { label?: string; score: number; evidence?: string };
 type Scorecard = {
@@ -22,6 +24,7 @@ type Scorecard = {
 type TierRow = {
   rank: number;
   name: string;
+  url?: string;
   tier: number;
   tier_name: string;
   composite: number;
@@ -34,7 +37,7 @@ type TierRow = {
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
   onAddManual?: (name: string, url: string) => void;
 };
 
@@ -46,7 +49,12 @@ const TIER_LABELS: Record<string, string> = {
 };
 
 export default function CompetitorCard({ payload, canAct, onAction, onAddManual }: Props) {
+  const focus = useStageFocus(payload);
   const tierOverview = (payload.tier_overview || []) as TierRow[];
+  const listed = (payload.competitors || []) as { name?: string; url?: string }[];
+  const urlByName = new Map(
+    listed.filter((c) => c.name && c.url).map((c) => [String(c.name), String(c.url)])
+  );
   const scorecards = (payload.scorecards || []) as Scorecard[];
   const recommendations = (payload.recommendations || {}) as {
     benchmark?: string[];
@@ -230,6 +238,7 @@ export default function CompetitorCard({ payload, canAct, onAction, onAddManual 
                 <tr>
                   <th>#</th>
                   <th>Competitor</th>
+                  <th>Website</th>
                   <th>Tier</th>
                   <th>Composite</th>
                   <th>Similarity</th>
@@ -239,10 +248,21 @@ export default function CompetitorCard({ payload, canAct, onAction, onAddManual 
                 </tr>
               </thead>
               <tbody>
-                {tierOverview.map((r) => (
+                {tierOverview.map((r) => {
+                  const site = r.url || urlByName.get(r.name) || "";
+                  return (
                   <tr key={r.name}>
                     <td>{r.rank}</td>
                     <td>{r.name}</td>
+                    <td style={{ fontSize: 12 }}>
+                      {site ? (
+                        <a href={site} target="_blank" rel="noreferrer">
+                          {site.replace(/^https?:\/\//, "")}
+                        </a>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td>
                       T{r.tier}: {r.tier_name}
                     </td>
@@ -252,7 +272,8 @@ export default function CompetitorCard({ payload, canAct, onAction, onAddManual 
                     <td>{r.future_threat}</td>
                     <td>{r.aspirational}</td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -269,7 +290,8 @@ export default function CompetitorCard({ payload, canAct, onAction, onAddManual 
                   {TIER_LABELS[tier]}
                 </div>
                 {(tierMap[tier] || []).map((c) => (
-                  <div key={c.name} className="field-row" style={{ fontSize: 12 }}>
+                  <div key={c.name} className="field-row" style={{ fontSize: 12, opacity: focus.focused(c) ? 1 : 0.45 }}>
+                    <FocusBox row={c} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />{" "}
                     <strong>{c.name}</strong> — Score {c.composite}
                     {c.note ? ` — ${c.note}` : ""}
                   </div>
@@ -617,7 +639,7 @@ export default function CompetitorCard({ payload, canAct, onAction, onAddManual 
 
       {canAct && (
         <div className="card-actions">
-          <button className="btn btn-primary" onClick={() => onAction("approve")}>
+          <button className="btn btn-primary" onClick={() => onAction("approve", focus.edits)}>
             Approve landscape
           </button>
         </div>

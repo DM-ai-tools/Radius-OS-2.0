@@ -1,7 +1,10 @@
+import FocusBox from "./FocusBox";
+import { useStageFocus } from "../../lib/stageFocus";
+
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
 };
 
 function asRows(raw: unknown): Array<Record<string, unknown>> {
@@ -41,6 +44,7 @@ function contentTypeLabel(row: Record<string, unknown>): string {
 }
 
 export default function ContentPlanningCard({ payload, canAct, onAction }: Props) {
+  const focus = useStageFocus(payload);
   const pages = asRows(payload.pages).length ? asRows(payload.pages) : asRows(payload.roadmap);
   const excluded = asRows(payload.excluded);
   const locked = payload.locked === true;
@@ -88,6 +92,7 @@ export default function ContentPlanningCard({ payload, canAct, onAction }: Props
           <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+                <th style={{ padding: "6px 8px" }}>Focus</th>
                 <th style={{ padding: "6px 8px" }}>#</th>
                 <th style={{ padding: "6px 8px" }}>URL</th>
                 <th style={{ padding: "6px 8px" }}>Keyword</th>
@@ -100,7 +105,10 @@ export default function ContentPlanningCard({ payload, canAct, onAction }: Props
             </thead>
             <tbody>
               {pages.slice(0, 40).map((r, i) => (
-                <tr key={`${String(r.url_n || r.url || r.path)}-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
+                <tr key={`${String(r.url_n || r.url || r.path)}-${i}`} style={{ borderBottom: "1px solid var(--line)", opacity: focus.focused(r) ? 1 : 0.45 }}>
+                  <td style={{ padding: "6px 8px" }}>
+                    <FocusBox row={r} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />
+                  </td>
                   <td style={{ padding: "6px 8px" }}>{fmtNum(r.priority_rank ?? i + 1)}</td>
                   <td style={{ padding: "6px 8px", fontWeight: 600 }}>
                     {String(r.title || r.url_n || r.url || "—")}
@@ -113,7 +121,7 @@ export default function ContentPlanningCard({ payload, canAct, onAction }: Props
                     <span className="cs-chip">{contentTypeLabel(r)}</span>
                   </td>
                   <td style={{ padding: "6px 8px" }}>
-                    <span className="cs-chip">{String(r.action || "—")}</span>
+                    <span className="cs-chip">{String(r.work_label || r.action || "—")}</span>
                   </td>
                   <td style={{ padding: "6px 8px", fontSize: 11 }}>
                     {String(r.disposition || "—")}
@@ -155,7 +163,7 @@ export default function ContentPlanningCard({ payload, canAct, onAction }: Props
           <button
             type="button"
             className="btn btn-primary"
-            onClick={() => onAction("approve")}
+            onClick={() => onAction("approve", focus.edits)}
             disabled={!locked}
           >
             Approve locked roadmap

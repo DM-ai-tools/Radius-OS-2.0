@@ -233,11 +233,18 @@ def _normalize_competitor(payload: dict[str, Any]) -> dict[str, Any]:
         len(out.get("competitors") or []),
     )
 
+    urls_by_name = {
+        str(row.get("name") or "").strip().lower(): row.get("url") or row.get("domain")
+        for row in _as_rows(out.get("competitors"))
+        if isinstance(row, dict) and (row.get("url") or row.get("domain"))
+    }
     tier_rows = []
     for row in _as_rows(out.get("tier_overview")):
+        url = _first(row.get("url"), row.get("domain"), urls_by_name.get(str(row.get("name") or "").strip().lower()))
         tier_rows.append(
             {
                 **row,
+                "url": url,
                 "composite": _first(row.get("composite"), row.get("score"), row.get("maturity_score")),
                 "future_threat": _first(row.get("future_threat"), row.get("threat")),
             }

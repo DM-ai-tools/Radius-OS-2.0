@@ -185,7 +185,7 @@ Guidance for the human applying the approved change:
 ```json
 {
   "schema_items": [
-    {"url": "", "types": ["WebPage"], "json_ld": {}, "omitted": ["aggregateRating"]}
+    {"url": "", "types": ["WebPage"], "json_ld": {}, "omitted": ["aggregateRating"], "eligibility": {"schema_org": "valid", "google_rich_result": "not_eligible", "reason": ""}}
   ]
 }
 ```

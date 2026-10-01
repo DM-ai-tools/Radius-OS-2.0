@@ -365,6 +365,21 @@ def service_token_overlap(keyword: str, service: str) -> int:
         "service",
         "agency",
         "company",
+        # Shared paid-media heads must not map Google Ads → Meta Ads.
+        "ads",
+        "ad",
+        "advertising",
+        "advert",
+        "ppc",
+        "sem",
+        "cpc",
+        "paid",
+        "search",
+        "social",
+        "media",
+        "campaign",
+        "campaigns",
+        "management",
     }
     st = {t for t in _norm(service).split() if len(t) > 2 and t not in weak}
     kt = {t for t in _norm(keyword).split() if len(t) > 2 and t not in weak}
@@ -853,6 +868,7 @@ def rank_opportunities(
     seeds: list[str],
     products: list[str],
     client_authority: float | None = None,
+    client_authority_source: str | None = None,
     limit_per_bucket: int = 12,
     relevance_context: Any | None = None,
 ) -> dict[str, Any]:
@@ -952,6 +968,7 @@ def rank_opportunities(
             if r["bucket"] == "avoid":
                 r["bucket"] = "best"
 
+    source = client_authority_source or ("unknown" if client_authority is None else "provider")
     return {
         "best_opportunities": best,
         "strong_evergreen": evergreen,
@@ -959,6 +976,8 @@ def rank_opportunities(
         "avoid": avoid,
         "head_terms": head_terms,
         "all_scored": scored_sorted,
+        "client_authority_source": source,
+        "client_authority_is_estimate": source != "provider",
     }
 
 
@@ -1296,6 +1315,11 @@ def select_topics_from_service_clusters(
                     if not nkw or nkw in seen or is_stale_year_keyword(nkw):
                         continue
                     if is_noisy_keyword(kw):
+                        continue
+                    # Informational-reroute rows (DIY / recipe / how-to) are kept
+                    # in the pool for content, but must never become the target
+                    # keyword of a commercial service page.
+                    if row.get("commercial_target_eligible") is False:
                         continue
                     match_class = str(row.get("match_class") or "broad").lower()
                     words = nkw.split()

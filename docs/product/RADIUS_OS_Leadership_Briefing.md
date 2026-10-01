@@ -1,10 +1,10 @@
-# Radius OS â€” Plain-English Guide for Leadership
+# Radius OS — Plain-English Guide for Leadership
 
 **What this product is**  
-Radius OS is a chat-based onboarding tool. A team member opens a new client, talks to the system in plain language, and walks through four stages until we have a trusted picture of the business, its tracking, its website health, and its competitors. A person must approve each stage before it counts as finished.
+Radius OS is a chat-based SEO onboarding tool. A team member opens a client and walks through twelve stages, from understanding the business through publishing a page on the client’s WordPress site. A person must approve each stage before it counts as finished.
 
 **What this product is not**  
-It does not write blog posts, change the clientâ€™s website, run ads, or replace strategy meetings. It prepares the ground so later SEO work starts from solid facts instead of blank forms and scattered spreadsheets.
+It does not run ads, manage Google Business Profiles, build links, or replace strategy meetings. Local SEO, outreach, CRO, recurring reports, and continuous improvement (stages 13–17) are outside this release.
 
 ---
 
@@ -12,143 +12,133 @@ It does not write blog posts, change the clientâ€™s website, run ads, or re
 
 Every new client goes through the same journey:
 
-1. **Understand the business**  
-2. **Check that measurement is trustworthy**  
-3. **Assess the current website**  
-4. **Map the competitive landscape**  
-5. **Confirm we are ready to move into deeper SEO work**
+1. **Understand the business**
+2. **Check that measurement is trustworthy**
+3. **Assess the current website**
+4. **Map the competitive landscape**
+5. **Research the keywords that matter**
+6. **Map URLs and plan the content calendar**
+7. **Audit technical SEO**
+8. **Audit existing content**
+9. **Plan the pages to create or improve**
+10. **Draft and preview**
+11. **Set on-page SEO and internal links**
+12. **Publish through the connected WordPress account**
 
-Everything happens in one conversation screen. Progress is visible. Nothing important is auto-approved without a human.
-
----
-
-## Phase 1 â€” Business Discovery
-
-### What it does
-Builds a clear picture of who the client is as a business: what they sell, how they position themselves, how money comes in, and what they care about from marketing.
-
-### How it works (in simple terms)
-1. The team adds the clientâ€™s name and website.  
-2. The system looks at the public website and drafts a first picture of the business.  
-3. The client (or account lead) fills in what only they know â€” things like average order value, sales cycle, busy seasons, and goals.  
-4. The system checks what is still missing or unclear.  
-5. A person on our side reviews research vs what the client said, then approves.
-
-### Why it matters
-Later work should not guess the business model. Phase 1 creates an approved commercial profile everyone else can trust.
-
-### Who signs off
-Client Success / account ownership style role.
+Everything happens in one conversation. Nothing important is auto-approved.
 
 ---
 
-## Phase 2 â€” Tracking & Access
+## Phase 1 — Business Discovery
 
-### What it does
-Checks whether we can see the clientâ€™s analytics properly, and whether tracking on the site looks healthy enough to trust.
+Builds an approved picture of what the client sells, how they position themselves, and what they want from marketing. The system drafts that picture from the public site, then a person compares it with what the client says and signs off.
 
-### How it works (in simple terms)
-1. The system asks for access to the clientâ€™s main measurement tools (for example Google Analytics and related tags).  
-2. It checks whether key tracking pieces appear to be working.  
-3. It flags problems in plain language â€” pass, warning, or fail.  
-4. A specialist reviews the health report and either accepts it as a baseline or sends issues back for fixing.
+**Who signs off:** Client Success.
 
-### Why it matters
-If tracking is broken, later â€œtraffic droppedâ€ or â€œconversions changedâ€ claims are unreliable. Phase 2 protects us from building strategy on bad numbers.
+## Phase 2 — Tracking and access
 
-### Who signs off
-Technical SEO specialist.
+Checks Google Analytics, Search Console, and Tag Manager access, and whether the live tags look healthy enough to trust. Access is a real Google connection. A demo grant is not available in production. An expired connection must be reconnected before it counts as access.
 
----
+**Who signs off:** Technical SEO specialist.
 
-## Phase 3 â€” Website Situation
+## Phase 3 — Website situation
 
-### What it does
-Gives a current health check of the clientâ€™s website from an SEO and site-quality point of view.
+Scans the site for technical issues, reviews authority signals where a provider is available, and looks for traffic anomalies only when Phase 2 tracking is approved.
 
-### How it works (in simple terms)
-1. The system scans the site for technical issues (pages found, redirects, broken links, index-related problems, and similar).  
-2. It reviews authority signals where available (how the site sits in a broader link/authority picture).  
-3. It looks for unusual traffic patterns when trusted tracking from Phase 2 is available.  
-4. Results are shown as a structured report with clear severity.  
-5. A specialist reviews and approves before it becomes the official website baseline.
+**Who signs off:** Technical SEO specialist.
 
-### Why it matters
-We should know what is already wrong or risky on the site before we recommend bigger SEO work.
+## Phase 4 — Competitor landscape
 
-### Who signs off
-Technical SEO specialist.
+Finds real competitor websites and scores them against the client: who to learn from, who to beat, and who is local. This is competitive comparison, not a market-size study.
 
----
+**Who signs off:** SEO strategist.
 
-## Phase 4 â€” Competitor & Market Landscape
+## Readiness
 
-### What it does
-Finds relevant competitors and scores them against the client so we know who to watch, who to beat, and who is aspirational.
+Phases 1–4 roll up into a readiness score. Keyword research does not start until that gate is approved.
 
-### How it works (in simple terms)
-1. The system finds a set of real competitors (usually several, not just one or two).  
-2. It scores the client and each competitor across many practical factors (size signals, services, digital strength, growth signs, creative/paid signals, and more).  
-3. Competitors are sorted into clear groups, for example:  
-   - leaders worth learning from  
-   - direct rivals  
-   - rising challengers  
-   - local / similar players  
-4. It highlights gaps, recommendations, and a simple monitoring plan.  
-5. A strategist reviews and approves the landscape.
+## Phase 5 — Keywords
 
-### Important note for leadership
-This phase is **competitive landscape analysis** (who we compete with and how we compare). It is **not** a full industry market-size study (for example â€œtotal market worth $X billionâ€). That kind of market research is outside this phase today.
+After the specialist confirms which services to research, the system builds the keyword set and clusters from provider data. It does not invent search volume.
 
-### Who signs off
-SEO Strategist.
+**Who signs off:** Content SEO specialist.
 
----
+## Phase 6 — URL map and content calendar
 
-## After the four phases â€” Readiness check
+Each priority becomes an existing URL to improve or a new URL to create, with titles and a calendar.
 
-### What it does
-Adds up how complete and approved the client profile is across all four stages.
+**Who signs off:** SEO strategist.
 
-### How it works (in simple terms)
-- Each phase contributes to an overall readiness score.  
-- Missing or unapproved pieces stay visible.  
-- When the score is high enough and the important approvals are in place, leadership can treat the client as ready for the next wave of SEO work (keyword research and beyond).
+## Phase 7 — Technical SEO
 
-### Why it matters
-Stops half-finished onboarding from silently moving forward.
+Reports indexation, crawl, and on-site technical issues with severity.
 
----
+**Who signs off:** Technical SEO specialist.
 
-## How a typical engagement feels day to day
+## Phase 8 — Existing content audit
 
-1. Open Radius OS and create or select the client.  
-2. Chat naturally: â€œrun discovery,â€ â€œcheck tracking,â€ â€œrun website analysis,â€ â€œrun competitor analysis.â€  
-3. Review the structured summary the system produces.  
-4. Approve, edit, or reject with a human decision.  
-5. Move to the next phase when the previous one is solid.  
-6. Finish with the readiness check.
+Classifies current pages so planning knows what to keep, refresh, or leave alone.
 
-One conversation. Four stages. Human judgment at every gate.
+**Who signs off:** SEO strategist.
+
+## Phase 9 — Content planning
+
+Orders the work as pillar page, blogs on that pillar, sub-pillar pages, then blogs on those sub-pillars. Pages that already exist and need work stay on the roadmap. A blog is added only when the topic shows trend evidence.
+
+**Who signs off:** SEO strategist.
+
+## Phase 10 — Draft and preview
+
+Turns one approved target into a brief and a draft, and previews it with the client’s design. The designed HTML can be downloaded.
+
+**Who signs off:** Content SEO specialist.
+
+## Phase 11 — On-page SEO and internal links
+
+Sets title, headings, and meta, and plans internal links. Competitor brand names are not used as link text.
+
+**Who signs off:** On-page SEO specialist.
+
+## Phase 12 — Publishing
+
+Publishes through the WordPress account the client connected. Policy blocks stay unpublished.
+
+**Who signs off:** SEO strategist.
 
 ---
+
+## How a typical engagement feels
+
+1. Open the client.
+2. Move stage by stage in the chat.
+3. Review the structured summary.
+4. Approve, edit, or reject.
+5. Publish only after the earlier stages are approved.
+
+One conversation. Twelve stages. Human judgment at every gate.
 
 ## Value in one sentence
 
-**Radius OS turns messy early-client onboarding into a guided, reviewable process so Traffic Radius starts SEO work with approved facts â€” not guesswork.**
-
----
+**Radius OS turns client SEO onboarding into a guided, reviewable path from approved facts through a published page.**
 
 ## Quick reference
 
 | Stage | Goal in plain English | Human gate |
 | --- | --- | --- |
-| Phase 1 | Understand the business | Account / CSM review |
-| Phase 2 | Make sure measurement is trustworthy | Technical SEO review |
-| Phase 3 | Know the websiteâ€™s current health | Technical SEO review |
-| Phase 4 | Know the competitive landscape | SEO Strategist review |
-| Readiness | Confirm we are ready for deeper SEO | QA / readiness owner |
+| Phase 1 | Understand the business | Client Success |
+| Phase 2 | Make sure measurement is trustworthy | Technical SEO |
+| Phase 3 | Know the website’s current health | Technical SEO |
+| Phase 4 | Know the competitive landscape | SEO strategist |
+| Readiness | Confirm Phases 1–4 before keyword research | SEO QA |
+| Phase 5 | Research keywords for the selected services | Content SEO |
+| Phase 6 | Map URLs and the content calendar | SEO strategist |
+| Phase 7 | Audit technical SEO | Technical SEO |
+| Phase 8 | Audit existing content | SEO strategist |
+| Phase 9 | Plan pages to create or improve | SEO strategist |
+| Phase 10 | Draft and preview | Content SEO |
+| Phase 11 | On-page SEO and internal links | On-page SEO |
+| Phase 12 | Publish on WordPress | SEO strategist |
 
 ---
 
-*Document prepared for internal leadership briefing. Describes Radius OS Phases 1â€“4 as used in the product today.*
+*Document prepared for internal leadership briefing. Describes Radius OS Phases 1–12 as shipped in this release. Phases 13–17 are out of scope.*

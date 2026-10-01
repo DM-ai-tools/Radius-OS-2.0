@@ -101,6 +101,30 @@ async def run_content_strategy(
     summary["skills_loaded"] = {"content_strategy": skill_chars}
 
     profile.seo_strategy_summary = summary
+
+    # Phase 9 plans pages from target_url_tree, so the pages this phase's
+    # priority queue introduces have to reach that tree or they are never
+    # planned. Phase 6 used to reach forward for them, which only worked on a
+    # re-run; contributing them here keeps the order declared and the result
+    # the same every time.
+    from app.services.site_architecture import merge_strategy_nodes_into_tree
+
+    architecture = dict(profile.site_architecture_summary or {})
+    if architecture:
+        enriched = merge_strategy_nodes_into_tree(architecture, summary)
+        if enriched is not architecture:
+            profile.site_architecture_summary = enriched
+            added = int(enriched.get("strategy_nodes_added") or 0)
+            if added:
+                events.append(
+                    {
+                        "type": "system_notice",
+                        "content": (
+                            f"Added {added} planned page(s) from the content calendar "
+                            "to the site architecture tree so Phase 9 can plan them."
+                        ),
+                    }
+                )
     profile.seo_strategy_status = "pending_signoff"
 
     await supersede_pending_findings(

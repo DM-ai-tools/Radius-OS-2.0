@@ -31,6 +31,8 @@ htmlcov/
 logs_run_*.txt
 backend/data/draft_images/
 backend/data/dead_man_switch.json
+backend/data/batch_llm_checkpoints/
+backend/data/batch_llm_dead_letter/
 
 # Local editor / tool caches
 backend/.pytest_cache/
@@ -43,3 +45,5 @@ backend/.ruff_cache/
 
 # Adversarial validation artifacts — large, regenerable, may contain provider payloads
 validation/runs/
+validation/*.txt
+validation/*.json

@@ -52,9 +52,14 @@ def _result_message(summary: dict) -> str:
             f"Dry-run preview ready for {len(queue)} URL(s) — no CMS write was attempted."
         )
     else:
-        wrote = [q for q in queue if q.get("status") not in ("failed", "preview_only")]
+        wrote = [q for q in queue if q.get("status") not in ("failed", "preview_only", "policy_blocked")]
         failed = [q for q in queue if q.get("status") == "failed"]
+        held = [q for q in queue if q.get("status") == "policy_blocked"]
         bits.append(f"WordPress write: {len(wrote)} succeeded, {len(failed)} failed.")
+        if held:
+            bits.append(
+                f"{len(held)} held by the Google Search policy gate and returned for revision."
+            )
         downgraded = [q for q in queue if q.get("downgraded")]
         if downgraded:
             bits.append(
@@ -126,6 +131,7 @@ async def run_publishing(
         content_production=dict(profile.content_production_summary or {}),
         mode=mode,
         wordpress_connection=wp_connection,
+        google_policy=dict((profile.commercial_scope or {}).get("content_settings") or {}),
     )
     summary["generated_at"] = datetime.now(timezone.utc).isoformat()
 

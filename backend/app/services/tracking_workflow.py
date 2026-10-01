@@ -12,7 +12,6 @@ T1_PLATFORMS = [
     {"key": "search_console", "label": "Google Search Console", "mode": "oauth"},
     {"key": "ga4", "label": "Google Analytics 4", "mode": "oauth"},
     {"key": "gtm", "label": "Google Tag Manager", "mode": "oauth"},
-    {"key": "google_business", "label": "Google Business Profile", "mode": "oauth"},
     {"key": "crm", "label": "CRM", "mode": "manual_or_api"},
     {"key": "call_tracking", "label": "Call tracking", "mode": "manual_or_api"},
 ]
@@ -70,14 +69,13 @@ def build_t1_platforms(
         "gtm": cdd.get("gtm_access"),
         "cms": cdd.get("cms_access"),
         "hosting": cdd.get("hosting_access"),
-        "google_business": cdd.get("google_business_access"),
     }
     ads_note = cdd.get("google_ads_access")
     merchant_note = cdd.get("merchant_center_access")
     level_note = cdd.get("access_level")
 
     rows = []
-    oauth_keys = ("ga4", "search_console", "gtm", "google_business")
+    oauth_keys = ("ga4", "search_console", "gtm")
     for p in T1_PLATFORMS:
         key = p["key"]
         cdd_note = cdd_by_platform.get(key)
@@ -85,11 +83,7 @@ def build_t1_platforms(
             connected = bool(has_credentials.get(key))
             status = "connected" if connected else "skipped"
             if connected:
-                detail = (
-                    "OAuth credential on file — Google Business Profile access granted."
-                    if key == "google_business"
-                    else "OAuth credential on file — connection test passed."
-                )
+                detail = "OAuth credential on file — connection test passed."
             else:
                 detail = (
                     "Optional. Not connected — tracking continues from live-site HTML "

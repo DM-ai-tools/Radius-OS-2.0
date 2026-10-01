@@ -25,8 +25,10 @@ log = get_logger("keyword_serp_clustering")
 # of the top ten is the threshold the SEO literature settles on; below it,
 # overlap is mostly incidental big-brand pages.
 DEFAULT_MIN_SHARED = 4
-DEFAULT_HEAD_TERMS = 100
-DEFAULT_CONCURRENCY = 5
+# Live SERP is one HTTP call per keyword — keep the head small enough that
+# Phase 5 does not stall for minutes after metrics already finished.
+DEFAULT_HEAD_TERMS = 40
+DEFAULT_CONCURRENCY = 10
 
 
 def _norm(text: Any) -> str:
@@ -86,8 +88,12 @@ async def fetch_serp_urls(
     language_code: str,
     concurrency: int = DEFAULT_CONCURRENCY,
 ) -> tuple[dict[str, list[str]], list[str], dict[str, dict[str, Any]]]:
-    """Top organic result URLs per keyword. One request each — the endpoint
-    takes a single keyword per call."""
+    """Top organic result URLs per keyword.
+
+    Live SERP accepts exactly one keyword per POST, so this fans out with a
+    semaphore. Uses the regular (organic-only) endpoint — clustering only
+    needs URLs, and advanced SERP is slower/heavier for no gain here.
+    """
     wanted = [k for k in dict.fromkeys(_norm(k) for k in keywords) if k]
     if not wanted:
         return {}, [], {}
@@ -99,7 +105,7 @@ async def fetch_serp_urls(
     async def one(keyword: str) -> tuple[str, list[str]]:
         async with semaphore:
             try:
-                serp, errs = await dataforseo.serp_advanced(
+                organic, errs = await dataforseo.serp_overview(
                     keyword,
                     location_code=location_code,
                     language_code=language_code,
@@ -111,14 +117,14 @@ async def fetch_serp_urls(
             errors.extend(errs)
             urls = [
                 _norm_url(item.get("url"))
-                for item in (serp.get("organic") or [])
+                for item in (organic or [])
                 if isinstance(item, dict) and item.get("url")
             ]
             urls = [u for u in urls if u][:10]
             snapshots[keyword] = {
                 "urls": urls,
-                "item_types": list(serp.get("item_types") or []),
-                "ai_overview": bool(serp.get("ai_overview")),
+                "item_types": ["organic"] if urls else [],
+                "ai_overview": False,
             }
             return keyword, urls
 

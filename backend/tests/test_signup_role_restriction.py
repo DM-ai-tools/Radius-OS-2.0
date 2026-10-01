@@ -34,44 +34,50 @@ async def test_roles_include_head_of_department(api_client):
     assert "client_success_manager" in names
 
 
-async def test_second_head_of_department_signup_is_rejected(api_client):
-    """First HoD signup bootstraps the org; every subsequent one must be
-    invited by an existing admin, not self-registered (AUDIT-001)."""
-    first = await api_client.post(
+async def _signup_hod(api_client, n: int):
+    return await api_client.post(
         "/api/v1/auth/signup",
         json={
-            "email": "hod-one@example.com",
+            "email": f"hod-{n}@example.com",
             "password": "somepassword123",
-            "full_name": "First HoD",
+            "full_name": f"HoD {n}",
             "role_name": "head_of_department",
         },
     )
-    assert first.status_code == 200
-
-    second = await api_client.post(
-        "/api/v1/auth/signup",
-        json={
-            "email": "hod-two@example.com",
-            "password": "somepassword123",
-            "full_name": "Second HoD",
-            "role_name": "head_of_department",
-        },
-    )
-    assert second.status_code == 400
-    assert "admin" in second.json()["detail"].lower()
 
 
-async def test_roles_excludes_head_of_department_once_one_exists(api_client):
-    bootstrap = await api_client.post(
-        "/api/v1/auth/signup",
-        json={
-            "email": "hod-bootstrap@example.com",
-            "password": "somepassword123",
-            "full_name": "Bootstrap HoD",
-            "role_name": "head_of_department",
-        },
-    )
-    assert bootstrap.status_code == 200
+async def test_head_of_department_signup_is_capped(api_client):
+    """Self-registration as HoD is limited, not unlimited (AUDIT-001).
+
+    The cap was 1 when this test was written; commit 2bb5dba deliberately raised
+    it to five. Read the limit from config so the test tracks the product
+    instead of pinning a number that a later change silently invalidates.
+    """
+    from app.services.role_skills import HOD_SIGNUP_LIMIT
+
+    for n in range(HOD_SIGNUP_LIMIT):
+        resp = await _signup_hod(api_client, n)
+        assert resp.status_code == 200, f"HoD {n + 1} of {HOD_SIGNUP_LIMIT}: {resp.text}"
+
+    over_limit = await _signup_hod(api_client, HOD_SIGNUP_LIMIT)
+    assert over_limit.status_code == 400
+    detail = over_limit.json()["detail"].lower()
+    assert "head of department" in detail
+    assert str(HOD_SIGNUP_LIMIT) in detail
+
+
+async def test_roles_excludes_head_of_department_once_the_cap_is_reached(api_client):
+    """The role stays offerable until the cap is full, then disappears."""
+    from app.services.role_skills import HOD_SIGNUP_LIMIT
+
+    for n in range(HOD_SIGNUP_LIMIT - 1):
+        assert (await _signup_hod(api_client, n)).status_code == 200
+
+    # One seat left — still on the list.
+    names = {r["name"] for r in (await api_client.get("/api/v1/auth/roles")).json()}
+    assert "head_of_department" in names
+
+    assert (await _signup_hod(api_client, HOD_SIGNUP_LIMIT - 1)).status_code == 200
 
     resp = await api_client.get("/api/v1/auth/roles")
     assert resp.status_code == 200

@@ -384,15 +384,22 @@ def differentiation_angle(
     marketing: dict[str, Any] | None = None,
     industry: str | None = None,
 ) -> str:
-    """Specific angle create-content will accept (>=24 chars, not a weak SERP restatement)."""
+    """Specific angle create-content will accept (>=24 chars, not a weak SERP restatement).
+
+    Method / products / positioning are scoped to the page keyword so an email-agency
+    intake does not become the angle for an HVAC (or any other off-topic) page.
+    """
     mkt = merge_brief_memory(marketing=marketing, client_name=client_name)
     intake = dict(mkt.get("client_intake") or {})
     commercial = dict(mkt.get("commercial_scope") or {})
-    positioning = str(
+    positioning_raw = str(
         intake.get("positioning") or commercial.get("positioning") or mkt.get("positioning") or ""
     ).strip()
     products = _listish(
-        intake.get("products") or commercial.get("products") or mkt.get("products")
+        intake.get("products")
+        or commercial.get("products")
+        or mkt.get("products")
+        or mkt.get("products_services")
     )
     geo = str(
         intake.get("geographic_focus") or commercial.get("geographic_focus") or ""
@@ -401,12 +408,33 @@ def differentiation_angle(
     organic = [r for r in (serp.get("organic") or []) if isinstance(r, dict)]
     titles = " ".join(str(r.get("title") or "") for r in organic).lower()
     validated = bool(serp.get("validated") and organic)
-    method = positioning or (products[0] if products else "") or (industry or keyword)
+
+    kw_tokens = {t for t in re.findall(r"[a-z0-9]+", (keyword or "").lower()) if len(t) > 1}
+    stop = {
+        "services", "service", "agency", "company", "companies", "the", "and", "for",
+        "with", "best", "top", "online",
+    } - kw_tokens
+    topic = kw_tokens - stop
+
+    def _on_topic(text: str) -> bool:
+        if not topic:
+            return True
+        tt = {t for t in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(t) > 1}
+        return bool(topic & tt)
+
+    on_products = [p for p in products if _on_topic(str(p))]
+    positioning = positioning_raw if positioning_raw and _on_topic(positioning_raw) else ""
+    method = (
+        positioning
+        or (on_products[0] if on_products else "")
+        or (industry if industry and _on_topic(str(industry)) else "")
+        or keyword
+    )
     proof = geo or "named delivery process and client constraints"
     gap = f"a generic {keyword} {fmt}"
     if validated:
         missing: list[str] = []
-        for prod in products[:3]:
+        for prod in on_products[:3]:
             if prod.lower() not in titles:
                 missing.append(prod)
                 break
@@ -701,6 +729,22 @@ def _people_first_gates(*, audience: str | None, differentiation: str, author: s
     }
 
 
+def schema_type_for_page_type(page_type: str) -> str:
+    """Primary schema type for a brief. PAA questions do not make the page an FAQPage."""
+    key = str(page_type or "").strip().lower()
+    if key in ("service", "subservice", "sub_service", "landing", "location"):
+        return "Service"
+    if key == "product":
+        return "Product"
+    if key == "faq":
+        return "FAQPage"
+    if key in ("howto", "how_to", "tutorial"):
+        return "HowTo"
+    if key == "comparison":
+        return "Article"
+    return "Article"
+
+
 def _rule_brief(
     *,
     item: dict[str, Any],
@@ -793,8 +837,8 @@ def _rule_brief(
             "heading": "H1",
             "title": titles[0],
             "notes": [
-                "Answer the query in the opening — publishable prose, not a brief",
-                "Write for this page type, not a generic blog template",
+                "Opening: direct answer to the query in buyer-facing prose",
+                "Match this page type — not a generic blog template",
             ],
         },
         *[
@@ -914,15 +958,7 @@ def _rule_brief(
             client_name=client_name,
             industry=industry,
         ),
-        "schema_type": (
-            "FAQPage"
-            if paa
-            else (
-                "Service"
-                if page_type in ("service", "subservice", "sub_service")
-                else "Article"
-            )
-        ),
+        "schema_type": schema_type_for_page_type(page_type),
         "competitive_notes": must_address,
         "differentiation": diff,
         "who_how_why": _who_how_why(
@@ -1084,6 +1120,42 @@ def finalize_writer_ready(brief: dict[str, Any]) -> dict[str, Any]:
     return brief
 
 
+def is_relevance_unverified(row: dict[str, Any]) -> bool:
+    """True for keywords kept only as shells because nothing could verify them.
+
+    These come from clients with no services / CDD keywords / website themes on
+    file. They are carried so the phase can report what it was asked to expand,
+    never as material for a brief or published page.
+    """
+    if not isinstance(row, dict):
+        return False
+    return bool(row.get("relevance_unverified")) or (
+        row.get("relevance_reason") == "relevance_unverified"
+    )
+
+
+def cluster_member_keywords(row: dict[str, Any]) -> list[str]:
+    """Keyword members of a cluster row, excluding anything unverified."""
+    if not isinstance(row, dict) or is_relevance_unverified(row):
+        return []
+    members: list[str] = []
+    head = str(row.get("primary_keyword") or row.get("name") or row.get("keyword") or "").strip()
+    if head:
+        members.append(head)
+    for k in (
+        row.get("keywords")
+        or row.get("supporting_keywords")
+        or row.get("secondary_keywords")
+        or []
+    ):
+        if isinstance(k, dict) and is_relevance_unverified(k):
+            continue
+        term = str(k.get("keyword") if isinstance(k, dict) else k).strip()
+        if term:
+            members.append(term)
+    return members
+
+
 def select_brief_targets(
     *,
     roadmap: list[dict[str, Any]],
@@ -1112,12 +1184,20 @@ def select_brief_targets(
             rows.append(r)
     rows.sort(
         key=lambda r: (
+            0 if r.get("from_selected_service") else 1,
             int(r.get("priority_rank") or 999),
             0 if r.get("action") == "refresh" else 1,
             int(r.get("wave") or 9),
         )
     )
-    return rows[: max(3, min(limit, 8))]
+    cap = max(1, min(int(limit), 200))
+    selected = [r for r in rows if r.get("from_selected_service")]
+    others = [r for r in rows if not r.get("from_selected_service")]
+    if selected:
+        # Always keep every selected-service page, then fill remaining slots.
+        remaining = max(0, cap - len(selected))
+        return selected + others[:remaining]
+    return rows[:cap]
 
 
 async def generate_briefs(
@@ -1159,15 +1239,7 @@ async def generate_briefs(
                 cluster_rows.append(c)
 
     def _cluster_members(row: dict[str, Any]) -> list[str]:
-        members: list[str] = []
-        head = str(row.get("primary_keyword") or row.get("name") or row.get("keyword") or "").strip()
-        if head:
-            members.append(head)
-        for k in row.get("keywords") or row.get("supporting_keywords") or row.get("secondary_keywords") or []:
-            term = str(k.get("keyword") if isinstance(k, dict) else k).strip()
-            if term:
-                members.append(term)
-        return members
+        return cluster_member_keywords(row)
 
     def _related_for(keyword: str) -> list[str]:
         nk = _norm_kw(keyword)
@@ -1223,6 +1295,15 @@ async def generate_briefs(
             for s in (item.get("supporting_keywords") or item.get("secondary_keywords") or [])
             if s
         ]
+        if not secondaries:
+            # Fall back to People Also Ask / related SERP questions so the brief
+            # still shows secondary coverage when cluster members are empty.
+            paa = [
+                str(q).strip().rstrip("?")
+                for q in (serp.get("people_also_ask") or [])
+                if str(q or "").strip()
+            ]
+            secondaries = paa[:6]
         brief = _rule_brief(
             item=item,
             pre=pre,
@@ -1233,6 +1314,20 @@ async def generate_briefs(
             marketing=marketing,
             industry=industry,
         )
+        if not brief.get("secondary_keywords"):
+            faq_terms = [
+                str(row.get("q") or "").strip().rstrip("?")
+                for row in (brief.get("faq") or [])
+                if isinstance(row, dict) and str(row.get("q") or "").strip()
+            ]
+            if faq_terms:
+                brief["secondary_keywords"] = faq_terms[:6]
+        if item.get("work_label"):
+            brief["work_label"] = item.get("work_label")
+        if item.get("from_selected_service"):
+            brief["from_selected_service"] = True
+        if item.get("action") and not brief.get("action"):
+            brief["action"] = item.get("action")
         if pre.get("recommended_action") in ("create", "refresh") and (pre.get("ia") or {}).get("assigned"):
             brief = await _enrich_brief_llm(brief, client_name=client_name)
         briefs.append(finalize_writer_ready(brief))

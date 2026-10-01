@@ -14,6 +14,81 @@ def _trim(v: Any, n: int = 120) -> str:
     return s if len(s) <= n else s[: n - 1].rstrip() + "…"
 
 
+def _selected_services_for_memory(full: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep the confirmed service selection on the slim pack later phases read."""
+    stamped: list[dict[str, Any]] = []
+    for row in (full.get("selected_services") or [])[:12]:
+        if not isinstance(row, dict) or not (row.get("id") or row.get("name")):
+            continue
+        item: dict[str, Any] = {
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "subservices": [],
+        }
+        if row.get("url"):
+            item["url"] = row.get("url")
+        for sub in (row.get("subservices") or [])[:12]:
+            if not isinstance(sub, dict) or not (sub.get("id") or sub.get("name")):
+                continue
+            sub_item: dict[str, Any] = {"id": sub.get("id"), "name": sub.get("name")}
+            if sub.get("url"):
+                sub_item["url"] = sub.get("url")
+            item["subservices"].append(sub_item)
+        stamped.append(item)
+    if stamped:
+        return stamped
+    from app.services.service_prioritization import compact_selected_services
+
+    prio = full.get("service_prioritization")
+    catalog = full.get("service_catalog")
+    nodes = full.get("service_ia_nodes") or full.get("target_url_tree")
+    return compact_selected_services(
+        prio if isinstance(prio, dict) else {},
+        service_catalog=catalog if isinstance(catalog, list) else None,
+        ia_nodes=nodes if isinstance(nodes, list) else None,
+    )[:12]
+
+
+def _slim_url_node(node: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "url": node.get("url") or node.get("path"),
+        "path": node.get("path") or node.get("url"),
+        "type": node.get("type") or node.get("page_type"),
+        "keyword": node.get("keyword") or node.get("primary_keyword"),
+        "parent": node.get("parent"),
+        "depth": node.get("depth"),
+        "title": _trim(node.get("title"), 60) or None,
+    }
+    for key in ("service_id", "subservice_id", "supports_service_id"):
+        if node.get(key):
+            out[key] = node.get(key)
+    return {k: v for k, v in out.items() if v not in (None, "")}
+
+
+def _prefer_selected_work(rows: Any) -> list[dict[str, Any]]:
+    items = [row for row in (rows or []) if isinstance(row, dict)]
+    selected = [row for row in items if row.get("from_selected_service")]
+    rest = [row for row in items if not row.get("from_selected_service")]
+    return selected + rest
+
+
+def _prefer_selected_service_nodes(full: dict[str, Any]) -> list[dict[str, Any]]:
+    tree = [n for n in (full.get("target_url_tree") or []) if isinstance(n, dict)]
+    selected = _selected_services_for_memory(full)
+    if not selected:
+        return tree
+    from app.services.content_planning import _is_service_page, _matches_selected_service
+
+    chosen = [
+        n
+        for n in tree
+        if _is_service_page(n) and _matches_selected_service(n, selected)
+    ]
+    chosen_ids = {id(n) for n in chosen}
+    rest = [n for n in tree if id(n) not in chosen_ids]
+    return chosen + rest
+
+
 def _kw_row(row: dict[str, Any], *, with_serp: bool = False) -> dict[str, Any]:
     out: dict[str, Any] = {
         "keyword": row.get("keyword"),
@@ -294,6 +369,17 @@ def slim_search_demand_memory(full: dict[str, Any] | None) -> dict[str, Any]:
             for r in (full.get("best_opportunities") or [])[:10]
             if isinstance(r, dict)
         ],
+        # Keep a short keyword table so Memory / playground can render rows even
+        # when the full chat report is not open (approve slim used to drop this).
+        "keyword_table": [
+            _kw_row(r, with_serp=True)
+            for r in (
+                full.get("keyword_table")
+                or full.get("best_opportunities")
+                or []
+            )[:15]
+            if isinstance(r, dict)
+        ],
         "strong_evergreen": [
             _kw_row(r) for r in (full.get("strong_evergreen") or [])[:8] if isinstance(r, dict)
         ],
@@ -355,6 +441,16 @@ def slim_search_demand_memory(full: dict[str, Any] | None) -> dict[str, Any]:
         ),
         "keyword_count": full.get("keyword_count"),
         "providers_used": full.get("providers_used"),
+        "deselected_keywords": list(full.get("deselected_keywords") or [])[:200],
+        "manual_competitor_keywords": [
+            {
+                "keyword": row.get("keyword"),
+                "competitor": row.get("competitor") or "",
+            }
+            for row in (full.get("manual_competitor_keywords") or [])[:40]
+            if isinstance(row, dict) and row.get("keyword")
+        ],
+        "selected_services": _selected_services_for_memory(full),
         "note": _trim(
             full.get("note")
             or "Shared memory essentials — full keyword report is in chat.",
@@ -403,10 +499,15 @@ def slim_seo_strategy_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                 "est_words": p.get("est_words"),
                 "suggested_url": p.get("suggested_url"),
                 "action": p.get("action"),
+                "work_label": p.get("work_label"),
+                "supports_service_id": p.get("supports_service_id"),
+                "from_selected_service": p.get("from_selected_service") or None,
                 "beat_competitors": list(p.get("beat_competitors") or [])[:3] or None,
                 "image_suggestions": list(p.get("image_suggestions") or [])[:12] or None,
             }
-            for p in (full.get("priority_queue") or full.get("priority_pages") or [])[:12]
+            for p in _prefer_selected_work(
+                full.get("priority_queue") or full.get("priority_pages") or []
+            )[:24]
             if isinstance(p, dict)
         ],
         "priority_pages": [
@@ -415,8 +516,12 @@ def slim_seo_strategy_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                 "keyword": p.get("keyword"),
                 "priority": p.get("priority"),
                 "suggested_url": p.get("suggested_url") or p.get("url"),
+                "action": p.get("action"),
+                "work_label": p.get("work_label"),
             }
-            for p in (full.get("priority_pages") or full.get("priority_queue") or [])[:10]
+            for p in _prefer_selected_work(
+                full.get("priority_pages") or full.get("priority_queue") or []
+            )[:24]
             if isinstance(p, dict)
         ],
         "url_ia_plan": [
@@ -485,18 +590,10 @@ def slim_site_architecture_memory(full: dict[str, Any] | None) -> dict[str, Any]
             if cs.get(k) is not None
         }
         or None,
+        "selected_services": _selected_services_for_memory(full),
         "target_url_tree": [
-            {
-                "url": n.get("url") or n.get("path"),
-                "path": n.get("path") or n.get("url"),
-                "type": n.get("type") or n.get("page_type"),
-                "keyword": n.get("keyword") or n.get("primary_keyword"),
-                "parent": n.get("parent"),
-                "depth": n.get("depth"),
-                "title": _trim(n.get("title"), 60) or None,
-            }
-            for n in (full.get("target_url_tree") or [])[:30]
-            if isinstance(n, dict)
+            _slim_url_node(n)
+            for n in _prefer_selected_service_nodes(full)[:30]
         ],
         "redirect_map": [
             {
@@ -895,10 +992,15 @@ def slim_competitor_memory(full: dict[str, Any] | None) -> dict[str, Any]:
         "competitors": _slim_competitors(full.get("competitors") or full.get("competitor_set")),
         "tier_overview": [
             {
-                "name": t.get("name"),
-                "tier": t.get("tier"),
-                "tier_name": t.get("tier_name"),
-                "score": t.get("score") or t.get("maturity_score"),
+                k: v
+                for k, v in {
+                    "name": t.get("name"),
+                    "url": t.get("url"),
+                    "tier": t.get("tier"),
+                    "tier_name": t.get("tier_name"),
+                    "score": t.get("score") or t.get("composite") or t.get("maturity_score"),
+                }.items()
+                if v not in (None, "")
             }
             for t in (full.get("tier_overview") or full.get("tiers") or [])[:10]
             if isinstance(t, dict)

@@ -1,9 +1,11 @@
 import WorkbookTable from "./WorkbookTable";
+import FocusBox from "./FocusBox";
+import { useStageFocus } from "../../lib/stageFocus";
 
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
 };
 
 function asRows(raw: unknown): Array<Record<string, unknown>> {
@@ -23,6 +25,22 @@ function fmtNum(v: unknown): string {
   return String(v);
 }
 
+function workLabel(row: Record<string, unknown>): string {
+  const explicit = String(row.work_label || "").trim();
+  if (explicit) return explicit;
+  const action = String(row.action || "").toLowerCase();
+  const type = String(row.content_type || row.page_type || "").toLowerCase();
+  if (action === "optimize" || action === "optimise" || action === "refresh") {
+    return type.includes("blog") ? "Optimize page" : "Optimize service page";
+  }
+  if (action === "create" && type) {
+    const kind = type.replace(/ page$/, "").trim();
+    if (kind) return `Create ${kind} page`;
+  }
+  if (action === "create") return "Create page";
+  return action || "—";
+}
+
 function strList(raw: unknown, n = 4): string {
   if (!Array.isArray(raw) || !raw.length) return "";
   return raw
@@ -33,6 +51,7 @@ function strList(raw: unknown, n = 4): string {
 }
 
 export default function ContentStrategyCard({ payload, canAct, onAction }: Props) {
+  const focus = useStageFocus(payload);
   const pillars = asRows(payload.pillars);
   const coreTopics = asRows(payload.core_topics);
   const priorities = asRows(payload.priority_pages);
@@ -146,7 +165,11 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
         columns={tofuMofuColumns}
         rows={tofuMofuRows}
         maxRows={20}
+        stageFocus={{ focused: focus.focused, onToggle: focus.toggle, disabled: !canAct }}
       />
+      <p style={{ fontSize: 12, color: "var(--muted)", marginTop: -8 }}>
+        Uncheck Focus to leave a row out of later stages.
+      </p>
 
       <h4 style={{ marginBottom: 8 }}>Core topics & clusters</h4>
       {topicBlocks.length ? (
@@ -178,6 +201,7 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                   <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
                     <thead>
                       <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+                        <th style={{ padding: "4px 6px" }}>Focus</th>
                         <th style={{ padding: "4px 6px" }}>Cluster / page</th>
                         <th style={{ padding: "4px 6px" }}>Keyword</th>
                         <th style={{ padding: "4px 6px" }}>Intent</th>
@@ -189,7 +213,10 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                       {clusters.map((c, j) => {
                         const kids = asRows(c.supporting);
                         return (
-                          <tr key={`${String(c.name)}-${j}`} style={{ borderBottom: "1px solid var(--line)" }}>
+                          <tr key={`${String(c.name)}-${j}`} style={{ borderBottom: "1px solid var(--line)", opacity: focus.focused(c) ? 1 : 0.45 }}>
+                            <td style={{ padding: "6px 8px" }}>
+                              <FocusBox row={c} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />
+                            </td>
                             <td style={{ padding: "6px 8px", fontWeight: 600 }}>
                               {String(c.name || c.primary_keyword || "—")}
                             </td>
@@ -250,7 +277,7 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                   <tr key={`cq-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
                     <td style={{ padding: "6px 8px" }}>{String(p.rank ?? i + 1)}</td>
                     <td style={{ padding: "6px 8px" }}>
-                      <span className="cs-chip">{String(p.action || "—")}</span>
+                      <span className="cs-chip">{workLabel(p)}</span>
                     </td>
                     <td style={{ padding: "6px 8px", fontWeight: 600 }}>
                       {String(p.title || "—")}
@@ -274,12 +301,20 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
       <h4 style={{ marginBottom: 8 }}>
         {showCombined ? "Strategy-only queue (gaps / new)" : "Priority content queue"}
       </h4>
+      {payload.selected_service_plan &&
+      typeof payload.selected_service_plan === "object" &&
+      (payload.selected_service_plan as Record<string, unknown>).note ? (
+        <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
+          {String((payload.selected_service_plan as Record<string, unknown>).note)}
+        </p>
+      ) : null}
       {displayQueue.length ? (
         <div style={{ overflowX: "auto", marginBottom: 14 }}>
           <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
                 <th style={{ padding: "6px 8px" }}>#</th>
+                <th style={{ padding: "6px 8px" }}>Work</th>
                 <th style={{ padding: "6px 8px" }}>Title</th>
                 <th style={{ padding: "6px 8px" }}>Keyword</th>
                 <th style={{ padding: "6px 8px" }}>Vol</th>
@@ -300,6 +335,9 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                 return (
                   <tr key={`${String(p.keyword)}-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
                     <td style={{ padding: "6px 8px", verticalAlign: "top" }}>{i + 1}</td>
+                    <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
+                      <span className="cs-chip">{workLabel(p)}</span>
+                    </td>
                     <td style={{ padding: "6px 8px", verticalAlign: "top", fontWeight: 600 }}>
                       {String(p.title || p.keyword || "—")}
                       {p.rationale ? (
@@ -361,6 +399,7 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                 <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
                   <th style={{ padding: "6px 8px" }}>Week</th>
                   <th style={{ padding: "6px 8px" }}>Month</th>
+                  <th style={{ padding: "6px 8px" }}>Work</th>
                   <th style={{ padding: "6px 8px" }}>Title</th>
                   <th style={{ padding: "6px 8px" }}>Keyword</th>
                   <th style={{ padding: "6px 8px" }}>Type</th>
@@ -381,6 +420,9 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                       <td style={{ padding: "6px 8px" }}>{String(w.week)}</td>
                       <td style={{ padding: "6px 8px" }}>
                         {String(m.month)} · {label}
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>
+                        <span className="cs-chip">{workLabel(w)}</span>
                       </td>
                       <td style={{ padding: "6px 8px", fontWeight: 600 }}>
                         {String(w.title || w.keyword || "—")}
@@ -536,7 +578,7 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
 
       {canAct && (
         <div className="card-actions">
-          <button type="button" className="btn btn-primary" onClick={() => onAction("approve")}>
+          <button type="button" className="btn btn-primary" onClick={() => onAction("approve", focus.edits)}>
             Approve strategy
           </button>
           <button type="button" className="btn btn-ghost" onClick={() => onAction("reject")}>

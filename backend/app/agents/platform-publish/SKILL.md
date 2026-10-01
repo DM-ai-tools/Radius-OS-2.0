@@ -38,12 +38,14 @@ the downgrade is reported. Never describe a downgraded write as a live publish.
 
 ### Step 1: Fetch the design
 Brandfetch supplies logo, colour palette, and typeface from the client's domain.
-Firecrawl scrapes one live reference page (a hub or service page from the IA tree) for
-heading pattern and section rhythm.
+**Prefer the previous page on the internal-linking / publishing plan** as the measured
+design source (Context.dev + local CSS walk). Firecrawl scrapes that page for heading
+pattern and section rhythm. Claude (skill model) then mirrors that page's section bands
+when laying out the new draft body — it must not invent colors or fonts.
 
-Neither is required. When either is unavailable the preview renders neutral styling and
-**says so on its face** — a preview that silently looks generic misleads the reviewer into
-approving a design they have not actually seen.
+Neither Brandfetch nor Firecrawl is required. When either is unavailable the preview
+renders neutral styling and **says so on its face** — a preview that silently looks
+generic misleads the reviewer into approving a design they have not actually seen.
 
 ### Step 2: Build the exact payload (v1.9 step 12)
 Render the dry-run preview — "the exact payload that would be sent, with no live CMS
@@ -74,6 +76,9 @@ IndexNow and GSC recrawl are **planned, never submitted** from this build: the p
 the recrawl queue are output for a human to action. IndexNow requires a key file hosted on
 the client's domain before the first submission — that is a prerequisite, not a step you
 can perform.
+
+The verification read proves what the CMS stored at publish time. A later change on the
+live URL (theme edit, plugin, or editor) is Phase 17 `seo_check`, not a second pass here.
 
 ## Guardrails
 

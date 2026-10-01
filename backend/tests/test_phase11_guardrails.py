@@ -7,11 +7,14 @@ import json
 import pytest
 
 from app.agents.prompts import load_skill
+from app.services.content_brief import schema_type_for_page_type
 from app.services.on_page_seo import (
     apply_trademark_block,
+    build_eeat_checklist,
     build_internal_linking_plan,
     competitor_terms,
     run_on_page_seo_plan,
+    schema_for_page,
     selected_on_page_rows,
 )
 from app.services.role_skills import ROLE_PHASE_PERMISSIONS
@@ -143,6 +146,70 @@ def test_clean_package_is_untouched():
 def test_generate_schema_skill_resolves():
     """Declared in role_skills but had no directory — load_skill returned "" silently."""
     assert load_skill("generate_schema").strip()
+
+
+def test_service_page_schema_omits_ratings_and_ignores_unanswered_paa():
+    schema = schema_for_page(
+        {
+            "url": "https://acme.example/services/seo",
+            "page_type": "service",
+            "keyword": "seo services",
+            "title": "SEO Services",
+            "parent": "/services",
+            "faq": [{"q": "What is SEO?"}],
+        },
+        "Acme",
+        "https://acme.example",
+    )
+    assert "Service" in schema["types"]
+    assert "BreadcrumbList" in schema["types"]
+    assert "FAQPage" not in schema["types"]
+    assert "aggregateRating" in schema["omitted"]
+    assert schema["eligibility"]["schema_org"] == "valid"
+    assert schema["eligibility"]["google_rich_result"] == "not_eligible"
+
+
+def test_product_schema_omits_price_when_none_was_supplied():
+    schema = schema_for_page(
+        {
+            "url": "https://acme.example/products/widget",
+            "page_type": "product",
+            "keyword": "widget",
+            "title": "Widget",
+        },
+        "Acme",
+        "https://acme.example",
+    )
+    assert "Product" in schema["types"]
+    assert "offers" in schema["omitted"]
+    assert "aggregateRating" in schema["omitted"]
+    assert schema["eligibility"]["google_rich_result"] == "not_eligible"
+    assert "price" not in json.dumps(schema["json_ld"])
+
+
+def test_paa_does_not_make_a_commercial_brief_an_faqpage():
+    assert schema_type_for_page_type("service") == "Service"
+    assert schema_type_for_page_type("guide") == "Article"
+    assert schema_type_for_page_type("service") != "FAQPage"
+
+
+def test_eeat_checklist_copies_the_brief_and_flags_ymyl():
+    eeat = build_eeat_checklist(
+        {
+            "client_name": "Acme",
+            "who_how_why": {"who": {"author": "Ada Lovelace", "standing": "", "ymyl": True}},
+            "people_first_gates": {"has_differentiation_beyond_consensus": False},
+            "external_links": [{"source": "Brief source"}],
+            "differentiation": "short",
+            "required_coverage": {"out_of_scope": ["Other services"]},
+        }
+    )
+    assert eeat["who_how_why"]["who"]["author"] == "Ada Lovelace"
+    assert eeat["checklist"]["expertise"]["status"] == "gap"
+    assert eeat["checklist"]["expertise"]["ymyl"] is True
+    assert eeat["checklist"]["experience"]["status"] == "gap"
+    assert eeat["checklist"]["authoritativeness"]["status"] == "pass"
+    assert eeat["checklist"]["trust"]["status"] == "pass"
 
 
 def test_phase11_skills_carry_pipeline_framing():

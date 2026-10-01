@@ -85,6 +85,7 @@ async def _stored_competitors(db, client_id) -> list[dict]:
     ).scalars().all()
     return [
         {
+            "id": str(row.id),
             "name": row.name,
             "url": row.url,
             "source": row.source,
@@ -147,6 +148,7 @@ async def run_content_production(
         }
     )
 
+    competitors = await _stored_competitors(db, client.id)
     summary = await run_content_production_plan(
         client_name=client.display_name,
         primary_url=client.primary_url,
@@ -169,6 +171,8 @@ async def run_content_production(
         prior_briefs=list(prior.get("briefs") or []) if selection else None,
         google_policy=dict((profile.commercial_scope or {}).get("content_settings") or {}),
         content_context_builder=_content_context_builder(db, client, profile),
+        competitors=competitors,
+        commercial=dict(profile.commercial_scope or {}),
     )
     summary["generated_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -261,17 +265,12 @@ async def run_content_production(
     }
 
     if awaiting:
-        labels = [
-            str(c.get("keyword") or c.get("title"))
-            for c in (summary.get("topic_choices") or [])[:6]
-            if c
-        ]
+        choice_count = len(summary.get("topic_choices") or [])
         msg = (
-            f"{summary.get('writer_ready_count') or 0} priority topics are ready. "
-            "Click one below — I will draft the full page (one topic per run)."
+            f"{summary.get('writer_ready_count') or choice_count or 0} priority pages are ready. "
+            "Use the dropdown in the report card to pick one page, then draft it "
+            "(one page per run)."
         )
-        if labels:
-            msg += " Top picks: " + "; ".join(labels) + "."
     elif has_draft:
         title = str(draft.get("title") or draft.get("keyword") or "the selected topic")
         msg = (

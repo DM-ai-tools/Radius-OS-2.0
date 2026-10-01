@@ -41,7 +41,7 @@ Content pruning is an area where practitioner advice and Google's position genui
 2. **Page + query data for the current period** — needed for cannibalisation
 3. **A crawl** — word counts, status codes, titles, click depth
 4. **Business context** — which pages exist for reasons other than search (legal, support, brand)
-5. **Backlink data if available** — a page with earned links is never a delete candidate
+5. **Backlink data if available** — a page with earned links is never a delete candidate. A domain-level total is not a reason to delete or 301 a URL. URL-level toxic and anchor review stays Phase 14.
 
 If GSC access isn't available, say plainly that this becomes a qualitative review and that decay and cannibalisation can't be assessed. Don't produce a confident audit from a crawl alone.
 

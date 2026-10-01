@@ -68,7 +68,6 @@ async def test_build_final_url_map_receives_fresh_scan_pages_over_stale_website(
         primary_url="https://acme.example",
         domain="acme.example",
         demand=_demand_with_cluster(live_scan_pages=fresh_pages),
-        seo_strategy={},
         commercial={},
         website={"pages": stale_pages},
     )
@@ -104,7 +103,6 @@ async def test_falls_back_to_stale_website_when_no_live_scan_present(monkeypatch
         primary_url="https://acme.example",
         domain="acme.example",
         demand=_demand_with_cluster(live_scan_pages=None),
-        seo_strategy={},
         commercial={},
         website={"pages": stale_pages},
     )

@@ -27,6 +27,55 @@ def test_extracts_website_key_and_markdown_links():
     assert linked[0]["url"] == "https://www.mindshareworld.com"
 
 
+def test_directories_and_social_hosts_are_not_competitors():
+    from app.integrations.web_fetch import is_non_business_host, site_is_dead
+
+    assert is_non_business_host("www.clutch.co")
+    assert is_non_business_host("https://www.linkedin.com/company/acme")
+    assert is_non_business_host("g2.com")
+    assert not is_non_business_host("kingkong.com.au")
+    assert site_is_dead({"status_code": 0, "error": "dns_resolution_failed"})
+    assert site_is_dead({"status_code": 200, "error": "parked_or_placeholder"})
+    assert not site_is_dead({"status_code": 403, "error": "bot_challenge_blocked"})
+    assert not site_is_dead({"status_code": 200, "error": None, "text": "<html>ok</html>"})
+
+
+def test_unrelated_industry_is_excluded_from_the_competitor_set():
+    from app.ml.tier_competitors import keep_relevant_competitors
+
+    peer = {
+        "name": "King Kong",
+        "url": "https://kingkong.com.au",
+        "tier": 2,
+        "tier_name": "Strong Direct Competitors",
+        "parameters": {"industry_specialization": {"score": 8}},
+    }
+    directory = {
+        "name": "Clutch",
+        "url": "https://clutch.co",
+        "tier": 2,
+        "tier_name": "Strong Direct Competitors",
+        "parameters": {"industry_specialization": {"score": 3}},
+    }
+    relevant, excluded = keep_relevant_competitors([peer, directory])
+    assert [row["name"] for row in relevant] == ["King Kong"]
+    assert excluded[0]["tier"] == 5
+    assert "keyword" in excluded[0]["recommendation"]
+
+
+def test_directory_domains_do_not_seed_keyword_research():
+    from app.services.competitive_context import competitor_domains
+
+    domains = competitor_domains(
+        [
+            {"name": "King Kong", "url": "https://kingkong.com.au"},
+            {"name": "Clutch", "domain": "clutch.co"},
+            {"name": "LinkedIn", "url": "https://www.linkedin.com/company/acme"},
+        ]
+    )
+    assert domains == ["kingkong.com.au"]
+
+
 def test_discovery_field_splits_urls_and_names():
     seeds, hints = _discovery_competitor_inputs(
         "King Kong https://kingkong.co\nWebFX\nhttps://www.webfx.com"

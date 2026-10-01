@@ -140,6 +140,67 @@ def test_architecture_only_goes_to_excluded():
     assert "architecture_only" in report["excluded"][0]["reason"]
 
 
+def test_optimize_existing_from_url_map_enters_roadmap():
+    """OPTIMIZE_EXISTING architecture rows must appear as refresh — not excluded."""
+    report = build_roadmap(
+        _strategy(),
+        {
+            "target_url_tree": [],
+            "final_url_map": [
+                {
+                    "cluster": "google ads",
+                    "primary_keyword": "google ads management",
+                    "action": "OPTIMIZE_EXISTING",
+                    "selected_url": "/google-ads",
+                    "dedicated_url": True,
+                    "url_score": 78,
+                    "score_band": "HIGH",
+                }
+            ],
+        },
+        {},
+    )
+    assert len(report["pages"]) == 1
+    row = report["pages"][0]
+    assert row["url_n"] == "/google-ads"
+    assert row["action"] == "refresh"
+    assert row["primary_keyword"] == "google ads management"
+    assert any("architecture_optimize_admitted" in str(r.get("reconcile_note") or "") for r in report["pages"])
+    assert not any(
+        e.get("url_n") == "/google-ads" and "architecture_only" in str(e.get("reason") or "")
+        for e in report["excluded"]
+    )
+
+
+def test_architecture_refresh_disposition_enters_roadmap():
+    report = build_roadmap(
+        _strategy(),
+        _arch(
+            [
+                {
+                    "url": "/email-marketing",
+                    "parent": "/",
+                    "depth": 1,
+                    "page_type": "service",
+                    "keyword": "email marketing",
+                    "title": "Email Marketing",
+                }
+            ]
+        ),
+        _audit(
+            {
+                "url": "/email-marketing",
+                "disposition": "REFRESH",
+                "reason": "thin copy",
+                "keyword": "email marketing",
+            }
+        ),
+    )
+    assert len(report["pages"]) == 1
+    assert report["pages"][0]["action"] == "refresh"
+    assert report["pages"][0]["url_n"] == "/email-marketing"
+
+
 def test_create_without_title_or_keyword_does_not_lock():
     report = build_roadmap(
         _strategy({"url": "/x", "priority_tier": "quick_win"}),
@@ -148,7 +209,6 @@ def test_create_without_title_or_keyword_does_not_lock():
     )
     assert report["locked"] is False
     assert "primary_keyword" in (report.get("lock_reason") or "")
-
 
 def test_flags_do_not_block_lock_by_default():
     report = build_roadmap(
@@ -228,6 +288,131 @@ def test_refresh_ranks_before_create_in_same_tier():
     assert report["pages"][0]["priority_rank"] == 1
 
 
+def test_declining_blog_is_dropped_and_rising_blog_stays():
+    from app.services.content_planning import apply_blog_virality_gate
+
+    pages = [
+        {
+            "url_n": "/blog/rising-topic",
+            "action": "create",
+            "page_type": "blog",
+            "keyword": "meta ads trends",
+            "title": "Meta ads trends",
+            "trend": "rising",
+            "volume": 800,
+            "bucket": "trend",
+            "opportunity_score": 62,
+        },
+        {
+            "url_n": "/blog/fading-topic",
+            "action": "create",
+            "page_type": "blog",
+            "keyword": "old meta ads",
+            "title": "Old meta ads",
+            "trend": "declining",
+            "volume": 40,
+            "bucket": "avoid",
+        },
+        {
+            "url_n": "/meta-ads",
+            "action": "refresh",
+            "page_type": "service",
+            "keyword": "meta ads",
+            "title": "Meta Ads",
+        },
+    ]
+    kept, dropped = apply_blog_virality_gate(pages)
+    urls = [row["url_n"] for row in kept]
+    assert "/blog/rising-topic" in urls
+    assert "/meta-ads" in urls
+    assert "/blog/fading-topic" not in urls
+    assert dropped[0]["source_pack"] == "virality_check"
+    assert kept[0]["virality_pass"] is True or any(row.get("virality_pass") for row in kept)
+
+
+def test_selected_service_blog_requires_a_trending_keyword():
+    from app.services.content_planning import ensure_selected_service_coverage
+
+    service = {"id": "meta ads", "name": "Meta Ads", "url": "/meta-ads"}
+    without = ensure_selected_service_coverage([], [service], {})
+    assert not any(row.get("page_type") == "blog" for row in without)
+    assert any(row.get("page_type") == "service" for row in without)
+
+    with_trend = ensure_selected_service_coverage(
+        [],
+        [service],
+        {
+            "trend_plays": [
+                {
+                    "keyword": "meta ads trends 2026",
+                    "trend": "rising",
+                    "volume": 900,
+                    "bucket": "trend",
+                    "opportunity_score": 70,
+                }
+            ]
+        },
+    )
+    blogs = [row for row in with_trend if row.get("page_type") == "blog"]
+    assert len(blogs) == 1
+    assert blogs[0]["keyword"] == "meta ads trends 2026"
+    assert blogs[0]["virality_pass"] is True
+
+
+def test_pages_follow_pillar_blog_subpillar_blog_order():
+    from app.services.content_planning import order_pages_by_hierarchy
+
+    pages = [
+        {
+            "url_n": "/meta-ads/instagram",
+            "page_type": "subservice",
+            "supports_service_id": "meta ads",
+            "priority_tier": "quick_win",
+            "priority_score": 99,
+            "action": "create",
+        },
+        {
+            "url_n": "/blog/instagram-tips",
+            "page_type": "blog",
+            "supports_service_id": "meta ads",
+            "supports_subservice_id": "instagram",
+            "parent_url_n": "/meta-ads/instagram",
+            "priority_tier": "quick_win",
+            "priority_score": 90,
+            "action": "create",
+        },
+        {
+            "url_n": "/blog/meta-ads-guide",
+            "page_type": "blog",
+            "supports_service_id": "meta ads",
+            "priority_tier": "fill_in",
+            "priority_score": 5,
+            "action": "create",
+        },
+        {
+            "url_n": "/meta-ads",
+            "page_type": "service",
+            "supports_service_id": "meta ads",
+            "priority_tier": "big_bet",
+            "priority_score": 20,
+            "action": "refresh",
+        },
+    ]
+    ordered = order_pages_by_hierarchy(pages)
+    assert [row["url_n"] for row in ordered] == [
+        "/meta-ads",
+        "/blog/meta-ads-guide",
+        "/meta-ads/instagram",
+        "/blog/instagram-tips",
+    ]
+    assert [row["hierarchy_role"] for row in ordered] == [
+        "pillar_page",
+        "pillar_blogs",
+        "subpillar_page",
+        "subpillar_blogs",
+    ]
+
+
 def test_validate_report_check_roundtrip(tmp_path: Path):
     report = build_roadmap(
         _strategy({"url": "/p", "title": "P", "keyword": "p keyword", "priority_tier": "fill_in"}),
@@ -270,22 +455,28 @@ def test_tool_page_type_locks_and_reaches_calendar_roadmap():
     assert report["pages"][0]["content_type_label"] == "tool"
 
 
-def test_architecture_tree_uses_strategy_queue_urls():
+def test_architecture_tree_is_built_from_clusters_not_the_strategy_queue():
+    """Phase 6 runs BEFORE Phase 7, so it cannot use Phase 7's priority queue.
+
+    It used to read profile.seo_strategy_summary, which is empty on a first pass
+    and populated on a re-run — the tree therefore changed depending on how many
+    times the pipeline had been round-tripped. Phase 9 joins the strategy queue
+    itself (see _strategy_rows), so nothing downstream loses the information.
+    """
     from app.services.site_architecture import build_blueprint
 
     bp = build_blueprint(
         client_name="Acme",
         domain="acme.example",
         current_state={"urls_crawled": 0, "issues": []},
-        demand={"clusters": []},
-        seo_strategy={
-            "priority_queue": [
+        demand={
+            "clusters": [
                 {
-                    "keyword": "share of search",
-                    "title": "Share of search",
-                    "suggested_url": "https://acme.example/blog/share-of-search",
-                    "cluster": "measurement",
-                    "priority": "Quick win",
+                    "name": "measurement",
+                    "primary_keyword": "share of search",
+                    "keyword_count": 3,
+                    "total_volume": 400,
+                    "intent": "informational",
                 }
             ]
         },
@@ -293,7 +484,7 @@ def test_architecture_tree_uses_strategy_queue_urls():
         website={},
     )
     urls = {_pathish(n) for n in bp["target_url_tree"]}
-    assert "/blog/share-of-search" in urls
+    assert urls, "clusters alone must still produce a tree"
     owners = bp.get("cluster_owners") or bp.get("cluster_ownership") or []
     assert any(str(o.get("cluster") or "").lower() == "measurement" for o in owners)
 
@@ -328,7 +519,25 @@ def test_blueprint_builds_service_subservice_blog_chain():
                 "service_catalog": catalog,
             },
         },
-        seo_strategy={
+        commercial={},
+        website={},
+    )
+    by_url = {_pathish(node): node for node in bp["target_url_tree"]}
+    # Phase 6 owns the service / sub-service mapping…
+    assert by_url["/meta-ads"]["page_type"] == "service"
+    assert by_url["/meta-ads"]["parent"] == "/"
+    assert by_url["/meta-ads/instagram-ads"]["page_type"] == "subservice"
+    assert by_url["/meta-ads/instagram-ads"]["parent"] == "/meta-ads/"
+    # …and the supporting blog page arrives from Phase 7's content calendar,
+    # which runs after Phase 6. Phase 6 reaching forward for it only ever
+    # worked on a re-run.
+    assert "/blog/instagram-ads-guide" not in by_url
+
+    from app.services.site_architecture import merge_strategy_nodes_into_tree
+
+    enriched = merge_strategy_nodes_into_tree(
+        bp,
+        {
             "priority_queue": [
                 {
                     "keyword": "instagram ads guide",
@@ -338,16 +547,9 @@ def test_blueprint_builds_service_subservice_blog_chain():
                 }
             ]
         },
-        commercial={},
-        website={},
     )
-    by_url = {_pathish(node): node for node in bp["target_url_tree"]}
-    assert by_url["/meta-ads"]["page_type"] == "service"
-    assert by_url["/meta-ads"]["parent"] == "/"
-    assert by_url["/meta-ads/instagram-ads"]["page_type"] == "subservice"
-    assert by_url["/meta-ads/instagram-ads"]["parent"] == "/meta-ads/"
-    assert by_url["/blog/instagram-ads-guide"]["page_type"] == "blog"
-    assert by_url["/blog/instagram-ads-guide"]["parent"] == "/meta-ads/instagram-ads"
+    after = {_pathish(node): node for node in enriched["target_url_tree"]}
+    assert after["/blog/instagram-ads-guide"]["page_type"] == "blog"
 
 
 def test_roadmap_routes_commercial_service_and_parents_supporting_blog():
@@ -556,16 +758,7 @@ async def test_new_site_planning_allows_missing_audit():
                 {"url": "/blog/share-of-search", "parent": "/blog", "depth": 2, "page_type": "article"}
             ]
         },
-        seo_strategy={
-            "priority_queue": [
-                {
-                    "url": "/blog/share-of-search",
-                    "title": "Share of search",
-                    "keyword": "share of search",
-                    "priority_tier": "quick_win",
-                }
-            ]
-        },
+        seo_strategy={"priority_queue": [{"url": "/blog/share-of-search", "keyword": "share of search", "title": "Share of search"}]},
         seo_strategy_status="complete",
         website_status="not_started",
         website={},

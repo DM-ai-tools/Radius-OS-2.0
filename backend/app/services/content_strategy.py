@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 from app.agents.prompts import skill_system_preamble
 from app.integrations.llm import synthesize_json, synthesize_text
@@ -169,16 +170,20 @@ def image_suggestions_for(
 
 
 def _content_type(intent: str, keyword: str = "") -> str:
-    """This pipeline only plans service pages — not blog posts or guides."""
-    _ = intent, keyword
-    return "service"
+    """Derive page type from intent + keyword shape (not a forced service default)."""
+    from app.services.create_content import resolve_page_type
+
+    return resolve_page_type({"intent": intent, "keyword": keyword})
 
 
 def _suggested_path(keyword: str, intent: str, content_type: str) -> str:
-    """New URLs are service pages. Do not invent /blog/ or /guides/."""
-    _ = intent, content_type
-    slug = _slug(keyword)
-    return f"/services/{slug}/"
+    """Path prefix matches the resolved page type."""
+    from app.services.create_content import path_for_page_type, resolve_page_type
+
+    ptype = (content_type or "").strip() or resolve_page_type(
+        {"intent": intent, "keyword": keyword}
+    )
+    return path_for_page_type(ptype, keyword)
 
 
 def _cluster_volume(c: dict[str, Any]) -> Any:
@@ -490,12 +495,14 @@ def build_priority_queue(
     location: str | None = None,
     topic_plan: dict[str, Any] | None = None,
     topics: list[dict[str, Any]] | None = None,
+    selected_services: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build Phase 6 priority queue.
 
-    When Phase 5 Create Topic produced ``topic_ideas``, those rows are the spine
-    (order preserved). Ranked ``best_opportunities`` only supply volume/KD metrics
-    and optional fill-ins — they must not displace approved topics.
+    Phase 5 ``topic_ideas`` are the topic spine. Ranked keyword buckets supply
+    volume and difficulty for those topics. They do not add extra Fill-in rows.
+    A confirmed service selection adds one optimize row per selected service
+    page and supporting pages for that service.
     """
     metrics = _metric_index(best, evergreen, trends, avoid)
     for c in report_clusters:
@@ -538,156 +545,210 @@ def build_priority_queue(
     out: list[dict[str, Any]] = []
     seen_kw: set[str] = set()
 
-    if ideas:
-        for idea in ideas:
-            kw = str(idea.get("keyword") or idea.get("primary_keyword") or "").strip()
-            nkw = _norm(kw)
-            if nkw in seen_kw:
-                continue
-            source = dict(metrics.get(nkw) or {})
-            source.setdefault("bucket", "phase5_topic")
-            # Boost approved topics so calendar/queue treat them as primary work.
-            if source.get("opportunity_score") is None:
-                source["opportunity_score"] = idea.get("opportunity_score") or 75
-            row = _queue_row_from_source(
-                kw=kw,
-                domain=domain,
-                industry=industry,
-                location=location,
-                source=source,
-                idea=idea,
-                from_phase5=True,
-                force_priority="Quick win"
-                if float(source.get("opportunity_score") or 75) >= 55
-                else "Big bet",
-            )
-            out.append(row)
-            seen_kw.add(nkw)
-
-        # Optional fill-ins from ranked buckets — only keywords Phase 5 did not cover.
-        fill: list[dict[str, Any]] = []
-        for bucket, rows in (
-            ("best", best),
-            ("evergreen", evergreen),
-            ("trend", trends),
-        ):
-            for r in rows:
-                if not isinstance(r, dict) or not r.get("keyword"):
-                    continue
-                nkw = _norm(str(r.get("keyword")))
-                if nkw in seen_kw:
-                    continue
-                fill.append({**r, "bucket": r.get("bucket") or bucket})
-        fill.sort(
-            key=lambda x: (
-                -(float(x.get("opportunity_score") or 0)),
-                -(float(x.get("volume") or 0)),
-            )
-        )
-        for r in fill[: max(0, 25 - len(out))]:
-            kw = str(r.get("keyword") or "").strip()
-            nkw = _norm(kw)
-            if not kw or nkw in seen_kw:
-                continue
-            row = _queue_row_from_source(
-                kw=kw,
-                domain=domain,
-                industry=industry,
-                location=location,
-                source=r,
-                idea={},
-                from_phase5=False,
-                force_priority="Fill-in",
-            )
-            out.append(row)
-            seen_kw.add(nkw)
-        return out[:25]
-
-    # No Phase 5 topic plan — fall back to ranked buckets (legacy path).
-    pool: list[dict[str, Any]] = []
-    for bucket, rows in (
-        ("best", best),
-        ("evergreen", evergreen),
-        ("trend", trends),
-        ("avoid", avoid),
-    ):
-        for r in rows:
-            if isinstance(r, dict) and r.get("keyword"):
-                pool.append({**r, "bucket": r.get("bucket") or bucket})
-    for c in report_clusters:
-        if not isinstance(c, dict):
+    for idea in ideas:
+        kw = str(idea.get("keyword") or idea.get("primary_keyword") or "").strip()
+        nkw = _norm(kw)
+        if nkw in seen_kw:
             continue
-        pkw = str(c.get("primary_keyword") or "")
-        if pkw and _norm(pkw) not in {_norm(str(r.get("keyword") or "")) for r in pool}:
-            pool.append(
+        source = dict(metrics.get(nkw) or {})
+        source.setdefault("bucket", "phase5_topic")
+        # Boost approved topics so calendar/queue treat them as primary work.
+        if source.get("opportunity_score") is None:
+            source["opportunity_score"] = idea.get("opportunity_score") or 75
+        row = _queue_row_from_source(
+            kw=kw,
+            domain=domain,
+            industry=industry,
+            location=location,
+            source=source,
+            idea=idea,
+            from_phase5=True,
+            force_priority="Quick win"
+            if float(source.get("opportunity_score") or 75) >= 55
+            else "Big bet",
+        )
+        out.append(row)
+        seen_kw.add(nkw)
+
+    for row in out:
+        row.setdefault("action", "create")
+        row.setdefault("work_label", "Create page")
+
+    return merge_selected_service_work(out, selected_services or [], domain)
+
+
+def _service_path(service: dict[str, Any]) -> str:
+    raw = str(service.get("url") or service.get("path") or "").strip()
+    if "://" in raw:
+        raw = urlparse(raw).path
+    if raw:
+        path = raw if raw.startswith("/") else f"/{raw}"
+        if path != "/" and not path.endswith("/"):
+            path = f"{path}/"
+        return path
+    return f"/{_slug(str(service.get('name') or service.get('id') or 'service'))}/"
+
+
+def selected_service_work_rows(
+    selected_services: list[dict[str, Any]] | None,
+    domain: str,
+) -> list[dict[str, Any]]:
+    """One optimize row per selected service page, plus two blog creates each."""
+    rows: list[dict[str, Any]] = []
+    host = (domain or "").strip().strip("/")
+    for service in selected_services or []:
+        if not isinstance(service, dict):
+            continue
+        name = str(service.get("name") or service.get("id") or "").strip()
+        if not name:
+            continue
+        sid = _norm(str(service.get("id") or name))
+        path = _service_path(service)
+        absolute = f"https://{host}{path}" if host else path
+        rows.append(
+            {
+                "title": name,
+                "keyword": name,
+                "primary_keyword": name,
+                "action": "optimize",
+                "work_label": "Optimize service page",
+                "content_type": "service page",
+                "page_type": "service",
+                "priority": "Quick win",
+                "intent": "commercial",
+                "funnel": "bofu",
+                "est_words": 1500,
+                "suggested_url": absolute,
+                "url": path,
+                "supports_service_id": sid,
+                "service": name,
+                "from_selected_service": True,
+                "from_phase5_topic": False,
+                "opportunity_score": 80,
+                "rationale": f"Optimize the existing {name} service page.",
+            }
+        )
+        for sub in service.get("subservices") or []:
+            if not isinstance(sub, dict):
+                continue
+            sub_name = str(sub.get("name") or sub.get("id") or "").strip()
+            if not sub_name:
+                continue
+            sub_path = _service_path({**sub, "name": sub_name}) if sub.get("url") else (
+                f"{path.rstrip('/')}/{_slug(sub_name)}/"
+            )
+            sub_absolute = f"https://{host}{sub_path}" if host else sub_path
+            rows.append(
                 {
-                    "keyword": pkw,
-                    "volume": _cluster_volume(c),
-                    "difficulty": _cluster_difficulty(c),
-                    "opportunity_score": c.get("best_score") or c.get("opportunity_score"),
-                    "intent": c.get("intent"),
-                    "bucket": "best",
-                    "competitor_domains": c.get("competitor_domains") or [],
+                    "title": sub_name,
+                    "keyword": sub_name,
+                    "primary_keyword": sub_name,
+                    "action": "optimize",
+                    "work_label": "Optimize service page",
+                    "content_type": "service page",
+                    "page_type": "subservice",
+                    "priority": "Quick win",
+                    "intent": "commercial",
+                    "funnel": "bofu",
+                    "est_words": 1200,
+                    "suggested_url": sub_absolute,
+                    "url": sub_path,
+                    "supports_service_id": sid,
+                    "supports_subservice_id": _norm(str(sub.get("id") or sub_name)),
+                    "service": name,
+                    "subservice": sub_name,
+                    "from_selected_service": True,
+                    "from_phase5_topic": False,
+                    "opportunity_score": 70,
+                    "rationale": f"Optimize the existing {sub_name} page under {name}.",
                 }
             )
+        from app.services.content_planning import (
+            BLOGISH_CONTENT,
+            SELECTED_SERVICE_PAGE_KINDS,
+            supporting_page_spec,
+        )
 
-    queue: list[dict[str, Any]] = []
-    for r in pool:
-        kw = str(r.get("keyword") or "").strip()
-        if not kw:
-            continue
-        queue.append(
-            _queue_row_from_source(
-                kw=kw,
-                domain=domain,
-                industry=industry,
-                location=location,
-                source=r,
-                idea={},
-                from_phase5=False,
+        for kind in SELECTED_SERVICE_PAGE_KINDS:
+            spec = supporting_page_spec(name, kind)
+            page_path = spec["path"]
+            absolute_page = f"https://{host}{page_path}" if host else page_path
+            page_type = spec["page_type"]
+            rows.append(
+                {
+                    "title": spec["title"],
+                    "keyword": spec["keyword"],
+                    "primary_keyword": spec["keyword"],
+                    "action": "create",
+                    "work_label": spec["work_label"],
+                    "content_type": page_type,
+                    "page_type": page_type,
+                    "priority": "Big bet",
+                    "intent": spec["intent"],
+                    "funnel": "bofu" if spec["intent"] != "informational" else "tofu",
+                    "est_words": 1500,
+                    "suggested_url": absolute_page,
+                    "url": page_path,
+                    "supports_service_id": sid,
+                    "service": name,
+                    "parent": path,
+                    "from_selected_service": True,
+                    "from_selected_service_blog": page_type in BLOGISH_CONTENT,
+                    "from_phase5_topic": False,
+                    "opportunity_score": 60,
+                    "rationale": (
+                        f"Create a {page_type} page for {name}. "
+                        "Each selected service is planned across every supporting page type."
+                    ),
+                }
             )
-        )
+    return rows
 
-    order = {"Quick win": 0, "Big bet": 1, "Fill-in": 2, "Avoid": 3}
-    queue.sort(
-        key=lambda x: (
-            order.get(str(x.get("priority")), 9),
-            -(float(x.get("opportunity_score") or 0)),
-            -(float(x.get("volume") or 0)),
-        )
-    )
-    for item in queue:
-        k = _norm(str(item.get("keyword") or ""))
-        if not k or k in seen_kw:
-            continue
-        seen_kw.add(k)
-        out.append(item)
-    return out[:25]
+
+def merge_selected_service_work(
+    queue: list[dict[str, Any]],
+    selected_services: list[dict[str, Any]] | None,
+    domain: str,
+) -> list[dict[str, Any]]:
+    """Put selected-service optimize and supporting-page rows at the front of the queue."""
+    work = selected_service_work_rows(selected_services, domain)
+    if not work:
+        return queue
+    claimed = {_norm(str(row.get("keyword") or "")) for row in work}
+    claimed.discard("")
+    rest = [
+        row
+        for row in queue
+        if _norm(str(row.get("keyword") or "")) not in claimed
+    ]
+    return work + rest
 
 
 def build_calendar(priority_queue: list[dict[str, Any]], weeks: int = 12) -> list[dict[str, Any]]:
-    """1 article/week minimum schedule across 12 weeks / 3 months."""
+    """Schedule one week per priority-queue topic — do not recycle to pad 12 weeks.
+
+    Selected-service optimization and supporting pages of every type are
+    scheduled first and are not dropped when they run past the default 12 weeks.
+    """
     actionable = [p for p in priority_queue if p.get("priority") != "Avoid"]
-    if not actionable:
-        actionable = priority_queue[:weeks]
-    months: list[dict[str, Any]] = []
+    selected = [p for p in actionable if p.get("from_selected_service")]
+    rest = [p for p in actionable if not p.get("from_selected_service")]
+    ordered = selected + rest
+    limit = len(selected) + min(len(rest), weeks)
+    scheduled = ordered[: min(len(ordered), limit)]
     labels = {1: "Foundation", 2: "Expansion", 3: "Authority"}
+    months: list[dict[str, Any]] = []
     idx = 0
-    for m in range(1, 4):
+    month = 1
+    while month <= 3 or idx < len(scheduled):
         month_weeks = []
         for w in range(1, 5):
-            if idx >= len(actionable):
-                # recycle fill-ins
-                item = actionable[idx % max(1, len(actionable))] if actionable else None
-            else:
-                item = actionable[idx]
-            idx += 1
-            if not item:
-                continue
-            week_num = (m - 1) * 4 + w
-            if week_num > weeks:
+            week_num = (month - 1) * 4 + w
+            if idx >= len(scheduled) or week_num > limit:
                 break
-            role = "pillar" if w == 1 and m == 1 else item.get("content_type") or "cluster"
+            item = scheduled[idx]
+            idx += 1
+            role = item.get("content_type") or ("pillar" if w == 1 and month == 1 else "cluster")
             month_weeks.append(
                 {
                     "week": week_num,
@@ -695,12 +756,21 @@ def build_calendar(priority_queue: list[dict[str, Any]], weeks: int = 12) -> lis
                     "title": item.get("title"),
                     "keyword": item.get("keyword"),
                     "content_type": role,
+                    "action": item.get("action"),
+                    "work_label": item.get("work_label"),
                     "priority": item.get("priority"),
                     "est_words": item.get("est_words"),
                     "suggested_url": item.get("suggested_url"),
+                    "service": item.get("service"),
+                    "supports_service_id": item.get("supports_service_id"),
                 }
             )
-        months.append({"month": m, "label": labels.get(m, f"Month {m}"), "weeks": month_weeks})
+        months.append(
+            {"month": month, "label": labels.get(month, f"Month {month}"), "weeks": month_weeks}
+        )
+        month += 1
+        if idx >= len(scheduled) and month > 3:
+            break
     return months
 
 
@@ -901,7 +971,14 @@ async def run_content_strategy_plan(
     if isinstance(audience, list):
         audience = ", ".join(str(a) for a in audience[:4])
 
-    topic_plan = dict(demand.get("topic_plan") or {})
+    # Phase 6 stamps URL-map actions onto Phase 5's draft plan and keeps the
+    # result in its own summary. Read it from there rather than relying on
+    # Phase 6 having written it back into Phase 5's column.
+    from app.services.create_topic import resolve_topic_plan, resolve_topics
+
+    topic_plan = dict(
+        resolve_topic_plan(demand=demand, architecture=dict(site_architecture or {}))
+    )
     best = list(demand.get("best_opportunities") or [])
     evergreen = list(demand.get("strong_evergreen") or [])
     trends = list(demand.get("trend_plays") or [])
@@ -945,7 +1022,9 @@ async def run_content_strategy_plan(
     location_name = demand.get("location_name") or geo_focus or "United States"
 
     # Build pillars list for authority map (from Phase 5 topics / Create Topic ideas)
-    topics = list(demand.get("topics") or [])
+    topics = list(
+        resolve_topics(demand=demand, architecture=dict(site_architecture or {}))
+    )
     if not any(
         isinstance(t, dict) and (t.get("primary_keyword") or t.get("keyword"))
         for t in topics
@@ -982,6 +1061,12 @@ async def run_content_strategy_plan(
         industry=industry,
         location=location_name if location_name not in ("United States", None) else geo_focus,
     )
+    from app.services.content_planning import selected_services_for_plan
+
+    selected_services = selected_services_for_plan(
+        dict(site_architecture or {}),
+        demand,
+    )
     priority_queue = build_priority_queue(
         best=best,
         evergreen=evergreen,
@@ -993,6 +1078,7 @@ async def run_content_strategy_plan(
         location=location_name if location_name not in ("United States", None) else geo_focus,
         topic_plan=topic_plan,
         topics=topics,
+        selected_services=selected_services,
     )
     content_gaps = build_gaps(best, evergreen, website, competitor_domains)
     # Enrich gaps with competitor blog titles when Phase 5 crawled them
@@ -1018,7 +1104,7 @@ async def run_content_strategy_plan(
     )
 
     # Legacy-compatible fields for existing UI / Phase memory
-    priority_pages = [
+    priority_pages_all = [
         {
             "keyword": p.get("keyword"),
             "bucket": "best"
@@ -1039,9 +1125,17 @@ async def run_content_strategy_plan(
             "intent": p.get("intent"),
             "est_words": p.get("est_words"),
             "content_type": p.get("content_type"),
+            "action": p.get("action"),
+            "work_label": p.get("work_label"),
+            "supports_service_id": p.get("supports_service_id"),
+            "from_selected_service": p.get("from_selected_service"),
         }
         for p in priority_queue
         if p.get("priority") != "Avoid"
+    ]
+    selected_pages = [p for p in priority_pages_all if p.get("from_selected_service")]
+    priority_pages = selected_pages + [
+        p for p in priority_pages_all if not p.get("from_selected_service")
     ][:15]
 
     calendar_priorities = [
@@ -1049,17 +1143,58 @@ async def run_content_strategy_plan(
             "wave": m["month"],
             "focus": m["label"],
             "pages": [w.get("keyword") for w in m.get("weeks") or [] if w.get("keyword")],
+            "plan": [
+                {
+                    "keyword": w.get("keyword"),
+                    "title": w.get("title"),
+                    "action": w.get("action"),
+                    "work_label": w.get("work_label"),
+                }
+                for w in m.get("weeks") or []
+                if w.get("keyword")
+            ],
         }
         for m in calendar
     ]
+    service_count = len(selected_services)
+    blog_count = sum(
+        1
+        for row in priority_queue
+        if row.get("from_selected_service") and row.get("action") == "create"
+    )
+    optimize_count = sum(
+        1
+        for row in priority_queue
+        if row.get("from_selected_service") and row.get("action") == "optimize"
+    )
+    service_sentence = (
+        f"Optimize {optimize_count} selected service page"
+        f"{'s' if optimize_count != 1 else ''} and create {blog_count} supporting "
+        f"page{'s' if blog_count != 1 else ''} across guide, blog, comparison, FAQ, "
+        "listicle, landing, and tool. "
+        if selected_services
+        else ""
+    )
 
     executive_summary = (
         f"Content strategy for {client_name}: {len(core_topics)} core topic pillars, "
-        f"{len(priority_queue)} prioritized pieces, 12-week calendar. "
+        f"{len(priority_queue)} prioritized pieces. "
+        f"{service_sentence}"
         f"Geo: {location_name}. "
         f"Gaps vs {', '.join(competitor_names[:3] or competitor_domains[:3]) or 'competitors'} "
         "drive quick wins first, then big-bet pillars for topical authority."
     )
+    if selected_services:
+        kpis = list(metrics.get("content_production_kpis") or [])
+        metrics["content_production_kpis"] = [
+            f"Optimize each of the {service_count} selected service pages",
+            "Create a guide, blog, comparison, FAQ, listicle, landing, and tool page for each selected service",
+            *[
+                item
+                for item in kpis
+                if "service page per week" not in str(item).lower()
+            ],
+        ]
 
     plan = {
         "business_name": client_name,
@@ -1072,6 +1207,16 @@ async def run_content_strategy_plan(
         "core_topics": core_topics,
         "content_gaps": content_gaps,
         "priority_queue": priority_queue,
+        "selected_services": selected_services,
+        "selected_service_plan": {
+            "service_count": service_count,
+            "optimize_count": optimize_count,
+            "blog_create_count": blog_count,
+            "note": (
+                "Each selected service page is optimized. "
+                "Each selected service is planned across guide, blog, comparison, FAQ, listicle, landing, and tool pages."
+            ),
+        } if selected_services else None,
         "content_calendar": calendar,
         "internal_linking": linking,
         "success_metrics": metrics,

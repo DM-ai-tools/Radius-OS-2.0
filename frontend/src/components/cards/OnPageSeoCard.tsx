@@ -1,9 +1,11 @@
 import { PresentableValue } from "./PresentableValue";
+import FocusBox from "./FocusBox";
+import { useStageFocus } from "../../lib/stageFocus";
 
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
 };
 
 function asRows(raw: unknown): Array<Record<string, unknown>> {
@@ -17,6 +19,7 @@ function ba(v: unknown): { before?: string; after?: string } {
 }
 
 export default function OnPageSeoCard({ payload, canAct, onAction }: Props) {
+  const focus = useStageFocus(payload);
   const pagesRaw = asRows(payload.pages);
   const pages = pagesRaw.length ? pagesRaw : asRows(payload.queue);
   const multi = pages.length > 0;
@@ -80,6 +83,8 @@ export default function OnPageSeoCard({ payload, canAct, onAction }: Props) {
             >
               <thead>
                 <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+                  <th style={{ padding: "6px 8px" }}>Focus</th>
+                  <th style={{ padding: "6px 8px" }}>Work</th>
                   <th style={{ padding: "6px 8px" }}>URL</th>
                   <th style={{ padding: "6px 8px" }}>Keyword</th>
                   <th style={{ padding: "6px 8px" }}>Title before → after</th>
@@ -100,7 +105,13 @@ export default function OnPageSeoCard({ payload, canAct, onAction }: Props) {
                     ? (p.schema_types as string[]).join(", ")
                     : "";
                   return (
-                    <tr key={`${String(p.url || p.path)}-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
+                    <tr key={`${String(p.url || p.path)}-${i}`} style={{ borderBottom: "1px solid var(--line)", opacity: focus.focused(p) ? 1 : 0.45 }}>
+                      <td style={{ padding: "6px 8px" }}>
+                        <FocusBox row={p} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>
+                        {String(p.work_label || p.action || "—")}
+                      </td>
                       <td style={{ padding: "6px 8px", fontSize: 11 }}>
                         {String(p.url || p.path || "—")}
                       </td>
@@ -259,7 +270,7 @@ export default function OnPageSeoCard({ payload, canAct, onAction }: Props) {
 
       {canAct && (
         <div className="card-actions">
-          <button type="button" className="btn btn-primary" onClick={() => onAction("approve")}>
+          <button type="button" className="btn btn-primary" onClick={() => onAction("approve", focus.edits)}>
             Approve
           </button>
           <button type="button" className="btn btn-ghost" onClick={() => onAction("reject")}>

@@ -161,8 +161,6 @@ async def _dead_man_switch_guard(request, call_next):
     Health, docs, SPA assets, and the check-in/status endpoints stay reachable
     so operators can still revive the deployment. No data is deleted.
     """
-    from fastapi.responses import JSONResponse
-
     path = request.url.path or "/"
     if path == "/" or any(path == p or path.startswith(p) for p in _DEAD_MAN_ALLOW_PREFIXES):
         return await call_next(request)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from app.services.html_seo_signals import inspect_images
 from app.services.technical_seo_companion import (
     assign_issue_confidence,
     build_internal_linking_snapshot,
     build_score_comparison,
     build_suggestion_items,
     cluster_issues_by_category,
+    hreflang_findings_for_html,
     merge_sections,
 )
 from app.services.technical_seo_schemas import TechnicalSEOPage
@@ -74,3 +76,35 @@ def test_cluster_and_suggestion_items():
     items = build_suggestion_items(issues)
     assert items[0]["confidence"] == "high"
     assert items[0]["status"] == "pending"
+
+
+def test_hreflang_sample_flags_code_host_self_and_canonical():
+    html = """
+    <link rel="canonical" href="https://example.com/" />
+    <link rel="alternate" hreflang="en-uk" href="https://example.com/uk" />
+    <link rel="alternate" hreflang="de" href="https://other.example/de" />
+    """
+    issues = hreflang_findings_for_html("https://example.com/en/", html)
+    checks = {item["check"] for item in issues}
+    assert "invalid_code" in checks
+    assert "cross_host" in checks
+    assert "missing_self_reference" in checks
+    assert "canonical_conflict" in checks
+    invalid = next(item for item in issues if item["check"] == "invalid_code")
+    assert "en-gb" in invalid["issue"]
+
+
+def test_image_signals_flag_png_without_dimensions():
+    report = inspect_images('<img src="/hero.png" alt="Hero">')
+    issues = report["findings"][0]["issues"]
+    assert "missing width and height" in issues
+    assert "raster format is not WebP or AVIF" in issues
+    assert "first image missing srcset" in issues
+    assert "missing alt" not in issues
+
+
+def test_image_signals_say_when_the_page_was_not_fetched():
+    report = inspect_images(None)
+    assert report["fetched"] is False
+    assert report["images"] == []
+    assert report["note"] == "Page was not fetched — image checks were not run."

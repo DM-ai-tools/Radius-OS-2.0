@@ -62,6 +62,25 @@ const HIERARCHY_ORDER = [
   "other",
 ];
 
+function humanizeAuditError(raw: unknown): string {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return "This audit did not measure any pages, so it cannot be approved. Re-run the website audit.";
+  }
+  const key = text.toLowerCase();
+  if (key.includes("timeout") || key === "comprehensive_seo_audit_timeout") {
+    return (
+      "The SEO audit ran out of time before pages could be measured. " +
+      "Re-run the website audit — slower sites (or WAF delays) need a longer pass."
+    );
+  }
+  if (key.includes("_") && !text.includes(" ")) {
+    // Snake-case machine keys → readable sentence
+    return text.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase()) + ". Re-run the website audit.";
+  }
+  return text;
+}
+
 function clusterKey(page: PageReport): string {
   return page.cluster || "other";
 }
@@ -182,8 +201,9 @@ export default function SeoAuditCard({ payload, canAct, onAction }: Props) {
       </p>
       {failed ? (
         <p style={{ fontSize: 13, color: "var(--danger, #9b2c2c)", marginTop: 0 }}>
-          {String(
-            payload.error ||
+          {humanizeAuditError(
+            payload.error_message ||
+              payload.error ||
               "This audit did not measure any pages, so it cannot be approved. Re-run the website audit.",
           )}
         </p>

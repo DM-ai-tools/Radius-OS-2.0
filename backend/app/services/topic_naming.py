@@ -26,6 +26,10 @@ _ACRONYMS = {
     "saas",
     "ecommerce",
     "e-commerce",
+    "aeo",
+    "geo",
+    "cro",
+    "llm",
 }
 
 _SMALL = {"a", "an", "the", "to", "for", "of", "and", "or", "in", "on", "with", "vs", "versus"}

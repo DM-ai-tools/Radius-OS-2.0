@@ -173,15 +173,7 @@ def apply_trademark_block(
 
         json_ld = page.get("schema_json_ld")
         if isinstance(json_ld, dict):
-            for key, value in list(json_ld.items()):
-                if not isinstance(value, str):
-                    continue
-                _cleaned, hits = _strip_terms(value, terms)
-                if hits:
-                    # Schema values are machine-read; an invented substitute would be a
-                    # structured-data lie, so drop the property instead.
-                    json_ld.pop(key, None)
-                    _record(url, f"schema_json_ld.{key}", hits)
+            _scrub_schema_terms(json_ld, terms, url=url, prefix="schema_json_ld", record=_record)
 
     for link in internal_links:
         _cleaned, hits = _strip_terms(str(link.get("anchor") or ""), terms)
@@ -532,31 +524,386 @@ def selected_on_page_rows(production: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _schema_for(page: dict[str, Any], client_name: str, primary_url: str) -> dict[str, Any]:
-    url = str(page.get("url") or page.get("page_url") or primary_url)
-    kw = page.get("keyword") or page.get("target_keyword") or client_name
-    funnel = page.get("funnel") or ""
-    types = ["WebPage"]
-    json_ld: dict[str, Any] = {
-        "@context": "https://schema.org",
-        "@type": "WebPage",
-        "name": page.get("title") or kw,
-        "url": url if url.startswith("http") else primary_url.rstrip("/") + _path(url),
-        "description": page.get("meta") or f"{kw} — {client_name}",
-        "isPartOf": {"@type": "WebSite", "name": client_name, "url": primary_url},
-    }
-    if funnel == "ToFu" or "blog" in _path(url):
-        types = ["Article", "BreadcrumbList"]
-        json_ld = {
-            "@context": "https://schema.org",
-            "@type": "Article",
-            "headline": page.get("title") or kw,
-            "author": {"@type": "Organization", "name": client_name},
-            "mainEntityOfPage": url,
+def _scrub_schema_terms(
+    node: Any,
+    terms: list[str],
+    *,
+    url: str,
+    prefix: str,
+    record: Any,
+) -> None:
+    """Drop schema strings that name a competitor. Nested @graph values count."""
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if isinstance(value, str):
+                _cleaned, hits = _strip_terms(value, terms)
+                if hits:
+                    node.pop(key, None)
+                    record(url, f"{prefix}.{key}", hits)
+            elif isinstance(value, (dict, list)):
+                _scrub_schema_terms(value, terms, url=url, prefix=f"{prefix}.{key}", record=record)
+    elif isinstance(node, list):
+        for item in node:
+            _scrub_schema_terms(item, terms, url=url, prefix=prefix, record=record)
+
+
+def _display_text(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("after", "text", "title", "name", "before"):
+            text = value.get(key)
+            if text:
+                return str(text).strip()
+        return ""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _absolute_url(url: str, primary_url: str) -> str:
+    raw = str(url or "").strip()
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    base = str(primary_url or "").strip().rstrip("/")
+    if base and not base.startswith("http"):
+        base = "https://" + base
+    path = _path(raw)
+    if not base:
+        return path
+    return base + ("/" if path == "/" else path)
+
+
+def _preflight(page: dict[str, Any]) -> dict[str, Any]:
+    pre = page.get("preflight")
+    return pre if isinstance(pre, dict) else {}
+
+
+def _named_author(page: dict[str, Any], client_name: str) -> str | None:
+    pre = _preflight(page)
+    who = page.get("who_how_why") if isinstance(page.get("who_how_why"), dict) else {}
+    person = who.get("who") if isinstance(who.get("who"), dict) else {}
+    name = str(person.get("author") or pre.get("author") or page.get("author") or "").strip()
+    if not name or name.lower() == client_name.strip().lower():
+        return None
+    return name
+
+
+def _offer_node(page: dict[str, Any]) -> dict[str, Any] | None:
+    raw = page.get("offers") if isinstance(page.get("offers"), dict) else None
+    if raw is None and isinstance(page.get("offer"), dict):
+        raw = page["offer"]
+    price = (raw or {}).get("price") if raw else page.get("price")
+    if price in (None, ""):
+        return None
+    currency = "USD"
+    if raw:
+        currency = str(raw.get("priceCurrency") or raw.get("currency") or currency)
+    elif page.get("priceCurrency"):
+        currency = str(page["priceCurrency"])
+    node: dict[str, Any] = {"@type": "Offer", "price": str(price), "priceCurrency": currency}
+    availability = (raw or {}).get("availability") if raw else page.get("availability")
+    if availability:
+        node["availability"] = str(availability)
+    return node
+
+
+def _rating_node(page: dict[str, Any]) -> dict[str, Any] | None:
+    raw = page.get("aggregateRating") or page.get("aggregate_rating")
+    if not isinstance(raw, dict) or raw.get("ratingValue") in (None, ""):
+        return None
+    node: dict[str, Any] = {"@type": "AggregateRating", "ratingValue": raw["ratingValue"]}
+    if raw.get("reviewCount") not in (None, ""):
+        node["reviewCount"] = raw["reviewCount"]
+    return node
+
+
+def _faq_entities(page: dict[str, Any]) -> list[dict[str, Any]]:
+    entities: list[dict[str, Any]] = []
+    for item in page.get("faq") or []:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("q") or item.get("name") or "").strip()
+        answer = item.get("a") or item.get("acceptedAnswer") or item.get("answer")
+        if isinstance(answer, dict):
+            answer = answer.get("text")
+        answer_text = str(answer or "").strip()
+        if question and answer_text:
+            entities.append(
+                {
+                    "@type": "Question",
+                    "name": question,
+                    "acceptedAnswer": {"@type": "Answer", "text": answer_text},
+                }
+            )
+    return entities
+
+
+def _howto_steps(page: dict[str, Any]) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    for item in page.get("steps") or []:
+        if isinstance(item, str) and item.strip():
+            steps.append({"@type": "HowToStep", "text": item.strip()})
+        elif isinstance(item, dict) and (item.get("text") or item.get("name")):
+            steps.append(
+                {
+                    "@type": "HowToStep",
+                    "name": str(item.get("name") or item.get("text") or ""),
+                    "text": str(item.get("text") or item.get("name") or ""),
+                }
+            )
+    return steps
+
+
+def _faq_rich_result_ok(page: dict[str, Any]) -> bool:
+    blob = " ".join(
+        str(page.get(key) or "")
+        for key in ("industry", "site_type", "vertical", "organization_type")
+    ).lower()
+    return any(token in blob for token in ("government", "public health", "hospital"))
+
+
+_SERVICE_PAGE_TYPES = {"service", "subservice", "sub_service", "landing", "location"}
+_ARTICLE_PAGE_TYPES = {"blog", "guide", "article", "listicle", "spoke"}
+_HOWTO_PAGE_TYPES = {"howto", "how_to", "tutorial"}
+
+
+def schema_for_page(page: dict[str, Any], client_name: str, primary_url: str) -> dict[str, Any]:
+    """JSON-LD from page type. Schema.org validity and Google eligibility stay separate.
+
+    Ratings, prices, and authors are omitted unless the brief already has them.
+    FAQ and HowTo markup does not claim a rich result for a normal commercial client.
+    """
+    from app.services.create_content import resolve_page_type
+
+    pre = _preflight(page)
+    abs_url = _absolute_url(str(page.get("url") or page.get("page_url") or primary_url), primary_url)
+    name = _display_text(page.get("title")) or str(
+        page.get("keyword") or page.get("target_keyword") or client_name
+    )
+    description = _display_text(page.get("meta_description") or page.get("meta")) or f"{name} — {client_name}"
+    declared = str(page.get("page_type") or pre.get("page_type") or "").strip().lower()
+    page_type = resolve_page_type(
+        {
+            "url": abs_url,
+            "path": page.get("path") or pre.get("url"),
+            "keyword": page.get("keyword") or page.get("target_keyword"),
+            "title": name,
+            "page_type": page.get("page_type") or pre.get("page_type"),
+            "content_type": page.get("content_type"),
+            "search_intent": page.get("search_intent") or page.get("intent"),
+            "preflight": pre,
         }
-    elif funnel == "BoFu":
-        types = ["WebPage", "Organization"]
-    return {"types": types, "json_ld": json_ld}
+    )
+    if declared in _HOWTO_PAGE_TYPES:
+        page_type = declared
+    hint = str(page.get("schema_type") or "").strip().lower()
+    parent = str(page.get("parent") or pre.get("parent") or "").strip()
+    author = _named_author(page, client_name)
+    offer = _offer_node(page)
+    rating = _rating_node(page)
+    omitted: list[str] = []
+    nodes: list[dict[str, Any]] = []
+    reasons: list[str] = []
+
+    if page_type == "product" or hint == "product":
+        product: dict[str, Any] = {"@type": "Product", "name": name, "description": description, "url": abs_url}
+        if offer:
+            product["offers"] = offer
+        else:
+            omitted.append("offers")
+            reasons.append("Product rich results need a real price; none was supplied.")
+        if rating:
+            product["aggregateRating"] = rating
+        else:
+            omitted.append("aggregateRating")
+        nodes.append(product)
+    elif page_type in _SERVICE_PAGE_TYPES or hint == "service":
+        nodes.append(
+            {
+                "@type": "Service",
+                "name": name,
+                "description": description,
+                "url": abs_url,
+                "provider": {"@type": "Organization", "name": client_name, "url": _absolute_url(primary_url, primary_url)},
+            }
+        )
+        if not rating:
+            omitted.append("aggregateRating")
+        reasons.append("Service markup is valid Schema.org. Google does not show a Service rich result.")
+    elif page_type == "comparison":
+        kind = "Article" if hint == "article" else "WebPage"
+        node = {"@type": kind, "name": name, "headline": name, "description": description, "url": abs_url}
+        if kind == "Article" and author:
+            node["author"] = {"@type": "Person", "name": author}
+        elif kind == "Article":
+            omitted.append("author")
+        nodes.append(node)
+        if hint == "review":
+            omitted.append("review")
+        reasons.append("Comparison pages do not emit a Review of a rival.")
+    elif page_type in _HOWTO_PAGE_TYPES or hint == "howto":
+        steps = _howto_steps(page)
+        if steps:
+            nodes.append({"@type": "HowTo", "name": name, "description": description, "step": steps})
+            reasons.append("HowTo rich results are deprecated. Markup is for Schema.org only.")
+        else:
+            omitted.append("HowTo")
+            nodes.append({"@type": "WebPage", "name": name, "description": description, "url": abs_url})
+    elif page_type == "faq" or hint == "faqpage":
+        entities = _faq_entities(page)
+        if entities:
+            nodes.append({"@type": "FAQPage", "mainEntity": entities})
+            if not _faq_rich_result_ok(page):
+                reasons.append(
+                    "FAQ rich results are limited to well-known government and health sites."
+                )
+        else:
+            omitted.append("FAQPage")
+            nodes.append({"@type": "WebPage", "name": name, "description": description, "url": abs_url})
+            reasons.append("FAQPage needs real questions and answers on the page.")
+    elif page_type in _ARTICLE_PAGE_TYPES or hint == "article":
+        article: dict[str, Any] = {
+            "@type": "Article",
+            "headline": name,
+            "description": description,
+            "mainEntityOfPage": abs_url,
+        }
+        if author:
+            article["author"] = {"@type": "Person", "name": author}
+        else:
+            omitted.append("author")
+        image = page.get("image") or page.get("hero_image")
+        if image:
+            article["image"] = str(image)
+        else:
+            omitted.append("image")
+        published = page.get("datePublished") or page.get("date_published")
+        if published:
+            article["datePublished"] = str(published)
+        else:
+            omitted.append("datePublished")
+        nodes.append(article)
+        if "author" in omitted or "image" in omitted or "datePublished" in omitted:
+            reasons.append("Article is missing properties Google requires for an article rich result.")
+    else:
+        nodes.append(
+            {
+                "@type": "WebPage",
+                "name": name,
+                "description": description,
+                "url": abs_url,
+                "isPartOf": {
+                    "@type": "WebSite",
+                    "name": client_name,
+                    "url": _absolute_url(primary_url, primary_url),
+                },
+            }
+        )
+
+    faq_entities = _faq_entities(page)
+    already_faq = any(node.get("@type") == "FAQPage" for node in nodes)
+    if faq_entities and not already_faq and (page_type == "faq" or hint == "faqpage"):
+        nodes.append({"@type": "FAQPage", "mainEntity": faq_entities})
+
+    if parent:
+        parent_url = _absolute_url(parent, primary_url)
+        home = _absolute_url(primary_url, primary_url)
+        nodes.append(
+            {
+                "@type": "BreadcrumbList",
+                "itemListElement": [
+                    {"@type": "ListItem", "position": 1, "name": "Home", "item": home},
+                    {"@type": "ListItem", "position": 2, "name": parent.strip("/").replace("-", " ").title() or "Parent", "item": parent_url},
+                    {"@type": "ListItem", "position": 3, "name": name, "item": abs_url},
+                ],
+            }
+        )
+
+    types = [str(node.get("@type")) for node in nodes if node.get("@type")]
+    rich = "eligible"
+    if "HowTo" in types:
+        rich = "not_eligible"
+    if "FAQPage" in types and not _faq_rich_result_ok(page):
+        rich = "not_eligible"
+    if "Product" in types and "offers" in omitted:
+        rich = "not_eligible"
+    if "Service" in types or "WebPage" in types:
+        rich = "not_eligible"
+    if "Article" in types and any(field in omitted for field in ("author", "image", "datePublished")):
+        rich = "not_eligible"
+    if not reasons and rich == "not_eligible":
+        reasons.append("Valid Schema.org does not by itself earn a Google rich result.")
+
+    return {
+        "types": types,
+        "json_ld": {"@context": "https://schema.org", "@graph": nodes},
+        "omitted": omitted,
+        "eligibility": {
+            "schema_org": "valid",
+            "google_rich_result": rich,
+            "reason": " ".join(reasons),
+        },
+    }
+
+
+def _schema_for(page: dict[str, Any], client_name: str, primary_url: str) -> dict[str, Any]:
+    return schema_for_page(page, client_name, primary_url)
+
+
+def build_eeat_checklist(page: dict[str, Any]) -> dict[str, Any]:
+    """Pass/gap checklist from the brief. This is not a Quality Rater score."""
+    pre = _preflight(page)
+    who_how_why = page.get("who_how_why") if isinstance(page.get("who_how_why"), dict) else {}
+    who = who_how_why.get("who") if isinstance(who_how_why.get("who"), dict) else {}
+    gates = page.get("people_first_gates") if isinstance(page.get("people_first_gates"), dict) else {}
+    standing = str(who.get("standing") or pre.get("author_standing") or "").strip()
+    ymyl = bool(who.get("ymyl") or pre.get("ymyl"))
+    author = _named_author(page, str(page.get("client_name") or ""))
+    differentiation = str(page.get("differentiation") or "")
+    experience_ok = bool(gates.get("has_differentiation_beyond_consensus")) or len(differentiation) >= 24
+    if standing:
+        expertise_status = "pass"
+        expertise_note = "Author standing is on the brief."
+    elif ymyl:
+        expertise_status = "gap"
+        expertise_note = "YMYL topic without author standing."
+    else:
+        expertise_status = "gap"
+        expertise_note = "Author standing is missing."
+    citations = page.get("external_links")
+    coverage = page.get("required_coverage") if isinstance(page.get("required_coverage"), dict) else {}
+    trust_blob = differentiation.lower()
+    trust_ok = bool(coverage.get("out_of_scope")) or any(
+        token in trust_blob for token in ("limit", "trade-off", "tradeoff", "depends")
+    )
+    return {
+        "who_how_why": who_how_why or None,
+        "people_first_gates": gates or None,
+        "checklist": {
+            "experience": {
+                "status": "pass" if experience_ok else "gap",
+                "note": "First-hand detail is required."
+                if not experience_ok
+                else "Brief carries a specific angle.",
+            },
+            "expertise": {
+                "status": expertise_status,
+                "author": author,
+                "standing": standing or None,
+                "ymyl": ymyl,
+                "note": expertise_note,
+            },
+            "authoritativeness": {
+                "status": "pass" if isinstance(citations, list) else "gap",
+                "note": "Citations stay limited to sources the brief supplied.",
+            },
+            "trust": {
+                "status": "pass" if trust_ok else "gap",
+                "note": "Limits and trade-offs are noted."
+                if trust_ok
+                else "Limits and trade-offs are not noted.",
+            },
+        },
+    }
 
 
 async def run_on_page_seo_plan(
@@ -626,18 +973,30 @@ async def run_on_page_seo_plan(
                 "source": "rule_based",
             }
 
-        schema = _schema_for({**row, **opt, "url": abs_url}, client_name, primary_url)
+        schema = schema_for_page({**row, **opt, "url": abs_url}, client_name, primary_url)
+        eeat = build_eeat_checklist({**row, "client_name": client_name})
+        images = opt.get("images") if isinstance(opt.get("images"), list) else []
+        images_note = opt.get("images_note")
+        if not images and not images_note:
+            images_note = "Page was not fetched — image checks were not run."
         page = {
             "url": abs_url,
             "path": path,
             "keyword": kw or opt.get("target_keyword"),
             "funnel": row.get("funnel"),
+            "action": row.get("action"),
+            "work_label": row.get("work_label"),
             "title": opt.get("title"),
             "meta_description": opt.get("meta_description"),
             "headings": opt.get("headings"),
             "h1": (opt.get("headings") or {}).get("h1") if isinstance(opt.get("headings"), dict) else None,
             "schema_types": schema["types"],
             "schema_json_ld": schema["json_ld"],
+            "schema_omitted": schema["omitted"],
+            "schema_eligibility": schema["eligibility"],
+            "eeat": eeat,
+            "images": images,
+            "images_note": images_note,
             "current_score": opt.get("current_score"),
             "optimized_score": opt.get("optimized_score"),
         }
@@ -718,7 +1077,13 @@ async def run_on_page_seo_plan(
         "depth_4_plus": link_plan.get("depth_4_plus") or [],
         "cluster_map": link_plan.get("cluster_map") or [],
         "schema_items": [
-            {"url": p.get("url"), "types": p.get("schema_types"), "json_ld": p.get("schema_json_ld")}
+            {
+                "url": p.get("url"),
+                "types": p.get("schema_types"),
+                "json_ld": p.get("schema_json_ld"),
+                "omitted": p.get("schema_omitted"),
+                "eligibility": p.get("schema_eligibility"),
+            }
             for p in pages
         ],
         "trademark_blocked": trademark_blocked,

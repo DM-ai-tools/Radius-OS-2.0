@@ -26,6 +26,7 @@ async def run_site_architecture(
     message: str,
 ) -> list[dict]:
     _ = load_skill("site_architecture")
+    _ = load_skill("seo_sitemap")
     _ = user_id
     _ = message
 
@@ -72,7 +73,6 @@ async def run_site_architecture(
         primary_url=client.primary_url,
         domain=domain,
         demand=demand,
-        seo_strategy=dict(profile.seo_strategy_summary or {}),
         commercial=dict(profile.commercial_scope or {}),
         website=dict(profile.website_situation_summary or {}),
         competitive=dict(profile.competitive_landscape_summary or {}),
@@ -94,14 +94,10 @@ async def run_site_architecture(
     profile.site_architecture_summary = summary
     profile.site_architecture_status = "pending_signoff"
 
-    # Keep Phase 5 topic_plan in sync when URL-map actions were stamped.
-    topic_plan = summary.get("topic_plan")
-    if isinstance(topic_plan, dict) and topic_plan.get("topic_ideas") is not None:
-        demand_pack = dict(profile.search_demand_summary or {})
-        demand_pack["topic_plan"] = topic_plan
-        if summary.get("topics"):
-            demand_pack["topics"] = summary["topics"]
-        profile.search_demand_summary = demand_pack
+    # The URL-stamped topic plan stays in THIS phase's summary. It used to be
+    # written back into search_demand_summary too, but Phase 5 fully replaces
+    # that column on its next run, so the refinement was silently discarded.
+    # Consumers read it from its owner via create_topic.resolve_topic_plan.
 
     await supersede_pending_findings(
         db, client_id=client.id, agent_key="site_architecture"

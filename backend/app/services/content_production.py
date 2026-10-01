@@ -132,7 +132,18 @@ def pick_brief(
     return None
 
 
-def topic_choices(briefs: list[dict[str, Any]], *, limit: int = 8) -> list[dict[str, Any]]:
+def topic_choices(
+    briefs: list[dict[str, Any]],
+    *,
+    pages: list[dict[str, Any]] | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Pages the operator can draft — full roadmap in a dropdown, not a short list.
+
+    Writer-ready briefs come first (with richer labels). Any remaining briefable
+    roadmap pages are appended so selection is not capped at eight. Selecting a
+    page that was not pre-briefed triggers a brief for that page alone.
+    """
     ready = [b for b in briefs if isinstance(b, dict) and b.get("writer_ready")]
     ready.sort(
         key=lambda r: (
@@ -143,25 +154,147 @@ def topic_choices(briefs: list[dict[str, Any]], *, limit: int = 8) -> list[dict[
     selected = [b for b in ready if b.get("from_selected_service")]
     others = [b for b in ready if not b.get("from_selected_service")]
     ordered = selected + others
+
+    seen_urls: set[str] = set()
+    seen_kws: set[str] = set()
     rows: list[dict[str, Any]] = []
-    for i, b in enumerate(ordered[: max(limit, len(selected))]):
-        kw = str(b.get("keyword") or b.get("title") or "topic")
-        url = str(b.get("url") or b.get("path") or "")
+
+    def _append(row: dict[str, Any]) -> None:
+        kw = str(row.get("keyword") or row.get("primary_keyword") or row.get("title") or "topic")
+        url = str(row.get("url") or row.get("path") or row.get("url_n") or "")
+        url_key = _url_path(url)
+        kw_key = _norm_topic(kw)
+        if url_key and url_key in seen_urls:
+            return
+        if not url_key and kw_key and kw_key in seen_kws:
+            return
+        if url_key:
+            seen_urls.add(url_key)
+        if kw_key:
+            seen_kws.add(kw_key)
         rows.append(
             {
-                "rank": i + 1,
+                "rank": len(rows) + 1,
                 "keyword": kw,
-                "title": b.get("title") or kw,
+                "title": row.get("title") or kw,
                 "url": url,
-                "action": b.get("action") or b.get("recommended_action"),
-                "work_label": b.get("work_label"),
-                "from_selected_service": b.get("from_selected_service"),
-                "funnel": b.get("funnel"),
-                "intent": b.get("search_intent"),
-                "prompt": f"Write the full draft for: {kw} ({url})" if url else f"Write the full draft for: {kw}",
+                "action": row.get("action") or row.get("recommended_action"),
+                "work_label": row.get("work_label"),
+                "from_selected_service": row.get("from_selected_service"),
+                "funnel": row.get("funnel"),
+                "intent": row.get("search_intent") or row.get("intent"),
+                "writer_ready": bool(row.get("writer_ready")),
+                "page_type": row.get("page_type") or row.get("content_type"),
+                "content_type": row.get("content_type") or row.get("page_type"),
+                "primary_keyword": row.get("primary_keyword") or kw,
+                "secondary_keywords": list(
+                    row.get("secondary_keywords")
+                    or row.get("supporting_keywords")
+                    or []
+                ),
+                "meta_description": row.get("meta_description"),
+                "content_goal": row.get("content_goal"),
+                "differentiation": row.get("differentiation"),
+                "outline": row.get("outline"),
+                "who_how_why": row.get("who_how_why"),
+                "prompt": (
+                    f"Write the full draft for: {kw} ({url})"
+                    if url
+                    else f"Write the full draft for: {kw}"
+                ),
             }
         )
+
+    for b in ordered:
+        if len(rows) >= int(limit):
+            break
+        _append({**b, "writer_ready": True})
+
+    for page in pages or []:
+        if len(rows) >= int(limit):
+            break
+        if not isinstance(page, dict):
+            continue
+        _append(page)
+
     return rows
+
+
+def _comparison_rivals(
+    brief: dict[str, Any],
+    *,
+    competitors: list[dict[str, Any]] | None,
+    commercial: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Service-scoped rivals when the brief names a service; otherwise the client set.
+
+    Matches the content-signal builder: a non-empty per-service pick wins, and an
+    empty pick falls back to the stored client competitors. Capped at three.
+    """
+    from app.services.create_content import COMPARISON_RIVAL_CAP
+    from app.services.service_competitors import resolve_service_competitors
+
+    rows = [row for row in (competitors or []) if isinstance(row, dict)]
+    service_id = str(brief.get("service_id") or brief.get("service") or "").strip()
+    if service_id:
+        scoped = resolve_service_competitors(
+            commercial, service_id=service_id, competitor_rows=rows
+        )
+        if scoped:
+            rows = scoped
+    return rows[:COMPARISON_RIVAL_CAP]
+
+
+async def _point_rivals_at_ranking_pages(
+    rivals: list[dict[str, Any]],
+    keyword: str,
+) -> list[dict[str, Any]]:
+    """Point each rival at the URL that ranks for this keyword, when DataForSEO has one."""
+    from app.integrations import dataforseo
+
+    pointed: list[dict[str, Any]] = []
+    for rival in rivals:
+        row = dict(rival)
+        domain = str(row.get("domain") or row.get("url") or "")
+        try:
+            searches, _errors = await dataforseo.top_searches(domain, limit=20)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("comparison_top_searches_failed", error=str(exc)[:200])
+            pointed.append(row)
+            continue
+        match = dataforseo.pick_ranking_url(searches, keyword)
+        if match and match.get("url"):
+            row["url"] = match["url"]
+            row["ranking_keyword"] = match["keyword"]
+            if match.get("position") is not None:
+                row["ranking_position"] = match["position"]
+        pointed.append(row)
+    return pointed
+
+
+async def _gather_comparison_pages(
+    rivals: list[dict[str, Any]],
+    *,
+    keyword: str,
+    snapshots: list[dict[str, Any]],
+) -> list[Any]:
+    """Live rival pages, then cached headings. Failures stay in the list."""
+    from app.services.content_benchmark.fetch import gather_competitor_content
+    from app.services.content_benchmark.report import service_terms
+
+    if not rivals:
+        return []
+    rivals = await _point_rivals_at_ranking_pages(rivals, keyword)
+    try:
+        return await gather_competitor_content(
+            rivals,
+            snapshots=snapshots,
+            service_terms=service_terms(keyword, [keyword]),
+            allow_live=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("comparison_evidence_failed", error=str(exc)[:240])
+        return []
 
 
 def _existing_excerpt(website: dict[str, Any], url: str | None) -> str | None:
@@ -201,6 +334,8 @@ async def run_content_production_plan(
     selected_keyword: str | None = None,
     prior_briefs: list[dict[str, Any]] | None = None,
     google_policy: dict[str, Any] | None = None,
+    competitors: list[dict[str, Any]] | None = None,
+    commercial: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Brief the locked queue; wait for a topic click; write **one** full draft."""
     planning = dict(content_planning or {})
@@ -282,7 +417,7 @@ async def run_content_production_plan(
         briefs = [b for b in (brief_pack.get("briefs") or []) if isinstance(b, dict)]
 
     ready = [b for b in briefs if b.get("writer_ready")]
-    choices = topic_choices(ready)
+    choices = topic_choices(ready, pages=pages)
     held = [
         {
             "keyword": b.get("keyword"),
@@ -300,7 +435,7 @@ async def run_content_production_plan(
     queued_ready: list[dict[str, Any]] = []
     awaiting = False
 
-    if not ready:
+    if not choices and not ready:
         sample = []
         if briefs and isinstance(briefs[0].get("preflight"), dict):
             sample = [str(b) for b in (briefs[0]["preflight"].get("blockers") or []) if b]
@@ -321,6 +456,77 @@ async def run_content_production_plan(
         ]
     else:
         chosen = pick_brief(ready, selected_url=selected_url, selected_keyword=selected_keyword)
+        if not chosen:
+            # Operator picked a roadmap page that was not in the pre-briefed set —
+            # brief that page alone, then continue.
+            target_pages = [
+                p
+                for p in pages
+                if isinstance(p, dict)
+                and (
+                    (
+                        selected_url
+                        and _url_path(p.get("url") or p.get("path") or p.get("url_n"))
+                        and (
+                            _url_path(p.get("url") or p.get("path") or p.get("url_n"))
+                            == _url_path(selected_url)
+                            or _url_path(p.get("url") or p.get("path") or p.get("url_n")).endswith(
+                                _url_path(selected_url)
+                            )
+                            or _url_path(selected_url).endswith(
+                                _url_path(p.get("url") or p.get("path") or p.get("url_n"))
+                            )
+                        )
+                    )
+                    or (
+                        selected_keyword
+                        and _norm_topic(
+                            p.get("keyword") or p.get("primary_keyword") or p.get("title")
+                        )
+                        and (
+                            _norm_topic(
+                                p.get("keyword") or p.get("primary_keyword") or p.get("title")
+                            )
+                            == _norm_topic(selected_keyword)
+                            or _norm_topic(selected_keyword)
+                            in _norm_topic(
+                                p.get("keyword") or p.get("primary_keyword") or p.get("title")
+                            )
+                        )
+                    )
+                )
+            ]
+            if target_pages:
+                on_demand = await generate_briefs(
+                    client_name=client_name,
+                    industry=industry,
+                    audience=(
+                        format_audience_label(dict(seo_strategy or {}).get("target_audience"))
+                        or None
+                    ),
+                    marketing=marketing,
+                    seo_strategy=seo_strategy,
+                    site_architecture=site_architecture,
+                    content_audit=content_audit,
+                    website=website,
+                    search_demand=search_demand,
+                    roadmap=target_pages[:1],
+                    limit=1,
+                )
+                on_demand_briefs = [
+                    b for b in (on_demand.get("briefs") or []) if isinstance(b, dict)
+                ]
+                briefs = list(briefs) + on_demand_briefs
+                ready = [b for b in briefs if b.get("writer_ready")]
+                chosen = pick_brief(
+                    ready, selected_url=selected_url, selected_keyword=selected_keyword
+                ) or next((b for b in on_demand_briefs if b.get("writer_ready")), None)
+                brief_pack = {
+                    **brief_pack,
+                    "briefs": briefs,
+                    "brief_count": len(briefs),
+                    "writer_ready_count": len(ready),
+                }
         if not chosen:
             write_refusal = {
                 "refused": True,
@@ -373,6 +579,20 @@ async def run_content_production_plan(
                     except Exception as exc:  # noqa: BLE001
                         # Signals are an enhancement; losing them must not stop the draft.
                         log.warning("content_context_failed", error=str(exc)[:240])
+                from app.services.create_content import resolve_page_type
+
+                comparison_pages = None
+                if resolve_page_type(chosen) == "comparison":
+                    rivals = _comparison_rivals(
+                        chosen,
+                        competitors=competitors,
+                        commercial=commercial,
+                    )
+                    comparison_pages = await _gather_comparison_pages(
+                        rivals,
+                        keyword=str(chosen.get("keyword") or chosen.get("title") or ""),
+                        snapshots=list(demand.get("competitor_sites") or []),
+                    )
                 written = await write_one_page(
                     brief=chosen,
                     client_name=client_name,
@@ -385,6 +605,7 @@ async def run_content_production_plan(
                     location=location,
                     search_demand=search_demand,
                     google_policy=google_policy,
+                    comparison_pages=comparison_pages,
                 )
                 if written.get("ok"):
                     from app.services.publish_preview import build_draft_site_preview
@@ -444,12 +665,13 @@ async def run_content_production_plan(
         "translation": "excluded",
         "source": "content_production",
         "note": (
-            "Pick one priority topic to draft. create-content writes ONE full page per click "
-            "(scaled content abuse). Named human must review before publish. Translation excluded."
+            "Use the dropdown to pick one page, then draft it. create-content writes ONE full "
+            "page per click (scaled content abuse). Named human must review before publish. "
+            "Translation excluded."
             if awaiting
             else (
                 "Full draft for the selected topic. Named human must review before publish. "
-                "Pick another topic to write the next page. Translation excluded."
+                "Pick another page from the dropdown to write the next one. Translation excluded."
             )
         ),
     }

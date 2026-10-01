@@ -293,6 +293,86 @@ def derived_scores(client_scores: dict[str, dict], comp_scores: dict[str, dict])
     }
 
 
+def industry_overlap_score(card: dict[str, Any]) -> int:
+    """Industry Specialization score (0–10). Unrelated businesses are 1–4."""
+    raw = (card.get("parameters") or {}).get("industry_specialization")
+    if isinstance(raw, dict):
+        raw = raw.get("score")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def keep_relevant_competitors(
+    scorecards: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Drop Tier 5 and businesses with no vertical overlap.
+
+    A high composite from size or ad spend must not keep an unrelated site
+    in the set that later phases crawl for keywords.
+    """
+    relevant: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for card in scorecards:
+        overlap = industry_overlap_score(card)
+        if int(card.get("tier") or 5) >= 5 or overlap <= 4:
+            if int(card.get("tier") or 5) < 5:
+                card["tier"] = 5
+                card["tier_name"] = "Low Relevance"
+                card["recommendation"] = (
+                    "Tier 5 (Low Relevance): industry overlap is too low to "
+                    "monitor or to seed keyword and content recommendations."
+                )
+            excluded.append(card)
+            continue
+        relevant.append(card)
+    return relevant, excluded
+
+
+async def _stamp_measured_traffic(
+    scorecards: list[dict[str, Any]],
+    client_url: str,
+) -> dict[str, Any]:
+    """Attach DataForSEO organic traffic. Returns client fields, or {} when unmeasured.
+
+    A missing call leaves the cards unchanged. Traffic is not an input to the tier.
+    """
+    from app.integrations import dataforseo
+
+    domains = [client_url, *[str(card.get("url") or "") for card in scorecards]]
+    try:
+        rows, _errors = await dataforseo.bulk_traffic_estimation(domains)
+    except Exception as exc:  # noqa: BLE001
+        from app.logging_config import get_logger
+
+        get_logger("tier_competitors").warning(
+            "competitor_traffic_failed", error=str(exc)[:200]
+        )
+        return {}
+    by_domain = {
+        str(row.get("domain") or ""): row
+        for row in rows
+        if row.get("organic_traffic") is not None
+    }
+
+    def _fields(url: str) -> dict[str, Any]:
+        row = by_domain.get(dataforseo.normalize_target(url))
+        if not row:
+            return {}
+        fields: dict[str, Any] = {
+            "organic_traffic": row["organic_traffic"],
+            "organic_traffic_source": "dataforseo",
+        }
+        if row.get("organic_traffic_cost") is not None:
+            fields["organic_traffic_cost"] = row["organic_traffic_cost"]
+        return fields
+
+    for card in scorecards:
+        card.update(_fields(str(card.get("url") or "")))
+    return _fields(client_url)
+
+
 def composite_and_tier(derived: dict[str, float]) -> tuple[float, int, str]:
     composite = (
         derived["similarity"] * 0.30
@@ -388,10 +468,10 @@ async def build_tiered_analysis(
             }
 
     scorecards = list(await asyncio.gather(*[_score_one(c) for c in competitors]))
+    client_traffic = await _stamp_measured_traffic(scorecards, resolved_client_url)
 
     scorecards.sort(key=lambda x: x["composite"], reverse=True)
-    relevant = [s for s in scorecards if s["tier"] < 5]
-    excluded = [s for s in scorecards if s["tier"] == 5]
+    relevant, excluded = keep_relevant_competitors(scorecards)
 
     emerging = [s for s in relevant if s["tier"] == 3]
     top_threat = max(emerging, key=lambda x: x["derived"]["future_threat"]) if emerging else None
@@ -544,6 +624,7 @@ async def build_tiered_analysis(
             "parameters": client_scores,
             "maturity_score": client_derived["client_maturity"],
             "service_scores": client_svc,
+            **(client_traffic or {}),
         },
         "service_level_comparison": {
             "categories": list(SERVICE_CATEGORIES.keys()),
@@ -565,6 +646,7 @@ async def build_tiered_analysis(
             {
                 "rank": i + 1,
                 "name": s["name"],
+                "url": s.get("url"),
                 "tier": s["tier"],
                 "tier_name": s["tier_name"],
                 "composite": s["composite"],

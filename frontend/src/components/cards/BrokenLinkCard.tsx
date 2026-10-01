@@ -1,4 +1,6 @@
 import { httpStatusLabel } from "../../lib/httpStatusLabel";
+import FocusBox from "./FocusBox";
+import { useStageFocus } from "../../lib/stageFocus";
 
 type LinkRow = {
   source_page: string;
@@ -17,10 +19,11 @@ type ChainRow = {
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
 };
 
 export default function BrokenLinkCard({ payload, canAct, onAction }: Props) {
+  const focus = useStageFocus(payload);
   const internal = (payload.internal || []) as LinkRow[];
   const external = (payload.external || []) as LinkRow[];
   const chains = (payload.redirect_chains || []) as ChainRow[];
@@ -38,10 +41,10 @@ export default function BrokenLinkCard({ payload, canAct, onAction }: Props) {
       </p>
 
       <h4 style={{ margin: "12px 0 6px", fontSize: 13 }}>Internal broken links</h4>
-      <LinkTable rows={internal} />
+      <LinkTable rows={internal} focus={focus} disabled={!canAct} />
 
       <h4 style={{ margin: "12px 0 6px", fontSize: 13 }}>External broken links</h4>
-      <LinkTable rows={external} />
+      <LinkTable rows={external} focus={focus} disabled={!canAct} />
 
       <h4 style={{ margin: "12px 0 6px", fontSize: 13 }}>Redirect chains (3+ hops)</h4>
       {chains.length === 0 ? (
@@ -74,7 +77,9 @@ export default function BrokenLinkCard({ payload, canAct, onAction }: Props) {
           <h4 style={{ margin: "12px 0 6px", fontSize: 13 }}>Quick fixes</h4>
           <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
             {fixes.map((f, i) => (
-              <li key={`${i}-${f}`}>{f}</li>
+              <li key={`${i}-${f}`} style={{ opacity: focus.focused(f) ? 1 : 0.45 }}>
+                <FocusBox row={f} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} /> {f}
+              </li>
             ))}
           </ol>
         </>
@@ -82,7 +87,7 @@ export default function BrokenLinkCard({ payload, canAct, onAction }: Props) {
 
       {showActions && (
         <div className="card-actions">
-          <button className="btn btn-primary" onClick={() => onAction("approve")}>
+          <button className="btn btn-primary" onClick={() => onAction("approve", focus.edits)}>
             Approve
           </button>
           <button className="btn btn-amber" onClick={() => onAction("edit")}>
@@ -97,7 +102,15 @@ export default function BrokenLinkCard({ payload, canAct, onAction }: Props) {
   );
 }
 
-function LinkTable({ rows }: { rows: LinkRow[] }) {
+function LinkTable({
+  rows,
+  focus,
+  disabled,
+}: {
+  rows: LinkRow[];
+  focus?: ReturnType<typeof useStageFocus>;
+  disabled?: boolean;
+}) {
   if (!rows.length) {
     return <p style={{ fontSize: 13, color: "var(--muted)" }}>None found.</p>;
   }
@@ -106,6 +119,7 @@ function LinkTable({ rows }: { rows: LinkRow[] }) {
       <table className="data">
         <thead>
           <tr>
+            {focus ? <th>Focus</th> : null}
             <th>Source page</th>
             <th>Broken URL</th>
             <th>Result</th>
@@ -114,7 +128,12 @@ function LinkTable({ rows }: { rows: LinkRow[] }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={`${r.broken_url}-${i}`}>
+            <tr key={`${r.broken_url}-${i}`} style={{ opacity: !focus || focus.focused(r) ? 1 : 0.45 }}>
+              {focus ? (
+                <td>
+                  <FocusBox row={r} focused={focus.focused} onToggle={focus.toggle} disabled={disabled} />
+                </td>
+              ) : null}
               <td>{r.source_page}</td>
               <td style={{ wordBreak: "break-all" }}>{r.broken_url}</td>
               <td>

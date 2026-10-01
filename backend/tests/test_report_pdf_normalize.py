@@ -56,6 +56,7 @@ def test_normalize_competitor_landscape():
     assert "Three direct" in out["summary"]
     assert out["competitor_count"] == 5
     assert out["tier_overview"][0]["composite"] == 71
+    assert out["tier_overview"][0]["url"] == "https://rival.com"
 
 
 def test_pdf_website_audit_has_tab_rows():

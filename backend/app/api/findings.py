@@ -1,3 +1,5 @@
+import asyncio
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -139,6 +141,122 @@ async def review_phase(
     )
 
 
+GAP_FILL_TIMEOUT_SECONDS = 60
+
+
+async def _fill_discovery_gaps(
+    db: AsyncSession,
+    *,
+    client_id: UUID,
+    answered: dict[str, object],
+    user_id: UUID,
+) -> dict[str, dict]:
+    """Draft the discovery fields nobody filled in, and stage them for sign-off.
+
+    Best effort by design: a provider outage, a timeout, or a model that returns
+    nothing must leave the questionnaire submission itself untouched.
+    """
+    from app.agents.discovery import _conf_label
+    from app.models import Client
+    from app.services import discovery_gap_fill
+
+    client = (
+        await db.execute(select(Client).where(Client.id == client_id))
+    ).scalar_one_or_none()
+    if client is None:
+        return {}
+
+    rows = (
+        await db.execute(
+            select(DiscoveryResponse)
+            .where(DiscoveryResponse.client_id == client_id)
+            .order_by(DiscoveryResponse.created_at)
+        )
+    ).scalars().all()
+
+    known: dict[str, object] = {}
+    research: dict[str, object] = {}
+    for row in rows:
+        value = (
+            row.field_value.get("value")
+            if isinstance(row.field_value, dict)
+            else row.field_value
+        )
+        if isinstance(value, str):
+            value = value.strip()
+        if value in (None, "", [], {}):
+            continue
+        if row.source == "pre_research":
+            research[row.field_key] = value
+            continue
+        known[row.field_key] = value
+    known.update(answered)
+
+    missing = discovery_gap_fill.pending_gap_fill_fields(known)
+    if not missing:
+        return {}
+
+    try:
+        filled = await asyncio.wait_for(
+            discovery_gap_fill.fill_missing_discovery_fields(
+                display_name=client.display_name,
+                primary_url=client.primary_url,
+                industry=client.industry,
+                known=known,
+                missing=missing,
+                research=research,
+            ),
+            timeout=GAP_FILL_TIMEOUT_SECONDS,
+        )
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+        return {}
+    if not filled:
+        return {}
+
+    for field_key, entry in filled.items():
+        confidence = float(entry.get("confidence") or 0.4)
+        row = DiscoveryResponse(
+            client_id=client_id,
+            source="ai_gap_fill",
+            field_key=field_key,
+            field_value={
+                "value": entry.get("value"),
+                "rationale": entry.get("rationale"),
+            },
+            confidence=Decimal(str(confidence)),
+            discrepancy_flag=False,
+            status="pending",
+        )
+        db.add(row)
+        await db.flush()
+        db.add(
+            FindingsLedger(
+                client_id=client_id,
+                agent_key="discovery_agent",
+                source_table="discovery_responses",
+                source_id=row.id,
+                confidence=_conf_label(confidence),
+                status="pending",
+                created_by=user_id,
+            )
+        )
+
+    await log_event(
+        db,
+        client_id=client_id,
+        actor_type="agent",
+        event_type="tool_call",
+        event_detail={
+            "tool": "discovery_gap_fill",
+            "agent": "discovery_agent",
+            "requested": len(missing),
+            "filled": sorted(filled),
+        },
+    )
+    await db.flush()
+    return filled
+
+
 @router.post("/clients/{client_id}/questionnaire")
 async def submit_questionnaire(
     client_id: UUID,
@@ -147,17 +265,26 @@ async def submit_questionnaire(
     user: User = Depends(get_current_user),
 ):
     await require_permission(user, db, "discovery_agent", need_trigger=True)
+    answered: dict[str, object] = {}
     for key, value in body.fields.items():
-        row = DiscoveryResponse(
-            client_id=client_id,
-            source="client_questionnaire",
-            field_key=key,
-            field_value={"value": value},
-            confidence=None,
-            discrepancy_flag=False,
-            status="pending",
+        cleaned = value.strip() if isinstance(value, str) else value
+        # A blank answer carries no information, and persisting it used to hide a
+        # real value from another source (research / AI gap fill) behind an empty
+        # client_questionnaire row.
+        if cleaned in (None, "", [], {}):
+            continue
+        answered[key] = cleaned
+        db.add(
+            DiscoveryResponse(
+                client_id=client_id,
+                source="client_questionnaire",
+                field_key=key,
+                field_value={"value": cleaned},
+                confidence=None,
+                discrepancy_flag=False,
+                status="pending",
+            )
         )
-        db.add(row)
     await log_event(
         db,
         client_id=client_id,
@@ -167,9 +294,16 @@ async def submit_questionnaire(
         event_detail={"fields": list(body.fields.keys())},
     )
     await db.flush()
+
+    ai_filled = await _fill_discovery_gaps(
+        db, client_id=client_id, answered=answered, user_id=user.id
+    )
+
     from app.agents.discovery import build_discovery_signoff_events
 
-    events = await build_discovery_signoff_events(db, client_id=client_id)
+    events = await build_discovery_signoff_events(
+        db, client_id=client_id, ai_filled=ai_filled
+    )
     # Questionnaire submission is a separate REST action from the chat stream.
     # Persist its D3/D4 transition events so a refresh or re-entry does not
     # reload only the old D1/D2 cards and make Discovery appear stuck.

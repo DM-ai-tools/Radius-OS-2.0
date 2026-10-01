@@ -37,6 +37,14 @@ MIN_COMPETITORS_TARGET = 6
 MAX_COMPETITORS_TO_SCORE = 10
 
 
+def _split_products(raw: object) -> list[str]:
+    """Services list from a CDD products value (string or list)."""
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    text = str(raw or "")
+    return [p.strip() for p in text.replace(";", ",").replace("\n", ",").split(",") if p.strip()]
+
+
 def _usable_competitor_url(item: dict) -> str:
     """Return a real http(s) competitor URL, or '' for category labels / nulls."""
     raw = item.get("url") or item.get("domain") or item.get("website") or ""
@@ -204,7 +212,19 @@ async def run_competitor(
 
     profile.competitor_status = "in_progress"
 
-    cache_key = competitor_cache_key(str(client.id))
+    # Fingerprint the CDD inputs this scan depends on, so a CDD update that
+    # changes industry or services does not keep serving a 14-day-old scan
+    # from the previous vertical.
+    from app.services.cdd_versions import cdd_fingerprint
+
+    _commercial = dict(profile.commercial_scope or {})
+    cache_key = competitor_cache_key(
+        str(client.id),
+        fingerprint=cdd_fingerprint(
+            industry=client.industry,
+            services=_split_products(_commercial.get("products")),
+        ),
+    )
     force_refresh = any(
         w in message.lower()
         for w in ("refresh", "re-run", "rerun", "re scan", "rescan", "new scan")

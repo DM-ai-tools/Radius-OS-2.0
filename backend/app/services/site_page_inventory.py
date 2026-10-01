@@ -59,7 +59,14 @@ def _page_type_from_signals(
         return "blog_article"
     if any(x in low_path for x in ("/guide", "/resource", "/faq", "/learn")):
         return "guide"
-    if "service" in low_title or low_path.count("/") == 1:
+    if any(x in low_path for x in ("/service", "/solution", "/product", "/offering")):
+        segs = [p for p in low_path.split("/") if p]
+        if len(segs) <= 1:
+            return "service_hub" if segs and segs[0] in ("services", "service") else "service"
+        if len(segs) >= 3:
+            return "sub_service"
+        return "service"
+    if "service" in low_title or "solution" in low_title:
         return "service"
     if "page" in bucket:
         return "page"

@@ -249,17 +249,33 @@ def body(text: str) -> Paragraph:
     return Paragraph(esc(text), styles()["body"])
 
 
+# A KPI cell holds a short figure. Agent payloads occasionally route a whole
+# blob through here (a page-inventory CSV arrived as a "metric"), and in a
+# narrow column that wraps into thousands of points of height. A single-row
+# table cannot be split across pages, so reportlab aborts the entire export
+# with LayoutError. Bound both axes: how many columns share a row, and how
+# much text a cell may carry.
+MAX_METRIC_COLS = 4
+MAX_METRIC_CHARS = 120
+
+
 def metric_strip(metrics: Sequence[tuple[str, Any]]) -> Table:
-    """Horizontal KPI strip like cs-funnel-strip."""
+    """Horizontal KPI strip like cs-funnel-strip.
+
+    Wraps onto further rows past ``MAX_METRIC_COLS`` so columns stay readable,
+    and truncates values the way ``data_table`` already does.
+    """
     st = styles()
-    cells = []
-    for label, value in metrics:
+    per_row = max(1, min(MAX_METRIC_COLS, len(metrics) or 1))
+    cell_w = PAGE_W / per_row
+
+    def _cell(label: Any, value: Any) -> Table:
         cell = Table(
             [
-                [Paragraph(esc(label), st["muted"])],
-                [Paragraph(f"<b>{esc(scalar(value))}</b>", st["body"])],
+                [Paragraph(esc(truncate(scalar(label), 60)), st["muted"])],
+                [Paragraph(f"<b>{esc(truncate(scalar(value), MAX_METRIC_CHARS))}</b>", st["body"])],
             ],
-            colWidths=[PAGE_W / max(len(metrics), 1) - 4],
+            colWidths=[cell_w - 4],
         )
         cell.setStyle(
             TableStyle(
@@ -274,8 +290,20 @@ def metric_strip(metrics: Sequence[tuple[str, Any]]) -> Table:
                 ]
             )
         )
-        cells.append(cell)
-    row = Table([cells], colWidths=[PAGE_W / max(len(cells), 1)] * len(cells))
+        return cell
+
+    cells = [_cell(label, value) for label, value in metrics]
+    # Chunk into rows of at most per_row, padding the last row so every row has
+    # the same column count (reportlab requires a rectangular grid).
+    grid: list[list[Any]] = []
+    for start in range(0, len(cells), per_row):
+        chunk = cells[start : start + per_row]
+        chunk += [""] * (per_row - len(chunk))
+        grid.append(chunk)
+    if not grid:
+        grid = [[""] * per_row]
+
+    row = Table(grid, colWidths=[cell_w] * per_row, splitByRow=1)
     row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
     return row
 

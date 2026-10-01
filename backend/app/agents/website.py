@@ -183,27 +183,38 @@ async def run_website(
         30,
         int(getattr(settings, "website_operation_timeout_seconds", 120) or 120),
     )
+    seo_audit_timeout = max(
+        60,
+        int(getattr(settings, "website_seo_audit_timeout_seconds", 240) or 240),
+    )
 
-    async def bounded(operation, label: str) -> dict:
+    async def bounded(operation, label: str, *, timeout: float | None = None) -> dict:
         """Keep one slow provider from aborting the entire interactive phase."""
+        limit = float(timeout if timeout is not None else operation_timeout)
         try:
-            return await asyncio.wait_for(operation, timeout=operation_timeout)
+            return await asyncio.wait_for(operation, timeout=limit)
         except asyncio.TimeoutError:
             events.append(
                 {
                     "type": "system_notice",
                     "content": (
-                        f"{label} reached the {operation_timeout}s interactive limit. "
+                        f"{label} reached the {int(limit)}s interactive limit. "
                         "The remaining website checks will continue with a partial report."
                     ),
                 }
             )
+            err_key = f"{label.lower().replace(' ', '_')}_timeout"
             return {
                 "status": "timeout",
-                "error": f"{label.lower().replace(' ', '_')}_timeout",
+                "error": err_key,
+                "error_message": (
+                    f"{label} hit the {int(limit)}s time limit before it could finish. "
+                    "Re-run this check, or try again when the site responds faster."
+                ),
                 "severity": "warning",
                 "note": f"{label} timed out; partial website findings are still usable.",
                 "pages_found": 0,
+                "pages_analyzed": 0,
                 "indexable": 0,
                 "redirects": 0,
                 "redirect_chains": 0,
@@ -271,19 +282,23 @@ async def run_website(
                 display_name=client.display_name,
                 commercial_scope=dict(profile.commercial_scope or {}),
                 max_pages=page_cap,
+                # Stop inside the audit before wait_for cancels, so partial pages survive.
+                time_budget_seconds=max(45.0, float(seo_audit_timeout) - 10.0),
             ),
             "Comprehensive SEO audit",
+            timeout=seo_audit_timeout,
         )
         if not _seo_audit_measured(seo_audit_report):
             seo_audit_report = {
                 **(seo_audit_report or {}),
                 "site": (seo_audit_report or {}).get("site") or client.primary_url,
-                "pages_analyzed": 0,
+                "pages_analyzed": int((seo_audit_report or {}).get("pages_analyzed") or 0),
                 "overall_score": None,
                 "score_band": "Not measured",
                 "audit_failed": True,
                 "error": (
-                    (seo_audit_report or {}).get("error")
+                    (seo_audit_report or {}).get("error_message")
+                    or (seo_audit_report or {}).get("error")
                     or (seo_audit_report or {}).get("note")
                     or "SEO audit did not measure any pages."
                 ),
@@ -590,19 +605,27 @@ async def run_website(
                 timeout=operation_timeout,
             )
             spam = spam_risk_score(bl.get("sample_links", []))
+            source = str(bl.get("source") or ("heuristic" if provider == "live_site_signals" else "provider"))
+            # A homepage estimate must not be stored in the Domain Rating column.
+            measured = bl.get("authority_score") if source == "provider" else None
             snap = BacklinkSnapshot(
                 client_id=client.id,
                 provider=provider,
-                referring_domains=int(bl["referring_domains"] or 0),
-                authority_score=Decimal(str(bl.get("authority_score") or 0)),
+                referring_domains=int(bl.get("referring_domains") or 0),
+                authority_score=Decimal(str(measured or 0)),
                 spam_risk_score=Decimal(str(spam)),
                 top_anchor_text=bl.get("top_anchor_text") or {},
             )
             db.add(snap)
             summary = {
-                "provider": provider,
+                "provider": bl.get("provider") if source == "provider" else provider,
+                "source": source,
                 "referring_domains": bl.get("referring_domains"),
-                "authority_score": bl.get("authority_score"),
+                "authority_score": measured,
+                "estimated_authority_score": bl.get("estimated_authority_score"),
+                "authority_is_estimate": source != "provider",
+                "fallback_reason": bl.get("fallback_reason"),
+                "provider_status": bl.get("provider_status"),
                 "spam_risk_score": spam,
                 "top_anchor_text": bl.get("top_anchor_text"),
                 "note": bl.get("note"),
@@ -617,11 +640,19 @@ async def run_website(
                 severity="warning" if spam > 0.4 else "info",
                 status="pending",
             )
-            if provider != "ahrefs":
+            if source != "provider":
                 events.append(
                     {
                         "type": "system_notice",
-                        "content": "Ahrefs unavailable — used Moz fallback.",
+                        "content": bl.get("note")
+                        or "Backlink providers did not return a metric. The authority figure is an estimate, not a Domain Rating.",
+                    }
+                )
+            elif provider != "ahrefs":
+                events.append(
+                    {
+                        "type": "system_notice",
+                        "content": f"Ahrefs unavailable — used {provider}.",
                     }
                 )
         except Exception as exc:  # noqa: BLE001

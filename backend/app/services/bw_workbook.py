@@ -136,6 +136,98 @@ def _join_keywords(raw: Any, limit: int = 10) -> str:
     return ", ".join(str(x).strip() for x in raw[:limit] if str(x).strip())
 
 
+def _path_from_url(url: Any) -> str:
+    raw = str(url or "").strip().lower()
+    if not raw:
+        return ""
+    if "://" in raw:
+        from urllib.parse import urlparse
+
+        return (urlparse(raw).path or "").lower()
+    return raw if raw.startswith("/") else f"/{raw}"
+
+
+_BLOG_PATH_MARKERS = (
+    "/blog/",
+    "/blogs/",
+    "/guides/",
+    "/guide/",
+    "/articles/",
+    "/insights/",
+    "/news/",
+    "/resources/",
+)
+_BLOGISH_CONTENT = {
+    "guide",
+    "listicle",
+    "comparison",
+    "article",
+    "blog",
+    "spoke",
+    "hub",
+    "post",
+}
+
+
+def _is_blog_path(url: Any) -> bool:
+    """True when the destination lives under a content/publishing path."""
+    path = _path_from_url(url)
+    if not path:
+        return False
+    if any(marker in path for marker in _BLOG_PATH_MARKERS):
+        return True
+    # Exact publishing roots without a trailing slug.
+    return path.rstrip("/") in {
+        "/blog",
+        "/blogs",
+        "/guides",
+        "/guide",
+        "/articles",
+        "/insights",
+        "/news",
+        "/resources",
+    }
+
+
+def _category_dimension(
+    *,
+    row: dict[str, Any],
+    cluster: dict[str, Any],
+    target_url: Any,
+    parent: Any,
+) -> str:
+    """Page-type label for the Search Demand sheet.
+
+    ``target_type`` on the keyword is the *seed root* (the service/page that
+    expanded into this keyword). That is the parent relationship, not the
+    destination page type — a keyword seeded from the SEO service still lands
+    on ``/blog/...`` for TOFU/content clusters. Category dimension must follow
+    the URL / content type so blog destinations are not labelled ``service``.
+    """
+    if _is_blog_path(target_url):
+        return "blog"
+
+    content = str(
+        cluster.get("content_type")
+        or row.get("content_type")
+        or cluster.get("recommended_content")
+        or ""
+    ).strip().lower()
+    if content in _BLOGISH_CONTENT or any(
+        token in content for token in ("guide", "blog", "listicle", "article", "post")
+    ):
+        return "blog"
+
+    seed = str(row.get("target_type") or "").strip().lower()
+    if seed in {"service", "sub_service", "page"}:
+        return "sub_service" if seed == "sub_service" else seed
+    if seed and seed != "keyword":
+        return seed
+
+    name = str(cluster.get("name") or parent or "").strip()
+    return name or "keyword"
+
+
 def _num(value: Any) -> int | float | None:
     if value is None or value == "":
         return None
@@ -298,8 +390,16 @@ def build_search_demand_analysis_rows(
             or cluster.get("name")
             or row.get("seed")
         )
-        category_dim = row.get("target_type") or cluster.get("name") or parent
         target_url = targets.get(key) or row.get("recommended_url") or cluster.get("recommended_url")
+        # Seed target_type ("service") is the expansion root / parent — not the
+        # page type. Blog destinations must stay labelled blog even when the
+        # keyword was seeded from a service.
+        category_dim = _category_dimension(
+            row=row,
+            cluster=cluster,
+            target_url=target_url,
+            parent=parent,
+        )
         funnel = str(row.get("funnel") or "BOFU").upper()
         secondaries = row.get("secondary_keywords") or row.get("supporting_keywords") or []
         if not secondaries and cluster:

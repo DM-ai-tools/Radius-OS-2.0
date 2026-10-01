@@ -30,8 +30,10 @@ def test_paths_to_service_nodes():
 
 def test_build_client_service_catalog_with_subservices():
     catalog = build_client_service_catalog(
-        services=["SEO", "PPC"],
+        services=["21/09/2026 (draft)"],
         page_seeds=[
+            {"term": "SEO", "page_type": "service", "path": "/services/seo"},
+            {"term": "PPC", "page_type": "service", "path": "/services/ppc"},
             {
                 "term": "Local SEO",
                 "page_type": "sub_service",
@@ -40,8 +42,124 @@ def test_build_client_service_catalog_with_subservices():
             },
         ],
     )
+    assert {s["name"] for s in catalog} == {"SEO", "PPC"}
+    assert all(s["source"] == "website" for s in catalog)
     seo = next(s for s in catalog if s["name"] == "SEO")
     assert any(sub["name"] == "Local SEO" for sub in seo["subservices"])
+
+
+def test_catalog_uses_website_pages_not_cdd_names():
+    catalog = build_client_service_catalog(
+        services=["21/09/2026 (draft)", "SEO"],
+        page_seeds=[
+            {
+                "term": "Technical SEO",
+                "page_type": "service",
+                "path": "/services/technical-seo",
+            },
+            {
+                "term": "Web Design",
+                "page_type": "core_service",
+                "path": "/services/web-design",
+            },
+            {
+                "term": "Local SEO",
+                "page_type": "sub_service",
+                "parent_segment": "technical-seo",
+                "path": "/services/technical-seo/local-seo",
+            },
+        ],
+    )
+    names = {s["name"] for s in catalog}
+    assert names == {"Technical SEO", "Web Design"}
+    tech = next(s for s in catalog if s["name"] == "Technical SEO")
+    assert tech["source"] == "website"
+    assert any(sub["name"] == "Local SEO" for sub in tech["subservices"])
+
+
+def test_catalog_collapses_location_copies_and_drops_articles():
+    catalog = build_client_service_catalog(
+        services=[],
+        page_seeds=[
+            {
+                "term": "AI SEO Services Adelaide | Clicktrends - Click Trends",
+                "page_type": "service",
+                "path": "/ai-seo-services-adelaide/",
+            },
+            {
+                "term": "AI Search Optimization Services - Click Trends",
+                "page_type": "service",
+                "path": "/ai-seo-services-geelong/",
+            },
+            {
+                "term": "SEO Services Melbourne | Award-Winning SEO Agency | ClickTrends",
+                "page_type": "service",
+                "path": "/seo-services-melbourne/",
+            },
+            {
+                "term": "what are the advantages of hiring shopify development services",
+                "page_type": "service",
+                "path": "/what-are-the-advantages-of-hiring-shopify-development-services/",
+            },
+            {
+                "term": "Magento Development for Business Expansion | Click Trends",
+                "page_type": "service",
+                "path": "/how-magento-development-services-help-with-business-expansion/",
+            },
+            {
+                "term": "services aeo geo 2",
+                "page_type": "service",
+                "path": "/services-aeo-geo-2/",
+            },
+            {
+                "term": "/services-aeo-geo/",
+                "page_type": "service",
+                "path": "/services-aeo-geo/",
+            },
+            {
+                "term": "Shopify Development Services in Melbourne | Click Trends",
+                "page_type": "service",
+                "path": "/best-shopify-development-services-melbourne/",
+            },
+            {
+                "term": "Conversion Rate Optimisation Services | Click Trends",
+                "page_type": "service",
+                "path": "/conversion-rate-optimisation-services/",
+            },
+            {
+                "term": "Conversion Rate Optimization Services - Click Trends",
+                "page_type": "service",
+                "path": "/conversion-rate-optimization/",
+            },
+        ],
+    )
+    names = {row["name"] for row in catalog}
+    assert "AI SEO" in names
+    assert "SEO" in names
+    assert "Shopify Development" in names
+    assert "AEO GEO" in names
+    assert any(name.startswith("Conversion Rate Optimi") for name in names)
+    assert not any("adelaide" in name.lower() or "geelong" in name.lower() or "melbourne" in name.lower() for name in names)
+    assert not any(name.lower().startswith("what ") or name.lower().startswith("how ") for name in names)
+    assert sum(1 for name in names if name.startswith("Conversion Rate")) == 1
+    assert sum(1 for name in names if name == "AI SEO") == 1
+    assert sum(1 for name in names if name == "AEO GEO") == 1
+
+
+def test_website_pages_fill_catalog_only_when_cdd_empty():
+    catalog = build_client_service_catalog(
+        services=[],
+        page_seeds=[
+            {
+                "term": "Drain Cleaning",
+                "page_type": "service",
+                "path": "/services/drain-cleaning",
+            },
+        ],
+    )
+    assert len(catalog) == 1
+    assert catalog[0]["name"] == "Drain Cleaning"
+    assert catalog[0]["source"] == "website"
 
 
 def test_apply_service_selection_filters_services():
@@ -66,8 +184,188 @@ def test_apply_service_selection_filters_services():
     assert "local seo" in filtered_targets
 
 
+def test_apply_service_selection_drops_unselected_keyword_and_page_seeds():
+    """SEO / email themes must not expand when the user only picked Meta Ads."""
+    from app.services.service_prioritization import term_matches_selected_services
+
+    services = ["Meta Ads", "Google Ads/PPC Management", "SEO", "Email Marketing"]
+    targets = {
+        "meta ads": {"target": "Meta Ads", "target_type": "service"},
+        "google ads/ppc management": {
+            "target": "Google Ads/PPC Management",
+            "target_type": "service",
+        },
+        "seo": {"target": "SEO", "target_type": "service"},
+        "local seo melbourne": {
+            "target": "Local SEO Melbourne",
+            "target_type": "keyword",
+        },
+        "seo marketing melbourne": {
+            "target": "seo marketing melbourne",
+            "target_type": "keyword",
+        },
+        "email marketing agency": {
+            "target": "email marketing agency",
+            "target_type": "keyword",
+        },
+        "meta ads melbourne": {
+            "target": "Meta Ads Melbourne",
+            "target_type": "keyword",
+        },
+        "google ads consultant": {
+            "target": "google ads consultant",
+            "target_type": "page",
+        },
+    }
+    filtered_services, filtered_targets = apply_service_selection(
+        services,
+        targets,
+        {
+            "selected_service_ids": ["meta ads", "google ads/ppc management"],
+            "selected_subservice_ids": [],
+            "confirmed_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    assert set(filtered_services) == {"Meta Ads", "Google Ads/PPC Management"}
+    assert "seo" not in filtered_targets
+    assert "local seo melbourne" not in filtered_targets
+    assert "seo marketing melbourne" not in filtered_targets
+    assert "email marketing agency" not in filtered_targets
+    assert "meta ads melbourne" in filtered_targets
+    assert "google ads consultant" in filtered_targets
+    assert term_matches_selected_services("meta ads pricing", ["Meta Ads"])
+    assert not term_matches_selected_services(
+        "seo marketing melbourne", ["Meta Ads", "Google Ads/PPC Management"]
+    )
+
+
+def test_term_matches_does_not_map_google_ads_to_meta_ads():
+    """Shared 'ads' must not treat Google Ads as Meta Ads (or vice versa)."""
+    from app.services.service_prioritization import term_matches_selected_services
+
+    assert term_matches_selected_services("meta ads", ["Meta Ads"])
+    assert term_matches_selected_services("facebook ads melbourne", ["Meta Ads"])
+    assert term_matches_selected_services("instagram ads agency", ["Meta Ads"])
+    assert not term_matches_selected_services("google ads", ["Meta Ads"])
+    assert not term_matches_selected_services(
+        "google ads ppc management", ["Meta Ads"]
+    )
+    assert not term_matches_selected_services("google ads consultant", ["Meta Ads"])
+    assert term_matches_selected_services(
+        "google ads", ["Google Ads/PPC Management"]
+    )
+    assert not term_matches_selected_services("meta ads", ["Google Ads/PPC Management"])
+
+
+def test_apply_service_selection_drops_google_when_only_meta_selected():
+    from app.services.service_prioritization import apply_service_selection
+
+    services = ["Meta Ads", "Google Ads/PPC Management", "SEO"]
+    targets = {
+        "meta ads": {"target": "Meta Ads", "target_type": "service"},
+        "google ads/ppc management": {
+            "target": "Google Ads/PPC Management",
+            "target_type": "service",
+        },
+        "google ads consultant": {
+            "target": "google ads consultant",
+            "target_type": "page",
+        },
+        "facebook ads agency": {
+            "target": "facebook ads agency",
+            "target_type": "keyword",
+        },
+    }
+    filtered_services, filtered_targets = apply_service_selection(
+        services,
+        targets,
+        {
+            "selected_service_ids": ["meta ads"],
+            "selected_subservice_ids": [],
+            "confirmed_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    assert filtered_services == ["Meta Ads"]
+    assert "meta ads" in filtered_targets
+    assert "facebook ads agency" in filtered_targets
+    assert "google ads/ppc management" not in filtered_targets
+    assert "google ads consultant" not in filtered_targets
+
+
+def test_apply_service_selection_respects_slash_vs_space_ids():
+    """Catalog ids keep '/', cleaned seeds drop them — selection must still stick."""
+    from app.services.service_prioritization import apply_service_selection
+
+    services = ["Google Ads/PPC Management", "Meta Ads"]
+    targets = {
+        "google ads ppc management": {
+            "target": "Google Ads/PPC Management",
+            "target_type": "service",
+        },
+        "meta ads": {"target": "Meta Ads", "target_type": "service"},
+    }
+    filtered_services, filtered_targets = apply_service_selection(
+        services,
+        targets,
+        {
+            "selected_service_ids": ["google ads/ppc management"],
+            "service_catalog": [
+                {"id": "google ads/ppc management", "name": "Google Ads/PPC Management"},
+                {"id": "meta ads", "name": "Meta Ads"},
+            ],
+            "confirmed_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    assert filtered_services == ["Google Ads/PPC Management"]
+    assert "google ads ppc management" in filtered_targets
+    assert "meta ads" not in filtered_targets
+
+
+def test_apply_service_selection_never_falls_back_to_all_services():
+    """Unknown selection ids must not silently expand every CDD service."""
+    from app.services.service_prioritization import apply_service_selection
+
+    services = ["Meta Ads", "SEO", "Email Marketing"]
+    targets = {
+        "meta ads": {"target": "Meta Ads", "target_type": "service"},
+        "seo": {"target": "SEO", "target_type": "service"},
+    }
+    filtered_services, filtered_targets = apply_service_selection(
+        services,
+        targets,
+        {
+            "selected_service_ids": ["totally-unknown-service"],
+            "confirmed_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    assert filtered_services == []
+    assert filtered_targets == {}
+
+
+def test_apply_service_selection_uses_catalog_name_when_products_differ():
+    from app.services.service_prioritization import apply_service_selection
+
+    filtered_services, filtered_targets = apply_service_selection(
+        ["Email Marketing"],  # products list missing Meta
+        {"email marketing": {"target": "Email Marketing", "target_type": "service"}},
+        {
+            "selected_service_ids": ["meta ads"],
+            "service_catalog": [
+                {"id": "meta ads", "name": "Meta Ads"},
+                {"id": "email marketing", "name": "Email Marketing"},
+            ],
+            "confirmed_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    assert filtered_services == ["Meta Ads"]
+    assert "email marketing" not in filtered_targets
+
+
 def test_merge_competitor_subservices():
-    catalog = build_client_service_catalog(services=["SEO"])
+    catalog = build_client_service_catalog(
+        services=["SEO"],
+        page_seeds=[{"term": "SEO", "page_type": "service", "path": "/services/seo"}],
+    )
     tree = {
         "competitor_id": "comp",
         "name": "Comp",
@@ -85,7 +383,10 @@ def test_merge_competitor_subservices():
 
 
 def test_merge_competitor_subservices_uses_all_trees():
-    catalog = build_client_service_catalog(services=["SEO"])
+    catalog = build_client_service_catalog(
+        services=["SEO"],
+        page_seeds=[{"term": "SEO", "page_type": "service", "path": "/services/seo"}],
+    )
     trees = [
         {
             "competitor_id": "one",
@@ -104,7 +405,10 @@ def test_merge_competitor_subservices_uses_all_trees():
 
 
 def test_consensus_service_candidate_is_opt_in_and_can_be_adopted():
-    catalog = build_client_service_catalog(services=["SEO"])
+    catalog = build_client_service_catalog(
+        services=["SEO"],
+        page_seeds=[{"term": "SEO", "page_type": "service", "path": "/services/seo"}],
+    )
     trees = [
         {
             "competitor_id": "one",
@@ -174,7 +478,6 @@ def test_consensus_service_candidate_is_opt_in_and_can_be_adopted():
             "service_catalog": confirmed["service_catalog"],
             "service_prioritization": confirmed,
         },
-        seo_strategy={},
         commercial={},
         website={},
     )
@@ -183,12 +486,44 @@ def test_consensus_service_candidate_is_opt_in_and_can_be_adopted():
     assert urls["/content-marketing"]["parent"] == "/"
 
 
+def test_industry_list_includes_a_service_offered_by_one_competitor_and_a_manual_add():
+    pack = build_prioritization_pack(
+        client_name="Acme",
+        services=[],
+        page_seeds=[{"term": "SEO", "page_type": "service", "path": "/services/seo"}],
+        competitor_trees=[
+            {
+                "competitor_id": "one",
+                "name": "One",
+                "services": [{"id": "cro", "name": "CRO", "subservices": []}],
+            }
+        ],
+        existing={
+            "service_catalog": [
+                {"id": "email marketing", "name": "Email Marketing", "source": "manual"}
+            ]
+        },
+    )
+    by_name = {row["name"]: row for row in pack["service_catalog"]}
+    assert by_name["SEO"]["source"] == "website"
+    assert by_name["CRO"]["source"] == "competitor"
+    assert by_name["CRO"]["candidate_new_service"] is True
+    assert by_name["Email Marketing"]["source"] == "manual"
+    assert "cro" not in pack["defaults"]["selected_service_ids"]
+    assert "email marketing" in pack["defaults"]["selected_service_ids"]
+
+
 def test_prioritization_pack_and_confirm():
     pack = build_prioritization_pack(
         client_name="Acme",
-        services=["SEO", "PPC"],
+        services=["21/09/2026 (draft)"],
+        page_seeds=[
+            {"term": "SEO", "page_type": "service", "path": "/services/seo"},
+            {"term": "PPC", "page_type": "service", "path": "/services/ppc"},
+        ],
         competitor_trees=[],
     )
+    assert {row["name"] for row in pack["service_catalog"]} == {"SEO", "PPC"}
     assert pack["service_catalog"]
     assert pack["defaults"]["selected_service_ids"]
     confirmed = confirm_prioritization(
@@ -204,7 +539,7 @@ def test_prioritization_pack_and_confirm():
 def test_expand_vertical_subservice_seeds_adds_missing_roots():
     catalog = build_client_service_catalog(
         services=["SEO"],
-        page_seeds=[],
+        page_seeds=[{"term": "SEO", "page_type": "service", "path": "/services/seo"}],
     )
     catalog[0]["subservices"] = [{"id": "technical-seo", "name": "Technical SEO"}]
     roots, targets = expand_vertical_subservice_seeds(

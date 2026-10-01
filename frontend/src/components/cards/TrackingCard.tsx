@@ -83,8 +83,14 @@ export default function TrackingCard({
   const cardType = String(payload.card_type || "");
 
   if (cardType === "oauth_request") {
-    const providers = (payload.providers || []) as string[];
-    const providerStatus = (payload.provider_status || {}) as Record<string, string>;
+    const providers = ((payload.providers || []) as string[]).filter(
+      (p) => p !== "google_business"
+    );
+    const providerStatus = Object.fromEntries(
+      Object.entries((payload.provider_status || {}) as Record<string, string>).filter(
+        ([key]) => key !== "google_business"
+      )
+    );
     return (
       <CardShell payload={payload}>
         <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
@@ -130,7 +136,9 @@ export default function TrackingCard({
   }
 
   if (cardType === "tracking_t1_access") {
-    const platforms = (payload.platforms || []) as Platform[];
+    const platforms = ((payload.platforms || []) as Platform[]).filter(
+      (p) => p.key !== "google_business"
+    );
     return (
       <CardShell payload={payload}>
         <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
@@ -329,8 +337,14 @@ function TrackingReportCard({
   onAction: (action: string) => void;
   onSubmitKnownChanges?: (fields: Record<string, unknown>) => void;
 }) {
-  const platforms = (payload.platforms || []) as Platform[];
-  const providerStatus = (payload.provider_status || {}) as Record<string, string>;
+  const platforms = ((payload.platforms || []) as Platform[]).filter(
+    (p) => p.key !== "google_business"
+  );
+  const providerStatus = Object.fromEntries(
+    Object.entries((payload.provider_status || {}) as Record<string, string>).filter(
+      ([key]) => key !== "google_business"
+    )
+  );
   const audit = (payload.audit || {}) as { items?: AuditItem[] };
   const conversions = (payload.conversions || {}) as {
     events?: { name: string; status: string }[];

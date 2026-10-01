@@ -3,6 +3,18 @@ type Props = {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   maxRows?: number;
+  /** Keyword rows on the search-demand workbook. */
+  keywordFocus?: {
+    focused: (keyword: string) => boolean;
+    onToggle: (keyword: string) => void;
+    disabled?: boolean;
+  };
+  /** Any identifiable row on a later-stage workbook. */
+  stageFocus?: {
+    focused: (row: unknown) => boolean;
+    onToggle: (row: unknown) => void;
+    disabled?: boolean;
+  };
 };
 
 function label(col: string): string {
@@ -36,14 +48,23 @@ function fmtCell(col: string, value: unknown): string {
   return String(value);
 }
 
-export default function WorkbookTable({ title, columns, rows, maxRows = 30 }: Props) {
+export default function WorkbookTable({
+  title,
+  columns,
+  rows,
+  maxRows = 30,
+  keywordFocus,
+  stageFocus,
+}: Props) {
   const dataRows = rows.filter((r) => r.row_type !== "section");
   const display = dataRows.slice(0, maxRows);
   if (!display.length) return null;
+  const showFocus = Boolean(keywordFocus || stageFocus);
+  const colSpan = columns.length + (showFocus ? 1 : 0);
 
   return (
     <div style={{ marginBottom: 16 }}>
-      <h4 style={{ margin: "14px 0 8px", fontSize: 13 }}>{title}</h4>
+      {title ? <h4 style={{ margin: "14px 0 8px", fontSize: 13 }}>{title}</h4> : null}
       <div style={{ overflowX: "auto" }}>
         <table
           className="kw-report-table"
@@ -51,6 +72,9 @@ export default function WorkbookTable({ title, columns, rows, maxRows = 30 }: Pr
         >
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+              {showFocus ? (
+                <th style={{ padding: "5px 7px", whiteSpace: "nowrap" }}>Focus</th>
+              ) : null}
               {columns.map((col) => (
                 <th key={col} style={{ padding: "5px 7px", whiteSpace: "nowrap" }}>
                   {label(col)}
@@ -64,7 +88,7 @@ export default function WorkbookTable({ title, columns, rows, maxRows = 30 }: Pr
                 return (
                   <tr key={`section-${i}`} style={{ background: "rgba(0,0,0,0.03)" }}>
                     <td
-                      colSpan={columns.length}
+                      colSpan={colSpan}
                       style={{ padding: "6px 7px", fontWeight: 700, fontSize: 11 }}
                     >
                       {String(row.section_label || row.l1_category || "")}
@@ -72,8 +96,39 @@ export default function WorkbookTable({ title, columns, rows, maxRows = 30 }: Pr
                   </tr>
                 );
               }
+              const keyword = String(row.keyword || row.primary_keyword || row.url || row.title || row.name || "").trim();
+              const focused = stageFocus
+                ? stageFocus.focused(row)
+                : !keywordFocus || !keyword || keywordFocus.focused(keyword);
               return (
-                <tr key={`row-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
+                <tr
+                  key={`row-${i}`}
+                  style={{
+                    borderBottom: "1px solid var(--line)",
+                    opacity: focused ? 1 : 0.45,
+                  }}
+                >
+                  {showFocus ? (
+                    <td style={{ padding: "5px 7px", verticalAlign: "top" }}>
+                      {stageFocus ? (
+                        <input
+                          type="checkbox"
+                          checked={focused}
+                          disabled={stageFocus.disabled}
+                          aria-label={`Focus ${keyword || "row"}`}
+                          onChange={() => stageFocus.onToggle(row)}
+                        />
+                      ) : keyword && keywordFocus ? (
+                        <input
+                          type="checkbox"
+                          checked={focused}
+                          disabled={keywordFocus.disabled}
+                          aria-label={`Focus ${keyword}`}
+                          onChange={() => keywordFocus.onToggle(keyword)}
+                        />
+                      ) : null}
+                    </td>
+                  ) : null}
                   {columns.map((col) => (
                     <td key={col} style={{ padding: "5px 7px", verticalAlign: "top" }}>
                       {fmtCell(col, row[col])}

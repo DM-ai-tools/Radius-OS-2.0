@@ -39,13 +39,43 @@ async def test_render_with_playwright_returns_none_for_unsafe_host(monkeypatch):
 
 
 async def test_render_with_playwright_degrades_when_not_installed(monkeypatch):
-    """Playwright is a fallback-only dependency — if it (or its browser
-    binary) isn't installed in a given environment, the scan must not crash,
-    just skip rendering for that page."""
+    """Playwright is a fallback-only dependency — if it isn't installed the scan
+    must skip rendering, not crash.
+
+    Simulated rather than observed: the previous version of this test called a
+    real URL and asserted None, so it only passed on machines where Playwright
+    was BROKEN, and made a live network request to do it.
+    """
+    import sys
+
     settings = get_settings()
     monkeypatch.setattr(settings, "enable_playwright_rendering", True)
-    result = await live_site_scan._render_with_playwright("https://8.8.8.8/")
-    assert result is None  # either genuinely not installed, or a real launch failure — both degrade to None
+    # A None entry in sys.modules makes `from playwright.async_api import ...`
+    # raise ImportError without touching the real package.
+    monkeypatch.setitem(sys.modules, "playwright.async_api", None)
+    result = await live_site_scan._render_with_playwright("https://acme.example/")
+    assert result is None
+
+
+async def test_render_with_playwright_degrades_when_the_browser_fails_to_launch(
+    monkeypatch,
+):
+    """The browser binary can be absent even when the package is installed."""
+    import sys
+    import types
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "enable_playwright_rendering", True)
+
+    def _boom():
+        raise RuntimeError("Executable doesn't exist: chromium not installed")
+
+    fake = types.ModuleType("playwright.async_api")
+    fake.async_playwright = _boom
+    monkeypatch.setitem(sys.modules, "playwright.async_api", fake)
+
+    result = await live_site_scan._render_with_playwright("https://acme.example/")
+    assert result is None
 
 
 async def test_scan_live_site_uses_http_pages_when_crawl_is_rich(monkeypatch):

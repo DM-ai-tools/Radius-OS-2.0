@@ -2,9 +2,56 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.config import Settings
+
+
+def _norm_kw(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+def row_volume_key(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("volume") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def dedupe_across_seeds(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep one row per normalized keyword — highest volume wins.
+
+    Note the relevance gate deliberately does NOT use this: it judges each
+    (service, keyword) pair separately, because a keyword can genuinely fit one
+    service and not another. This stays available for pool-shaping callers that
+    want a flat, one-row-per-keyword view.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        kw = _norm_kw(row.get("keyword"))
+        if not kw:
+            continue
+        prev = best.get(kw)
+        if not prev:
+            best[kw] = row
+            order.append(kw)
+            continue
+        if row_volume_key(row) > row_volume_key(prev):
+            best[kw] = row
+    kept = [best[kw] for kw in order if kw in best]
+    dropped: list[dict[str, Any]] = []
+    seen_kept = {_norm_kw(r.get("keyword")) for r in kept}
+    for row in rows:
+        kw = _norm_kw(row.get("keyword"))
+        if not kw or kw not in seen_kept:
+            continue
+        if row is not best[kw]:
+            dropped.append({**row, "relevance_drop_reason": "cross_seed_dedupe"})
+    return kept, dropped
 
 
 def resolve_client_pool_target(

@@ -1,6 +1,6 @@
 """Keyword pool sizing and cross-seed dedupe."""
 
-from app.services.keyword_llm_relevance import _dedupe_across_seeds
+from app.services.keyword_pool import dedupe_across_seeds
 from app.services.keyword_pool import (
     resolve_client_pool_target,
     resolve_keyword_pool_limits,
@@ -37,7 +37,7 @@ def test_dedupe_across_seeds_keeps_highest_volume():
         {"keyword": "seo audit", "seed": "seo audit", "volume": 250},
         {"keyword": "local seo", "seed": "local seo", "volume": 80},
     ]
-    kept, dropped = _dedupe_across_seeds(rows)
+    kept, dropped = dedupe_across_seeds(rows)
     assert len(kept) == 2
     audit = next(r for r in kept if r["keyword"] == "seo audit")
     assert audit["volume"] == 250

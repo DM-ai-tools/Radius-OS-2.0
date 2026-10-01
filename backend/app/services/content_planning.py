@@ -10,6 +10,40 @@ from typing import Any
 from urllib.parse import urlparse
 
 PRIORITY_TIERS = frozenset({"quick_win", "big_bet", "fill_in", "avoid"})
+# Blog/guide creates that are not tied to a confirmed selected service stay small.
+# Phase 5 often overshoots with near-duplicate ideas. Selected services are exempt:
+# each one gets a new page of every supporting page type, not only a blog or a guide.
+MAX_BLOG_CREATES = 2
+MIN_BLOG_CREATES = 2
+BLOGS_PER_SELECTED_SERVICE = 2
+# page_type, keyword template, title template, intent
+SELECTED_SERVICE_PAGE_KINDS = (
+    ("guide", "{name} guide", "{name}: a practical guide", "informational"),
+    ("blog", "{name} overview", "{name} explained", "informational"),
+    ("comparison", "{name} comparison", "{name} comparison", "commercial"),
+    ("faq", "{name} faq", "{name} questions", "informational"),
+    ("listicle", "{name} examples", "{name} examples", "informational"),
+    ("landing", "{name} pricing", "{name} pricing", "transactional"),
+    ("tool", "{name} tool", "{name} tool", "informational"),
+)
+_GENERIC_MATCH_TOKENS = frozenset(
+    {
+        "and",
+        "the",
+        "for",
+        "with",
+        "service",
+        "services",
+        "agency",
+        "agencies",
+        "company",
+        "management",
+        "solutions",
+        "solution",
+    }
+)
+SERVICE_PAGE_TYPES = frozenset({"service", "subservice", "sub_service", "product", "commercial"})
+BLOGISH_CONTENT = frozenset({"blog", "article", "guide", "listicle", "comparison", "spoke", "supporting"})
 PAGE_TYPES = frozenset(
     {
         "home",
@@ -70,6 +104,17 @@ REFRESH_DISPOSITIONS = frozenset({"REFRESH", "OPTIMISE", "RETITLE"})
 RETIRE_DISPOSITIONS = frozenset({"CONSOLIDATE", "NOINDEX", "DELETE_CANDIDATE"})
 TIER_RANK = {"quick_win": 0, "big_bet": 1, "fill_in": 2, "avoid": 3}
 ACTION_RANK = {"refresh": 0, "create": 1, "no_action": 2, "retire": 3}
+# Within each service family, content is walked in this order.
+# 0 pillar page → 1 blogs on that pillar → 2 sub-pillar pages → 3 blogs on those sub-pillars.
+HIERARCHY_ROLE = {
+    0: "pillar_page",
+    1: "pillar_blogs",
+    2: "subpillar_page",
+    3: "subpillar_blogs",
+    4: "other",
+}
+_PILLAR_PAGE_TYPES = frozenset({"service", "pillar", "hub", "product", "commercial"})
+_SUBPILLAR_PAGE_TYPES = frozenset({"subservice", "sub_service"})
 
 
 def url_n(url: str | None) -> str:
@@ -94,6 +139,99 @@ def _tier(row: dict[str, Any]) -> str | None:
     return TIER_ALIASES.get(key) or TIER_ALIASES.get(key.replace("_", " ")) or TIER_ALIASES.get(key.replace("-", " "))
 
 
+def _hierarchy_slot(row: dict[str, Any], subpillar_urls: set[str]) -> int:
+    """Where this page sits in the pillar → blogs → sub-pillar → sub-pillar blogs walk."""
+    ptype = str(row.get("page_type") or row.get("content_type") or "").strip().lower()
+    parent = url_n(str(row.get("parent_url_n") or row.get("parent") or ""))
+    on_subpillar = bool(
+        row.get("supports_subservice_id")
+        or row.get("subservice")
+        or row.get("subservice_id")
+        or (parent and parent in subpillar_urls)
+    )
+    if ptype == "home":
+        return -1
+    if ptype in _PILLAR_PAGE_TYPES:
+        return 0
+    if ptype in _SUBPILLAR_PAGE_TYPES:
+        return 2
+    if ptype in BLOGISH_CONTENT or ptype in {"faq", "article", "guide", "blog"}:
+        return 3 if on_subpillar else 1
+    if on_subpillar:
+        return 3
+    if row.get("supports_service_id") or row.get("service"):
+        return 1
+    return 4
+
+
+def _family_key(row: dict[str, Any]) -> str:
+    return _norm_kw(
+        row.get("supports_service_id")
+        or row.get("service_id")
+        or row.get("service")
+        or row.get("cluster")
+        or ""
+    )
+
+
+def order_pages_by_hierarchy(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order a roadmap by service family, then pillar → blogs → sub-pillars → their blogs.
+
+    Families are ordered by their pillar page (priority tier, then score) so the
+    strongest pillar is produced first. Inside a family the hierarchy is fixed;
+    tier and score only break ties within the same slot.
+    """
+    subpillar_urls = {
+        url_n(str(row.get("url_n") or row.get("url") or row.get("path") or ""))
+        for row in pages
+        if str(row.get("page_type") or "").strip().lower() in _SUBPILLAR_PAGE_TYPES
+    }
+    subpillar_urls.discard("")
+
+    for row in pages:
+        slot = _hierarchy_slot(row, subpillar_urls)
+        row["hierarchy_slot"] = slot
+        row["hierarchy_role"] = HIERARCHY_ROLE.get(slot, "other")
+
+    family_rank: dict[str, tuple] = {}
+    for row in pages:
+        key = _family_key(row)
+        if not key:
+            continue
+        slot = int(row.get("hierarchy_slot") or 4)
+        tier = TIER_RANK.get(str(row.get("priority_tier") or ""), 9)
+        try:
+            score = float(row.get("priority_score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        # Prefer the pillar page itself when ranking families against each other.
+        candidate = (0 if slot == 0 else 1, tier, -score, key)
+        current = family_rank.get(key)
+        if current is None or candidate < current:
+            family_rank[key] = candidate
+    ordered_families = sorted(family_rank, key=lambda k: family_rank[k])
+    family_index = {key: i for i, key in enumerate(ordered_families)}
+
+    def _sort_key(row: dict[str, Any]) -> tuple:
+        key = _family_key(row)
+        slot = int(row.get("hierarchy_slot") if row.get("hierarchy_slot") is not None else 4)
+        try:
+            score = float(row.get("priority_score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        return (
+            -1 if slot < 0 else family_index.get(key, len(ordered_families)),
+            slot,
+            TIER_RANK.get(str(row.get("priority_tier") or ""), 9),
+            ACTION_RANK.get(str(row.get("action") or ""), 9),
+            -score,
+            str(row.get("url_n") or ""),
+        )
+
+    pages.sort(key=_sort_key)
+    return pages
+
+
 def _page_type(row: dict[str, Any]) -> str | None:
     raw = row.get("page_type") or row.get("type")
     if not raw:
@@ -109,7 +247,7 @@ def _planning_content_type(row: dict[str, Any], *, page_type: str | None, primar
     raw = row.get("content_type") or row.get("type")
     if raw:
         key = str(raw).strip().lower()
-        if key in {"blog", "article", "post"}:
+        if key in {"blog", "article", "post", "blog_article"}:
             return "blog"
         if key in {"service", "services", "subservice", "sub_service", "commercial"}:
             return "service page"
@@ -117,25 +255,33 @@ def _planning_content_type(row: dict[str, Any], *, page_type: str | None, primar
             return "landing page"
         if key in {"faq", "faq_page"}:
             return "faq"
+        if key in {"guide", "comparison", "listicle", "tool", "location", "product", "hub"}:
+            return key
         return key
     ptype = (page_type or "").lower()
-    if ptype in {"service", "subservice", "product", "commercial", "location"}:
+    if ptype in {"service", "subservice", "sub_service", "product", "commercial"}:
         return "service page"
     if ptype == "landing":
         return "landing page"
-    if ptype == "faq":
-        return "faq"
+    if ptype in {"faq", "guide", "comparison", "listicle", "tool", "location", "hub"}:
+        return ptype
+    if ptype in {"article", "blog"}:
+        return "blog"
     kw = str(primary or row.get("keyword") or row.get("title") or "").lower()
     intent = str(row.get("intent") or "").lower()
-    if "faq" in kw or kw.startswith("what is ") and "?" in kw:
+    if "faq" in kw or (kw.startswith("what is ") and "?" in kw):
         return "faq"
+    if " vs " in kw or " versus " in kw:
+        return "comparison"
+    if kw.startswith(("best ", "top ")):
+        return "listicle"
     if intent == "transactional" or any(x in kw for x in ("pricing", "hire", "quote")):
         return "landing page"
-    if intent == "commercial" or ptype in {"comparison", "listicle"}:
+    if intent == "commercial":
         return "service page"
-    if ptype in {"article", "blog", "guide"} or kw.startswith(("how to", "what is", "best ")):
-        return "blog"
-    return "blog"
+    if intent == "informational" or kw.startswith(("how to", "what is")):
+        return "guide"
+    return "page"
 
 
 def _disposition(row: dict[str, Any] | None) -> str | None:
@@ -410,10 +556,21 @@ def _strategy_row_richness(row: dict[str, Any]) -> tuple[int, ...]:
 
 
 def _strategy_rows(strategy: dict[str, Any]) -> list[dict[str, Any]]:
-    """Flatten strategy queues once — packs often mirror the same topics 2–3 times."""
+    """Flatten the Phase 6 strategy spine once.
+
+    Prefer ``priority_queue`` / ``priority_pages`` only. ``combined_priority_queue``
+    re-injects audit Fill-in gaps and invents blog creates that never appeared on
+    the Content Strategy card.
+    """
     collected: list[dict[str, Any]] = []
-    for key in ("priority_queue", "combined_priority_queue", "priority_pages"):
+    primary_keys = ("priority_queue", "priority_pages")
+    for key in primary_keys:
         for row in strategy.get(key) or []:
+            if isinstance(row, dict):
+                collected.append(row)
+    # Fall back to combined only when the strategy spine is empty (legacy packs).
+    if not collected:
+        for row in strategy.get("combined_priority_queue") or []:
             if isinstance(row, dict):
                 collected.append(row)
 
@@ -428,6 +585,688 @@ def _strategy_rows(strategy: dict[str, Any]) -> list[dict[str, Any]]:
         if prev is None or _strategy_row_richness(row) > _strategy_row_richness(prev):
             by_key[nk] = row
     return list(by_key.values()) + no_key
+
+
+def _is_service_page(row: dict[str, Any]) -> bool:
+    ptype = _page_type(row)
+    if ptype in SERVICE_PAGE_TYPES:
+        return True
+    ctype = str(row.get("content_type") or "").strip().lower()
+    return ctype in {"service", "service page", "services", "subservice", "commercial"}
+
+
+def _is_blogish_create(row: dict[str, Any]) -> bool:
+    if str(row.get("action") or "") != "create":
+        return False
+    if _is_service_page(row):
+        return False
+    ctype = str(row.get("content_type_label") or row.get("content_type") or "").strip().lower()
+    ptype = str(row.get("page_type") or "").strip().lower()
+    if ctype in BLOGISH_CONTENT or ptype in BLOGISH_CONTENT:
+        return True
+    path = str(row.get("url_n") or row.get("url") or row.get("path") or "").lower()
+    return path.startswith(("/blog/", "/guides/", "/guide/", "/articles/"))
+
+
+def _blog_create_rank(row: dict[str, Any]) -> tuple:
+    """Prefer Phase 5 spine + higher tiers when capping blog creates."""
+    tier = str(row.get("priority_tier") or "fill_in")
+    from_p5 = 0 if row.get("from_phase5_topic") else 1
+    return (
+        from_p5,
+        TIER_RANK.get(tier, 9),
+        -float(row.get("priority_score") or 0),
+        str(row.get("url_n") or ""),
+    )
+
+
+def _norm_service_id(value: Any) -> str:
+    return " ".join(str(value or "").split()).strip().lower()
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
+
+
+def _distinct_tokens(text: str) -> set[str]:
+    tokens = _token_set(text) - _GENERIC_MATCH_TOKENS
+    return tokens or _token_set(text)
+
+
+# A blog is created only when the topic clears this trend/virality score.
+# Pillar and sub-pillar pages are not subject to the check.
+VIRALITY_PASS_SCORE = 0.35
+
+
+def assess_topic_virality(
+    row: dict[str, Any],
+    lookup: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Score whether a topic is worth a blog page.
+
+    Uses trend direction, the Phase 5 bucket, volume, and opportunity score.
+    Declining, avoided, and stale-year topics fail. A topic with no trend or
+    volume evidence also fails — a blog is not invented from the service name.
+    """
+    from app.services.keyword_opportunity import has_present_year, is_stale_year_keyword
+
+    keyword = str(row.get("keyword") or row.get("primary_keyword") or "").strip()
+    extra = (lookup or {}).get(_norm_kw(keyword)) or {}
+    src = {**extra, **{k: v for k, v in row.items() if v not in (None, "", [])}}
+    trend = str(src.get("trend") or "").strip().lower()
+    bucket = str(src.get("bucket") or "").strip().lower()
+    try:
+        volume = float(src.get("volume") or src.get("search_volume") or 0)
+    except (TypeError, ValueError):
+        volume = 0.0
+    try:
+        opportunity = float(src.get("opportunity_score") or 0)
+    except (TypeError, ValueError):
+        opportunity = 0.0
+    if 0 < opportunity <= 1:
+        opportunity *= 100
+
+    stale = bool(keyword) and is_stale_year_keyword(keyword)
+    present = bool(keyword) and has_present_year(keyword)
+    score = 0.0
+    notes: list[str] = []
+    if trend == "rising":
+        score += 0.45
+        notes.append("rising")
+    elif trend == "stable":
+        score += 0.15
+        notes.append("stable")
+    elif trend == "declining":
+        score -= 0.5
+        notes.append("declining")
+    if bucket == "trend":
+        score += 0.3
+        notes.append("trend bucket")
+    elif bucket == "avoid":
+        score -= 0.4
+        notes.append("avoid bucket")
+    elif bucket == "best":
+        score += 0.1
+    if present:
+        score += 0.2
+        notes.append("current year")
+    if stale:
+        score -= 0.6
+        notes.append("stale year")
+    if volume >= 500:
+        score += 0.2
+        notes.append(f"vol {int(volume)}")
+    elif volume >= 50:
+        score += 0.1
+        notes.append(f"vol {int(volume)}")
+    if opportunity >= 55:
+        score += 0.15
+    elif opportunity >= 40:
+        score += 0.05
+    score = max(0.0, min(1.0, round(score, 2)))
+    hard_fail = trend == "declining" or bucket == "avoid" or stale
+    has_signal = bool(trend or bucket or volume >= 50 or present or opportunity >= 40)
+    passed = has_signal and not hard_fail and score >= VIRALITY_PASS_SCORE
+    if not has_signal:
+        reason = "no trend or volume evidence for a blog"
+    elif hard_fail:
+        reason = "topic is declining, avoided, or stale"
+    elif not passed:
+        reason = "trend potential below the blog threshold"
+    else:
+        reason = "trend potential supports a blog"
+    return {
+        "pass": passed,
+        "score": score,
+        "reason": reason,
+        "signals": ", ".join(notes) or "none",
+        "trend": trend or None,
+        "keyword": keyword,
+    }
+
+
+def demand_keyword_rows(search_demand: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Flatten Phase 5 keyword rows that can carry a trend signal."""
+    demand = dict(search_demand or {})
+    rows: list[dict[str, Any]] = []
+    for key in ("trend_plays", "best_opportunities", "strong_evergreen", "keyword_table"):
+        for row in demand.get(key) or []:
+            if isinstance(row, dict):
+                rows.append(row)
+    cluster_report = demand.get("cluster_report") if isinstance(demand.get("cluster_report"), dict) else {}
+    for cluster in (cluster_report or {}).get("clusters") or []:
+        if not isinstance(cluster, dict):
+            continue
+        if cluster.get("primary_keyword") or cluster.get("keyword"):
+            rows.append(cluster)
+        for member in cluster.get("keywords") or []:
+            if isinstance(member, dict):
+                rows.append(member)
+    return rows
+
+
+def index_demand_keywords(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = _norm_kw(row.get("keyword") or row.get("primary_keyword"))
+        if key and key not in index:
+            index[key] = row
+    return index
+
+
+def pick_viral_blog_topic(
+    service: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Highest-scoring demand keyword for this service that clears the blog gate."""
+    name_tokens = _distinct_tokens(str(service.get("name") or service.get("id") or ""))
+    best: tuple[float, dict[str, Any], dict[str, Any]] | None = None
+    for row in rows:
+        keyword = str(row.get("keyword") or row.get("primary_keyword") or "")
+        if name_tokens and not (name_tokens & _token_set(keyword)):
+            continue
+        verdict = assess_topic_virality(row)
+        if not verdict["pass"]:
+            continue
+        if best is None or float(verdict["score"]) > best[0]:
+            best = (float(verdict["score"]), row, verdict)
+    if not best:
+        return None
+    return best[1], best[2]
+
+
+def apply_blog_virality_gate(
+    pages: list[dict[str, Any]],
+    search_demand: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Drop blog creates whose topic fails the virality check. Other page types stay."""
+    lookup = index_demand_keywords(demand_keyword_rows(search_demand))
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for row in pages:
+        kind = _row_page_kind(row)
+        if str(row.get("action") or "") == "create" and kind in {"blog", "article"}:
+            verdict = assess_topic_virality(row, lookup)
+            row["virality_score"] = verdict["score"]
+            row["virality_pass"] = verdict["pass"]
+            row["virality_reason"] = verdict["reason"]
+            row["virality_signals"] = verdict["signals"]
+            # A hard fail (declining, avoided, stale) is dropped. A blog invented
+            # for a selected service is dropped unless it clears the score.
+            # A blog already chosen by strategy or the URL map stays when the
+            # only gap is missing trend fields — those pages were not guessed
+            # from a service name.
+            synthesized = "selected_service_blog" in set(row.get("flags") or [])
+            hard_fail = verdict["reason"] == "topic is declining, avoided, or stale"
+            if not verdict["pass"] and (hard_fail or synthesized):
+                dropped.append(
+                    {
+                        "url_n": row.get("url_n"),
+                        "reason": f"virality_check — {verdict['reason']} ({verdict['signals']})",
+                        "source_pack": "virality_check",
+                        "title": row.get("title"),
+                        "keyword": row.get("primary_keyword") or row.get("keyword"),
+                    }
+                )
+                continue
+        kept.append(row)
+    return kept, dropped
+
+
+def supporting_page_spec(name: str, kind: tuple[str, str, str, str]) -> dict[str, str]:
+    """Path and labels for one supporting page kind of a selected service."""
+    from app.services.create_content import path_for_page_type
+
+    page_type, keyword_tmpl, title_tmpl, intent = kind
+    keyword = keyword_tmpl.format(name=name)
+    return {
+        "page_type": page_type,
+        "keyword": keyword,
+        "title": title_tmpl.format(name=name),
+        "intent": intent,
+        "path": path_for_page_type(page_type, keyword),
+        "work_label": f"Create {page_type} page",
+    }
+
+
+def _row_page_kind(row: dict[str, Any]) -> str:
+    return str(row.get("page_type") or row.get("content_type_label") or row.get("content_type") or "").strip().lower()
+
+
+def _work_label_for(row: dict[str, Any]) -> str:
+    explicit = str(row.get("work_label") or "").strip()
+    if explicit:
+        return explicit
+    action = str(row.get("action") or "")
+    page_type = _row_page_kind(row)
+    flags = set(row.get("flags") or [])
+    if action == "create" and page_type in PAGE_TYPES and page_type not in SERVICE_PAGE_TYPES:
+        return f"Create {page_type} page"
+    if action == "create" and (
+        page_type in BLOGISH_CONTENT or "selected_service_blog" in flags
+    ):
+        return "Create blog page"
+    if action == "refresh" and (
+        _is_service_page(row)
+        or "service_optimize" in flags
+        or "selected_service_page" in flags
+    ):
+        return "Optimize service page"
+    if action == "create":
+        return "Create page"
+    if action == "refresh":
+        return "Optimize page"
+    if action == "retire":
+        return "Retire page"
+    return action or "Leave unchanged"
+
+
+def _blog_is_protected(row: dict[str, Any], protected_ids: set[str]) -> bool:
+    if not protected_ids:
+        return False
+    if "selected_service_blog" in (row.get("flags") or []):
+        return True
+    return _norm_service_id(row.get("supports_service_id")) in protected_ids
+
+
+def prune_blog_creates(
+    pages: list[dict[str, Any]],
+    *,
+    max_creates: int = MAX_BLOG_CREATES,
+    protect_service_ids: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Cap blog/guide creates that are not covering a selected service.
+
+    Service refresh rows are untouched. Blog creates whose ``supports_service_id``
+    is in ``protect_service_ids`` stay on the roadmap so each selected service can
+    keep its floor. Remaining blog creates are capped at ``max_creates``.
+    """
+    keep_n = max(0, int(max_creates))
+    protected_ids = {_norm_service_id(x) for x in (protect_service_ids or set())}
+    protected_ids.discard("")
+    blogs = [r for r in pages if _is_blogish_create(r)]
+    protected = {id(r) for r in blogs if _blog_is_protected(r, protected_ids)}
+    unprotected = [r for r in blogs if id(r) not in protected]
+    if len(unprotected) <= keep_n:
+        return pages, []
+    ranked = sorted(unprotected, key=_blog_create_rank)
+    keep_set = protected | {id(r) for r in ranked[:keep_n]}
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for row in pages:
+        if _is_blogish_create(row) and id(row) not in keep_set:
+            dropped.append(
+                {
+                    "url_n": row.get("url_n"),
+                    "reason": (
+                        f"blog_create_cap — kept top {keep_n} blog suggestions; "
+                        "extra fill-in blogs were not on the briefable plan"
+                    ),
+                    "source_pack": "planning_cap",
+                    "title": row.get("title"),
+                    "keyword": row.get("primary_keyword") or row.get("keyword"),
+                }
+            )
+            continue
+        kept.append(row)
+    return kept, dropped
+
+
+def selected_services_for_plan(
+    architecture: dict[str, Any] | None,
+    search_demand: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Confirmed services for this roadmap, from architecture or search demand."""
+    from app.services.service_prioritization import compact_selected_services
+
+    arch = dict(architecture or {})
+    demand = dict(search_demand or {})
+    for source in (arch, demand):
+        stamped = [
+            row
+            for row in (source.get("selected_services") or [])
+            if isinstance(row, dict) and (row.get("id") or row.get("name"))
+        ]
+        if stamped:
+            return stamped
+    prio = demand.get("service_prioritization")
+    if not isinstance(prio, dict):
+        prio = arch.get("service_prioritization") if isinstance(arch.get("service_prioritization"), dict) else {}
+    catalog = (
+        demand.get("service_catalog")
+        or (prio or {}).get("service_catalog")
+        or arch.get("service_catalog")
+    )
+    return compact_selected_services(
+        prio if isinstance(prio, dict) else {},
+        service_catalog=catalog if isinstance(catalog, list) else None,
+        ia_nodes=arch.get("service_ia_nodes") or arch.get("target_url_tree"),
+    )
+
+
+def _selected_identity(selected: list[dict[str, Any]]) -> tuple[set[str], set[str], set[str]]:
+    ids: set[str] = set()
+    urls: set[str] = set()
+    slugs: set[str] = set()
+    for svc in selected:
+        if not isinstance(svc, dict):
+            continue
+        sid = _norm_service_id(svc.get("id"))
+        name = str(svc.get("name") or "")
+        if sid:
+            ids.add(sid)
+        name_id = _norm_service_id(name)
+        if name_id:
+            ids.add(name_id)
+        slug = _slug(name) or _slug(sid)
+        if slug:
+            slugs.add(slug)
+        if svc.get("url"):
+            urls.add(url_n(str(svc.get("url"))))
+        if slug:
+            urls.add(f"/{slug}")
+        for sub in svc.get("subservices") or []:
+            if not isinstance(sub, dict):
+                continue
+            sub_id = _norm_service_id(sub.get("id"))
+            sub_name = str(sub.get("name") or "")
+            if sub_id:
+                ids.add(sub_id)
+            if _norm_service_id(sub_name):
+                ids.add(_norm_service_id(sub_name))
+            sub_slug = _slug(sub_name) or _slug(sub_id)
+            if sub_slug:
+                slugs.add(sub_slug)
+            if sub.get("url"):
+                urls.add(url_n(str(sub.get("url"))))
+            if slug and sub_slug:
+                urls.add(f"/{slug}/{sub_slug}")
+    urls.discard("")
+    urls.discard("/")
+    slugs.discard("")
+    ids.discard("")
+    return ids, urls, slugs
+
+
+def _matches_selected_service(row: dict[str, Any], selected: list[dict[str, Any]]) -> bool:
+    """True when a service/sub-service page belongs to the confirmed selection."""
+    if not selected:
+        return True
+    ids, urls, slugs = _selected_identity(selected)
+    for key in (
+        "service_id",
+        "supports_service_id",
+        "parent_service_id",
+        "subservice_id",
+        "supports_subservice_id",
+    ):
+        if _norm_service_id(row.get(key)) in ids:
+            return True
+    path = url_n(str(row.get("url") or row.get("path") or row.get("url_n") or ""))
+    if path in urls:
+        return True
+    segments = [
+        seg
+        for seg in path.strip("/").split("/")
+        if seg and seg not in {"services", "service", "solutions", "products", "what-we-do"}
+    ]
+    if any(seg in slugs for seg in segments):
+        return True
+    label_tokens = _token_set(
+        " ".join(
+            str(row.get(key) or "")
+            for key in ("title", "keyword", "primary_keyword")
+        )
+    )
+    for svc in selected:
+        names = [str(svc.get("name") or "")]
+        for sub in svc.get("subservices") or []:
+            if isinstance(sub, dict):
+                names.append(str(sub.get("name") or ""))
+        for name in names:
+            tokens = _distinct_tokens(name)
+            if tokens and tokens <= label_tokens:
+                return True
+    return False
+
+
+def _blog_supports_service(row: dict[str, Any], service: dict[str, Any]) -> bool:
+    sid = _norm_service_id(row.get("supports_service_id") or "")
+    target = _norm_service_id(service.get("id"))
+    if sid:
+        return bool(target) and sid == target
+    parent = url_n(str(row.get("parent") or row.get("parent_url") or row.get("parent_url_n") or ""))
+    svc_url = url_n(str(service.get("url") or ""))
+    slug = _slug(str(service.get("name") or service.get("id") or ""))
+    if parent and svc_url and parent == svc_url:
+        return True
+    if parent and slug and parent in {f"/{slug}", f"/services/{slug}"}:
+        return True
+    name_tokens = _distinct_tokens(str(service.get("name") or ""))
+    if not name_tokens:
+        return False
+    blob = _token_set(
+        " ".join(
+            str(row.get(key) or "")
+            for key in ("title", "keyword", "primary_keyword", "service")
+        )
+    )
+    return name_tokens <= blob
+
+
+def _service_page_url(service: dict[str, Any]) -> str:
+    explicit = url_n(str(service.get("url") or ""))
+    if explicit and explicit != "/":
+        return explicit
+    slug = _slug(str(service.get("name") or service.get("id") or "service")) or "service"
+    return f"/{slug}"
+
+
+def _selected_service_page_row(service: dict[str, Any], url: str) -> dict[str, Any]:
+    name = str(service.get("name") or service.get("id") or "Service")
+    return {
+        "url_n": url,
+        "url": url,
+        "path": url,
+        "action": "refresh",
+        "content_action": "OPTIMIZE_EXISTING",
+        "disposition": "OPTIMISE",
+        "decision_basis": "url_map_optimize_existing",
+        "existing_content_check": "matched_existing",
+        "title": name,
+        "primary_keyword": name,
+        "keyword": name,
+        "secondary_keywords": [],
+        "supporting_keywords": [],
+        "keywords": [],
+        "intent": "commercial",
+        "service": name,
+        "content_type": "service page",
+        "content_type_label": "service page",
+        "page_type": "service",
+        "parent": "/",
+        "parent_url_n": "/",
+        "supports_service_id": _norm_service_id(service.get("id")),
+        "depth": 1,
+        "indexable": True,
+        "priority_tier": "big_bet",
+        "priority_score": 0,
+        "work_label": "Optimize service page",
+        "flags": ["service_optimize", "selected_service_page"],
+        "status": "planned",
+        "from_selected_service": True,
+    }
+
+
+def _selected_service_supporting_row(
+    service: dict[str, Any],
+    spec: dict[str, str],
+) -> dict[str, Any]:
+    name = str(service.get("name") or service.get("id") or "Service")
+    parent = _service_page_url(service)
+    path = url_n(spec["path"])
+    page_type = spec["page_type"]
+    flags = ["supports_service", "selected_service_page"]
+    if page_type in BLOGISH_CONTENT:
+        flags.append("selected_service_blog")
+    return {
+        "url_n": path,
+        "url": path,
+        "path": path,
+        "action": "create",
+        "content_action": "NEW_CONTENT",
+        "disposition": None,
+        "decision_basis": "new_content_gap",
+        "existing_content_check": "no_match",
+        "new_content_justification": (
+            f"Selected service '{name}' needs a {page_type} page. "
+            "Each confirmed service is planned across every supporting page type, "
+            "not only a blog or a guide."
+        ),
+        "title": spec["title"],
+        "primary_keyword": spec["keyword"],
+        "keyword": spec["keyword"],
+        "secondary_keywords": [],
+        "supporting_keywords": [],
+        "keywords": [],
+        "intent": spec["intent"],
+        "service": name,
+        "content_type": page_type,
+        "content_type_label": page_type,
+        "page_type": page_type,
+        "parent": parent,
+        "parent_url_n": parent,
+        "supports_service_id": _norm_service_id(service.get("id")),
+        "depth": 2,
+        "indexable": True,
+        "priority_tier": "fill_in",
+        "priority_score": 0,
+        "work_label": spec["work_label"],
+        "flags": flags,
+        "status": "planned",
+        "from_selected_service": True,
+        "from_selected_service_blog": page_type in BLOGISH_CONTENT,
+    }
+
+
+def ensure_selected_service_coverage(
+    pages: list[dict[str, Any]],
+    selected: list[dict[str, Any]],
+    search_demand: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Optimize each selected service page and add any missing page types.
+
+    A blog is added only when a keyword for that service passes the virality
+    check. Guide, comparison, FAQ, listicle, landing, and tool pages are unchanged.
+    """
+    if not selected:
+        return pages
+    demand_rows = demand_keyword_rows(search_demand)
+    covered_urls = {
+        url_n(str(row.get("url_n") or row.get("url") or row.get("path") or ""))
+        for row in pages
+        if isinstance(row, dict)
+    }
+    claimed: set[int] = set()
+    for service in selected:
+        if not isinstance(service, dict):
+            continue
+        has_page = any(
+            isinstance(row, dict)
+            and str(row.get("action") or "") in {"refresh", "create"}
+            and _is_service_page(row)
+            and _matches_selected_service(row, [service])
+            for row in pages
+        )
+        if not has_page:
+            url = _service_page_url(service)
+            if url not in covered_urls:
+                pages.append(_selected_service_page_row(service, url))
+                covered_urls.add(url)
+        present_kinds: set[str] = set()
+        name = str(service.get("name") or service.get("id") or "Service")
+        for row in pages:
+            if not isinstance(row, dict) or id(row) in claimed:
+                continue
+            if str(row.get("action") or "") != "create" or _is_service_page(row):
+                continue
+            if not _blog_supports_service(row, service):
+                continue
+            row["supports_service_id"] = _norm_service_id(service.get("id"))
+            row["from_selected_service"] = True
+            flags = list(row.get("flags") or [])
+            if "selected_service_page" not in flags:
+                flags.append("selected_service_page")
+            kind = _row_page_kind(row)
+            if kind in BLOGISH_CONTENT and "selected_service_blog" not in flags:
+                flags.append("selected_service_blog")
+            row["flags"] = flags
+            if kind:
+                present_kinds.add(kind)
+            claimed.add(id(row))
+        for kind in SELECTED_SERVICE_PAGE_KINDS:
+            if kind[0] in present_kinds:
+                continue
+            spec = supporting_page_spec(name, kind)
+            viral: dict[str, Any] | None = None
+            if kind[0] == "blog":
+                picked = pick_viral_blog_topic(service, demand_rows)
+                if not picked:
+                    continue
+                topic, verdict = picked
+                from app.services.create_content import path_for_page_type
+
+                keyword = str(topic.get("keyword") or topic.get("primary_keyword") or spec["keyword"])
+                spec = {
+                    **spec,
+                    "keyword": keyword,
+                    "title": str(topic.get("title") or keyword),
+                    "path": path_for_page_type("blog", keyword),
+                }
+                viral = {**topic, **verdict}
+            path = url_n(spec["path"])
+            if path in covered_urls:
+                present_kinds.add(kind[0])
+                continue
+            created = _selected_service_supporting_row(service, spec)
+            if viral:
+                created["trend"] = viral.get("trend")
+                created["volume"] = viral.get("volume")
+                created["bucket"] = viral.get("bucket")
+                created["opportunity_score"] = viral.get("opportunity_score")
+                created["virality_score"] = viral.get("score")
+                created["virality_pass"] = True
+                created["virality_reason"] = viral.get("reason")
+                created["virality_signals"] = viral.get("signals")
+            pages.append(created)
+            covered_urls.add(path)
+            present_kinds.add(kind[0])
+    return pages
+
+
+def _live_service_optimize_candidate(
+    row: dict[str, Any],
+    *,
+    audit_row: dict[str, Any] | None,
+    map_action: str,
+) -> bool:
+    """True when an architecture-only service page should enter the roadmap as refresh."""
+    if not _is_service_page(row):
+        return False
+    if map_action in {"OPTIMIZE_EXISTING", "REVIEW_MERGE_REDIRECT"}:
+        return True
+    if audit_row is not None:
+        disp = (_disposition(audit_row) or "").upper()
+        if disp in {"RETIRE", "REMOVE", "DELETE", "NOINDEX"}:
+            return False
+        # Existing service pages always get an optimize brief — KEEP still needs
+        # on-page refresh work for the commercial spine.
+        return True
+    # No audit hit: still admit clear service/subservice nodes that already have a URL
+    # in the IA tree (live site taxonomy), so Phase 9 is not create-only blogs.
+    path = url_n(str(row.get("url") or row.get("path") or ""))
+    return bool(path and path != "/" and not path.startswith(("/blog/", "/guides/")))
+
 
 
 def _arch_rows(architecture: dict[str, Any]) -> list[dict[str, Any]]:
@@ -478,8 +1317,13 @@ def build_roadmap(
     strict: bool = False,
     client_name: str | None = None,
     primary_url: str | None = None,
+    search_demand: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Join three packs on url_n. Does not invent topics, URLs, or dispositions."""
+    """Join three packs on url_n.
+
+    A confirmed service selection optimizes those service pages and adds a
+    guide, blog, comparison, FAQ, listicle, landing, and tool page for each.
+    """
     strat_rows = _strategy_rows(strategy)
     arch_rows = _arch_rows(architecture)
     audit_by = _audit_by_url(audit or {})
@@ -499,7 +1343,14 @@ def build_roadmap(
         key = url_n(str(row.get("url") or row.get("path") or ""))
         if key:
             arch_by.setdefault(key, row)
+    selected_services = selected_services_for_plan(architecture, search_demand)
     service_targets = _service_targets(arch_rows)
+    if selected_services:
+        service_targets = [
+            target
+            for target in service_targets
+            if _matches_selected_service(target, selected_services)
+        ]
 
     # URL map from site architecture — attach crawled URLs to clusters before join.
     from app.services.url_mapping import lookup_url_map_entry
@@ -620,6 +1471,90 @@ def build_roadmap(
             )
     for key, row in arch_by.items():
         if key not in strat_by and key not in claimed_arch:
+            if (
+                selected_services
+                and _is_service_page(row)
+                and not _matches_selected_service(row, selected_services)
+            ):
+                excluded.append(
+                    {
+                        "url_n": key,
+                        "reason": "unselected_service — outside the confirmed service selection",
+                        "source_pack": "architecture",
+                        "title": row.get("title"),
+                        "keyword": row.get("keyword") or row.get("primary_keyword"),
+                    }
+                )
+                continue
+            # Existing pages marked OPTIMIZE / audit refresh must still reach the
+            # roadmap — Phase 5 only spines new_topic creates, so without this
+            # admission Content Planning (and Production briefs) show creates only.
+            map_action = str(row.get("url_map_action") or "").upper()
+            if not map_action:
+                map_entry = lookup_url_map_entry(
+                    {"final_url_map": architecture.get("final_url_map") or []},
+                    cluster=str(row.get("cluster") or ""),
+                    keyword=str(row.get("keyword") or row.get("primary_keyword") or ""),
+                )
+                if map_entry and url_n(str(map_entry.get("selected_url") or "")) == key:
+                    map_action = str(map_entry.get("action") or "").upper()
+                    row = {
+                        **row,
+                        "url_map_action": map_entry.get("action"),
+                        "keyword": row.get("keyword") or map_entry.get("primary_keyword"),
+                        "primary_keyword": row.get("primary_keyword")
+                        or map_entry.get("primary_keyword"),
+                    }
+            au = audit_by.get(key)
+            disp = _disposition(au)
+            is_optimize = map_action in (
+                "OPTIMIZE_EXISTING",
+                "REVIEW_MERGE_REDIRECT",
+            ) or (disp is not None and _action_from_disposition(disp) == "refresh")
+            # Live service / subservice pages must reach the roadmap as refresh even
+            # when Phase 5 never put them on the create spine (existing_on_site).
+            if not is_optimize and _live_service_optimize_candidate(
+                row, audit_row=au, map_action=map_action
+            ):
+                is_optimize = True
+                map_action = map_action or "OPTIMIZE_EXISTING"
+                row = {**row, "url_map_action": row.get("url_map_action") or "OPTIMIZE_EXISTING"}
+            if is_optimize:
+                primary = (
+                    row.get("keyword")
+                    or row.get("primary_keyword")
+                    or (au or {}).get("keyword")
+                    or key.strip("/").replace("-", " ")
+                )
+                # Money pages rank ahead of fill-in blogs.
+                tier = "big_bet" if _is_service_page(row) else "fill_in"
+                synthetic = {
+                    "url": key,
+                    "path": key,
+                    "title": row.get("title") or primary,
+                    "keyword": primary,
+                    "primary_keyword": primary,
+                    "cluster": row.get("cluster"),
+                    "priority_tier": tier,
+                    "from_url_map_optimize": True,
+                    "intent": row.get("intent") or (au or {}).get("intent") or "commercial",
+                    "page_type": row.get("page_type") or "service",
+                    "content_type": row.get("content_type") or "service page",
+                }
+                pairs.append(
+                    (
+                        key,
+                        synthetic,
+                        row,
+                        (
+                            "architecture_optimize_admitted: existing service page needs refresh"
+                            if _is_service_page(row)
+                            else "architecture_optimize_admitted: existing page needs refresh"
+                        ),
+                    )
+                )
+                claimed_arch.add(key)
+                continue
             excluded.append(
                 {
                     "url_n": key,
@@ -681,6 +1616,12 @@ def build_roadmap(
                 inferred_existing = kw_matches[0]
                 disp = _disposition(inferred_existing) or "REFRESH"
         action = _action_from_disposition(disp)
+        # Architecture-admitted service optimizes must stay briefable as refresh —
+        # audit KEEP would otherwise collapse them to no_action.
+        if s.get("from_url_map_optimize") and action in {"create", "no_action"}:
+            if (_disposition(au) or "").upper() not in {"RETIRE", "REMOVE", "DELETE", "NOINDEX"}:
+                action = "refresh"
+                disp = disp if disp and _action_from_disposition(disp) == "refresh" else "OPTIMISE"
         cluster = str(s.get("cluster") or s.get("pillar") or a.get("cluster") or "").strip()
         primary = s.get("keyword") or s.get("primary_keyword") or a.get("keyword") or a.get("primary_keyword")
         url_map_entry = (
@@ -702,6 +1643,30 @@ def build_roadmap(
                 action = "refresh"
             if mapped_url and mapped_url != "/":
                 key = mapped_url
+        # Commercial keywords that collapse onto an existing service URL must
+        # optimize that page — never brief a "create" for a live /services path.
+        if route_to_service and action == "create":
+            action = "refresh"
+            disp = disp or "OPTIMISE"
+            flags_pending_service_refresh = True
+        else:
+            flags_pending_service_refresh = False
+        strategy_action = str(s.get("action") or "").strip().lower()
+        if strategy_action in {"optimize", "optimise", "refresh"} and _is_service_page(
+            {**a, **s, "page_type": a.get("page_type") or s.get("page_type")}
+        ):
+            action = "refresh"
+            disp = disp or "OPTIMISE"
+            flags_pending_service_refresh = True
+        if _is_service_page({**a, **s, "page_type": a.get("page_type") or s.get("page_type")}) and action == "create":
+            # Strategy invent sometimes stamps create onto an existing service path.
+            if audit_by.get(key) or str(a.get("url_map_action") or "").upper() in {
+                "OPTIMIZE_EXISTING",
+                "REVIEW_MERGE_REDIRECT",
+            }:
+                action = "refresh"
+                disp = disp or "OPTIMISE"
+                flags_pending_service_refresh = True
         owner = owners.get(cluster.lower()) if cluster else None
         cannibal = bool(owner and owner != key)
         depth = a.get("depth")
@@ -728,6 +1693,8 @@ def build_roadmap(
             flags.append("commercial_service_route")
         elif supporting_parent:
             flags.append("supports_service")
+        if flags_pending_service_refresh:
+            flags.append("service_optimize")
         if cannibal:
             flags.append("cannibal_conflict")
         if inferred_existing:
@@ -791,6 +1758,24 @@ def build_roadmap(
             new_content_justification = (
                 "No relevant existing page matched by URL/keyword in content-audit inventory."
             )
+        if (
+            selected_services
+            and _is_service_page({**a, **s, "page_type": ptype, "url": key, "path": key, "url_n": key})
+            and not _matches_selected_service(
+                {**a, **s, "page_type": ptype, "url": key, "path": key, "url_n": key},
+                selected_services,
+            )
+        ):
+            excluded.append(
+                {
+                    "url_n": key,
+                    "reason": "unselected_service — outside the confirmed service selection",
+                    "source_pack": "strategy",
+                    "title": title,
+                    "keyword": primary,
+                }
+            )
+            continue
         secondary = [str(k).strip() for k in kws if str(k).strip() and str(k).strip().lower() != str(primary or "").strip().lower()][:8]
         pages.append(
             {
@@ -830,7 +1815,13 @@ def build_roadmap(
                 "parent": parent,
                 "parent_url_n": url_n(str(parent)) if parent else None,
                 "supports_service_id": (
-                    service_target.get("service_id") if service_target else None
+                    (service_target.get("service_id") if service_target else None)
+                    or s.get("supports_service_id")
+                    or a.get("supports_service_id")
+                ),
+                "work_label": s.get("work_label") or a.get("work_label"),
+                "from_selected_service": bool(
+                    s.get("from_selected_service") or a.get("from_selected_service")
                 ),
                 "supports_subservice_id": (
                     service_target.get("subservice_id") if service_target else None
@@ -841,24 +1832,39 @@ def build_roadmap(
                 "indexable": indexable,
                 "priority_tier": tier,
                 "priority_score": score_n,
+                "trend": s.get("trend") or a.get("trend"),
+                "volume": s.get("volume") or s.get("search_volume") or a.get("volume"),
+                "bucket": s.get("bucket") or a.get("bucket"),
+                "opportunity_score": s.get("opportunity_score") or a.get("opportunity_score"),
                 "cannibal_conflict": cannibal,
                 "flags": flags,
                 "reconcile_note": reconcile_note,
                 "status": "planned",
                 "url_map_score": url_map_entry.get("url_score") if url_map_entry else None,
                 "url_map_band": url_map_entry.get("score_band") if url_map_entry else None,
-                "url_map_action": url_map_entry.get("action") if url_map_entry else None,
+                "url_map_action": url_map_entry.get("action") if url_map_entry else (
+                    a.get("url_map_action") or s.get("url_map_action")
+                ),
             }
         )
 
-    pages.sort(
-        key=lambda r: (
-            TIER_RANK.get(str(r.get("priority_tier") or ""), 9),
-            ACTION_RANK.get(str(r.get("action") or ""), 9),
-            -float(r.get("priority_score") or 0),
-            str(r.get("url_n") or ""),
-        )
+    pages = ensure_selected_service_coverage(pages, selected_services, search_demand)
+    pages, viral_dropped = apply_blog_virality_gate(pages, search_demand)
+    excluded.extend(viral_dropped)
+    for row in pages:
+        row["work_label"] = _work_label_for(row)
+    pages, capped = prune_blog_creates(
+        pages,
+        max_creates=MAX_BLOG_CREATES,
+        protect_service_ids={
+            _norm_service_id(svc.get("id"))
+            for svc in selected_services
+            if isinstance(svc, dict)
+        },
     )
+    excluded.extend(capped)
+
+    order_pages_by_hierarchy(pages)
     for i, row in enumerate(pages, 1):
         row["priority_rank"] = i
         row["wave"] = 1 if row.get("priority_tier") == "quick_win" else 2 if row.get("priority_tier") == "big_bet" else 3
@@ -909,12 +1915,24 @@ def build_roadmap(
         "pages": pages,
         "roadmap": pages,
         "excluded": excluded,
+        "selected_services": selected_services,
         "summary": {
             "by_action": by_action,
             "merged": len(pages),
             "excluded": len(excluded),
             "flagged": flagged,
             "briefable": len(briefable),
+            "blogs_per_selected_service": {
+                str(svc.get("name") or svc.get("id")): sum(
+                    1
+                    for row in pages
+                    if str(row.get("action") or "") == "create"
+                    and not _is_service_page(row)
+                    and _blog_supports_service(row, svc)
+                )
+                for svc in selected_services
+                if isinstance(svc, dict)
+            },
         },
         "planned_count": len(pages),
         "create_count": by_action["create"],
@@ -924,9 +1942,23 @@ def build_roadmap(
         "excluded_count": len(excluded),
         "source": "content_planning",
         "note": (
-            "Locked merge of strategy + architecture + audit. No new topics invented. "
-            "Phase 10 briefs pages with action create|refresh in priority_rank order. "
-            "Re-run this merge if any upstream pack changes."
+            (
+                "Locked merge of strategy + architecture + audit. "
+                "Each confirmed selected service page is optimized. "
+                "Each selected service also gets a guide, blog, comparison, FAQ, "
+                "listicle, landing, and tool page. "
+                f"Unrelated blog creates stay capped at {MAX_BLOG_CREATES}. "
+                "Phase 10 briefs pages with action create|refresh in priority_rank order. "
+                "Re-run this merge if any upstream pack changes."
+            )
+            if locked and selected_services
+            else (
+                "Locked merge of strategy + architecture + audit. "
+                f"At most {MAX_BLOG_CREATES} blog/guide creates are briefable. "
+                "Live service pages enter as refresh/optimize. "
+                "Phase 10 briefs pages with action create|refresh in priority_rank order. "
+                "Re-run this merge if any upstream pack changes."
+            )
             if locked
             else f"Unlocked — {'; '.join(lock_problems[:4])}. Phase 10 must not brief from this report."
         ),
@@ -941,6 +1973,7 @@ def validate_report(report: dict[str, Any], *, strict: bool = False) -> dict[str
         {"priority_queue": pages},
         {
             "target_url_tree": pages,
+            "selected_services": list(report.get("selected_services") or []),
             "cluster_owners": [
                 {"cluster": p.get("cluster"), "owner_url": p.get("url_n")}
                 for p in pages
@@ -1014,7 +2047,7 @@ async def run_content_planning_plan(
     content_audit_status: str | None = None,
     strict: bool = False,
 ) -> dict[str, Any]:
-    _ = search_demand, marketing, industry
+    _ = marketing, industry
     ia = dict(site_architecture or {})
     strategy = dict(seo_strategy or {})
     audit = dict(content_audit or {})
@@ -1084,4 +2117,5 @@ async def run_content_planning_plan(
         strict=strict,
         client_name=client_name,
         primary_url=primary_url,
+        search_demand=dict(search_demand or {}),
     )

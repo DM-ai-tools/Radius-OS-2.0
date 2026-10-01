@@ -325,11 +325,12 @@ def build_service_seed_clusters(
 
     out: list[dict[str, Any]] = []
     for group in groups.values():
-        if not group["seeds"]:
+        # Drop the catch-all only when empty — selected services stay visible
+        # even with zero seeds so the multi-mode report mirrors selection.
+        if group["service_key"] == other_key and not group["seeds"]:
             continue
         _nest_subservices(group)
-        if group["seeds"] or group.get("subservices"):
-            out.append(group)
+        out.append(group)
     for group in out:
         group["seeds"].sort(
             key=lambda row: (
@@ -340,8 +341,8 @@ def build_service_seed_clusters(
                 str(row.get("seed") or "").lower(),
             )
         )
-        # Number seeds within the service (Seed 1, Seed 2, …). Every service
-        # cluster has at least one seed by construction (empty groups dropped).
+        # Number seeds within the service (Seed 1, Seed 2, …). Empty selected
+        # services are kept so the multi-mode report still lists them.
         for index, seed in enumerate(group["seeds"], start=1):
             seed["seed_index"] = index
             seed["seed_label"] = f"Seed {index}"

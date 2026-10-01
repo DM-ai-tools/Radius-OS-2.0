@@ -72,55 +72,51 @@ def _normalize_url_tree(tree: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _nodes_from_strategy_queue(seo_strategy: dict[str, Any]) -> list[dict[str, Any]]:
-    """Target tree rows from Phase 6 priority_queue — join key for Phase 9."""
-    queue = (
-        seo_strategy.get("combined_priority_queue")
-        or seo_strategy.get("priority_queue")
-        or seo_strategy.get("priority_pages")
-        or []
-    )
-    nodes: list[dict[str, Any]] = []
+def _money_keywords(commercial: dict[str, Any], demand: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for key in ("products", "products_for_promotion", "business_keywords"):
+        raw = commercial.get(key)
+        if isinstance(raw, str):
+            out.extend([x.strip() for x in raw.replace(";", ",").split(",") if x.strip()])
+        elif isinstance(raw, list):
+            out.extend([str(x).strip() for x in raw if str(x).strip()])
+    for row in (demand.get("best_opportunities") or [])[:8]:
+        if isinstance(row, dict) and row.get("keyword"):
+            out.append(str(row["keyword"]))
+    # dedupe
     seen: set[str] = set()
-    for item in queue:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("priority") or item.get("priority_tier") or "").lower() == "avoid":
-            continue
-        raw = item.get("url") or item.get("suggested_url") or item.get("path")
-        kw = item.get("keyword") or item.get("primary_keyword") or item.get("title")
-        if not raw and kw:
-            raw = f"/blog/{_slug(str(kw))}"
-        path = _path_n(str(raw) if raw else "")
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        parent = item.get("parent") or item.get("parent_url") or _parent_of(path)
-        parent_n = _path_n(str(parent)) if parent else "/"
-        try:
-            depth = int(item.get("depth")) if item.get("depth") is not None else max(1, path.count("/"))
-        except (TypeError, ValueError):
-            depth = max(1, path.count("/"))
-        ptype = str(item.get("page_type") or item.get("type") or item.get("content_type") or "article").lower()
-        if ptype in ("guide", "post", "page", "planned"):
-            ptype = "article"
-        nodes.append(
-            {
-                "url": path,
-                "path": path,
-                "parent": parent_n,
-                "depth": depth,
-                "page_type": ptype,
-                "type": ptype,
-                "title": item.get("title"),
-                "keyword": kw,
-                "primary_keyword": kw,
-                "cluster": item.get("cluster") or item.get("pillar"),
-                "indexable": True,
-                "from_strategy": True,
-            }
+    clean = []
+    for k in out:
+        n = k.lower()
+        if n not in seen:
+            seen.add(n)
+            clean.append(k)
+    return clean[:12]
+
+
+def _declared_services(commercial: dict[str, Any], demand: dict[str, Any]) -> list[str]:
+    """CDD/Phase-5 service names, excluding generic opportunity keywords."""
+    raw_values: list[Any] = [
+        demand.get("services"),
+        demand.get("products"),
+        commercial.get("products"),
+        commercial.get("products_for_promotion"),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        values = (
+            [x.strip() for x in raw.replace(";", ",").split(",")]
+            if isinstance(raw, str)
+            else raw if isinstance(raw, list) else []
         )
-    return nodes
+        for value in values:
+            name = str(value or "").strip()
+            key = name.lower()
+            if name and key not in seen:
+                seen.add(key)
+                out.append(name)
+    return out
 
 
 async def measure_click_depth(
@@ -128,7 +124,7 @@ async def measure_click_depth(
     *,
     page_cap: int = 80,
 ) -> dict[str, Any]:
-    """Lightweight in-app BFS from homepage — click depth, not folder count."""
+    """Lightweight in-app BFS from homepage â€” click depth, not folder count."""
     seed = seed_url if "://" in seed_url else f"https://{seed_url}"
     host = _host(seed)
     seen: set[str] = set()
@@ -204,7 +200,7 @@ async def measure_click_depth(
                 "issue": "pages_beyond_3_clicks",
                 "count": len(depth_4),
                 "severity": "high" if len(depth_4) > 5 else "medium",
-                "note": "Fix with nav/hubs — not by flattening folders (Google doesn't count slashes)",
+                "note": "Fix with nav/hubs â€” not by flattening folders (Google doesn't count slashes)",
             }
         )
     if orphans:
@@ -213,7 +209,7 @@ async def measure_click_depth(
                 "issue": "orphan_pages",
                 "count": len(orphans),
                 "severity": "high",
-                "note": "No internal path from crawl seed — hand off remediation to Internal Linking",
+                "note": "No internal path from crawl seed â€” hand off remediation to Internal Linking",
             }
         )
     if phantoms:
@@ -222,7 +218,7 @@ async def measure_click_depth(
                 "issue": "phantom_directories",
                 "count": len(phantoms),
                 "severity": "medium",
-                "note": "Breadcrumb/URL hierarchy hole — add hub pages at intermediate paths",
+                "note": "Breadcrumb/URL hierarchy hole â€” add hub pages at intermediate paths",
             }
         )
 
@@ -252,57 +248,90 @@ async def measure_click_depth(
         "pages": pages,
         "method": "in_app_bfs",
         "evidence_notes": [
-            "Measured click depth from homepage seed — not folder/slash count",
+            "Measured click depth from homepage seed â€” not folder/slash count",
             "Google does not count URL slashes; do not recommend restructure solely for flat URLs",
             "Prefer hub-and-spoke over strict siloing",
         ],
     }
 
 
-def _money_keywords(commercial: dict[str, Any], demand: dict[str, Any]) -> list[str]:
-    out: list[str] = []
-    for key in ("products", "products_for_promotion", "business_keywords"):
-        raw = commercial.get(key)
-        if isinstance(raw, str):
-            out.extend([x.strip() for x in raw.replace(";", ",").split(",") if x.strip()])
-        elif isinstance(raw, list):
-            out.extend([str(x).strip() for x in raw if str(x).strip()])
-    for row in (demand.get("best_opportunities") or [])[:8]:
-        if isinstance(row, dict) and row.get("keyword"):
-            out.append(str(row["keyword"]))
-    # dedupe
+def strategy_queue_nodes(seo_strategy: dict[str, Any]) -> list[dict[str, Any]]:
+    """Target tree rows from Phase 6 priority_queue â€” join key for Phase 9."""
+    queue = (
+        seo_strategy.get("combined_priority_queue")
+        or seo_strategy.get("priority_queue")
+        or seo_strategy.get("priority_pages")
+        or []
+    )
+    nodes: list[dict[str, Any]] = []
     seen: set[str] = set()
-    clean = []
-    for k in out:
-        n = k.lower()
-        if n not in seen:
-            seen.add(n)
-            clean.append(k)
-    return clean[:12]
-
-
-def _declared_services(commercial: dict[str, Any], demand: dict[str, Any]) -> list[str]:
-    """CDD/Phase-5 service names, excluding generic opportunity keywords."""
-    raw_values: list[Any] = [
-        demand.get("services"),
-        demand.get("products"),
-        commercial.get("products"),
-        commercial.get("products_for_promotion"),
-    ]
-    out: list[str] = []
-    seen: set[str] = set()
-    for raw in raw_values:
-        values = (
-            [x.strip() for x in raw.replace(";", ",").split(",")]
-            if isinstance(raw, str)
-            else raw if isinstance(raw, list) else []
+    for item in queue:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("priority") or item.get("priority_tier") or "").lower() == "avoid":
+            continue
+        raw = item.get("url") or item.get("suggested_url") or item.get("path")
+        kw = item.get("keyword") or item.get("primary_keyword") or item.get("title")
+        if not raw and kw:
+            raw = f"/blog/{_slug(str(kw))}"
+        path = _path_n(str(raw) if raw else "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        parent = item.get("parent") or item.get("parent_url") or _parent_of(path)
+        parent_n = _path_n(str(parent)) if parent else "/"
+        try:
+            depth = int(item.get("depth")) if item.get("depth") is not None else max(1, path.count("/"))
+        except (TypeError, ValueError):
+            depth = max(1, path.count("/"))
+        ptype = str(item.get("page_type") or item.get("type") or item.get("content_type") or "article").lower()
+        if ptype in ("guide", "post", "page", "planned"):
+            ptype = "article"
+        nodes.append(
+            {
+                "url": path,
+                "path": path,
+                "parent": parent_n,
+                "depth": depth,
+                "page_type": ptype,
+                "type": ptype,
+                "title": item.get("title"),
+                "keyword": kw,
+                "primary_keyword": kw,
+                "cluster": item.get("cluster") or item.get("pillar"),
+                "indexable": True,
+                "from_strategy": True,
+            }
         )
-        for value in values:
-            name = str(value or "").strip()
-            key = name.lower()
-            if name and key not in seen:
-                seen.add(key)
-                out.append(name)
+    return nodes
+
+
+def merge_strategy_nodes_into_tree(
+    architecture: dict[str, Any],
+    seo_strategy: dict[str, Any],
+) -> dict[str, Any]:
+    """Add Phase 7's queue pages to the Phase 6 tree, after Phase 7 has run.
+
+    Returns a NEW architecture dict. Phase 6's own nodes win on a path
+    collision, so this is idempotent and never overwrites the URL mapping.
+    """
+    nodes = strategy_queue_nodes(seo_strategy or {})
+    if not nodes:
+        return architecture
+    out = dict(architecture or {})
+    tree = [n for n in (out.get("target_url_tree") or []) if isinstance(n, dict)]
+    seen = {_path_n(str(n.get("url") or n.get("path") or "")) for n in tree}
+    added = 0
+    for node in nodes:
+        path = _path_n(str(node.get("url") or node.get("path") or ""))
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        tree.append(node)
+        added += 1
+    out["target_url_tree"] = tree
+    if added:
+        out["strategy_nodes_added"] = added
     return out
 
 
@@ -312,14 +341,15 @@ def build_blueprint(
     domain: str,
     current_state: dict[str, Any],
     demand: dict[str, Any],
-    seo_strategy: dict[str, Any],
     commercial: dict[str, Any],
     website: dict[str, Any],
 ) -> dict[str, Any]:
     cluster_report = dict(demand.get("cluster_report") or {})
     clusters = list(cluster_report.get("clusters") or demand.get("clusters") or [])
-    topic_plan = dict(demand.get("topic_plan") or {})
-    core_topics = list(seo_strategy.get("core_topics") or [])
+    # Phase 7 owns core topics and the priority queue. Reading them here made
+    # the URL tree depend on whether Phase 7 had already run — Phase 9 joins
+    # the strategy queue itself, so nothing is lost by not pre-baking it.
+    core_topics: list[Any] = []
     money = _money_keywords(commercial, demand)
     declared_services = _declared_services(commercial, demand)
 
@@ -351,6 +381,46 @@ def build_blueprint(
             "count": "varies",
         },
         {
+            "type": "Guide",
+            "url_pattern": "/guides/{slug}/",
+            "parent": "Home",
+            "breadcrumb": "Home > Guide",
+            "indexable": True,
+            "count": "varies",
+        },
+        {
+            "type": "Article / blog",
+            "url_pattern": "/blog/{slug}/",
+            "parent": "Home",
+            "breadcrumb": "Home > Blog",
+            "indexable": True,
+            "count": "varies",
+        },
+        {
+            "type": "Location",
+            "url_pattern": "/locations/{place}/",
+            "parent": "Home",
+            "breadcrumb": "Home > Location",
+            "indexable": True,
+            "count": "varies",
+        },
+        {
+            "type": "Comparison",
+            "url_pattern": "/compare/{slug}/",
+            "parent": "Home",
+            "breadcrumb": "Home > Compare",
+            "indexable": True,
+            "count": "varies",
+        },
+        {
+            "type": "Landing",
+            "url_pattern": "/pricing/{slug}/",
+            "parent": "Home",
+            "breadcrumb": "Home > Landing",
+            "indexable": True,
+            "count": "varies",
+        },
+        {
             "type": "Utility",
             "url_pattern": "/{page}/",
             "parent": "Home",
@@ -364,7 +434,7 @@ def build_blueprint(
     cluster_ownership: list[dict[str, Any]] = []
     primary_nav: list[dict[str, Any]] = [{"label": "Home", "url": f"{base}/", "depth": 0}]
 
-    strategy_nodes = _nodes_from_strategy_queue(seo_strategy)
+    strategy_nodes: list[dict[str, Any]] = []
     if strategy_nodes:
         target_url_tree.extend(strategy_nodes)
         for node in strategy_nodes:
@@ -500,6 +570,7 @@ def build_blueprint(
     # One service hierarchy for CDD, live-site, and competitor sources.
     from app.services.service_prioritization import (
         build_client_service_catalog,
+        compact_selected_services,
         competitor_tree_for_architecture,
         ia_nodes_from_competitor_tree,
         merge_competitor_subservices,
@@ -513,8 +584,16 @@ def build_blueprint(
     service_catalog = list(
         demand.get("service_catalog")
         or prioritization.get("service_catalog")
-        or build_client_service_catalog(services=declared_services)
+        or []
     )
+    if not service_catalog:
+        from app.agents.search_demand import _page_target_seeds
+
+        service_catalog = build_client_service_catalog(
+            services=[],
+            website=website,
+            page_seeds=_page_target_seeds(website),
+        )
     competitor_tree = competitor_tree_for_architecture(commercial, demand)
     if competitor_tree:
         service_catalog = merge_competitor_subservices(
@@ -675,6 +754,11 @@ def build_blueprint(
             )
         },
         "page_type_model": page_type_model,
+        "selected_services": compact_selected_services(
+            prioritization,
+            service_catalog=service_catalog,
+            ia_nodes=service_nodes,
+        ),
         "target_url_tree": _normalize_url_tree(target_url_tree),
         "url_convention_rules": url_rules,
         "navigation": {
@@ -706,7 +790,6 @@ async def run_site_architecture_plan(
     primary_url: str,
     domain: str,
     demand: dict[str, Any],
-    seo_strategy: dict[str, Any],
     commercial: dict[str, Any],
     website: dict[str, Any],
     competitive: dict[str, Any] | None = None,
@@ -717,7 +800,7 @@ async def run_site_architecture_plan(
     marketing = marketing or {}
     cluster_report = dict(demand.get("cluster_report") or {})
     clusters = list(cluster_report.get("clusters") or demand.get("clusters") or [])
-    if not clusters and not demand.get("topics") and not seo_strategy.get("core_topics"):
+    if not clusters and not demand.get("topics"):
         return {
             "blocked": True,
             "reason": "Cluster map missing — run Phase 5 Keyword Clustering (and ideally Content Strategy) before Site Architecture.",
@@ -726,7 +809,6 @@ async def run_site_architecture_plan(
 
     competitors = list(
         demand.get("competitors")
-        or seo_strategy.get("competitors")
         or competitive.get("competitors")
         or []
     )
@@ -734,16 +816,17 @@ async def run_site_architecture_plan(
         str(c.get("name") or c.get("domain") or "")
         for c in competitors
         if isinstance(c, dict)
-    ] or list(demand.get("competitor_names") or seo_strategy.get("competitor_names") or [])
+    ] or list(demand.get("competitor_names") or [])
     competitor_domains = list(
-        demand.get("competitor_domains") or seo_strategy.get("competitor_domains") or []
+        demand.get("competitor_domains") or []
     )
     competitor_sites = list(
-        demand.get("competitor_sites") or seo_strategy.get("competitor_sites") or []
+        demand.get("competitor_sites") or []
     )
 
     from app.services.service_prioritization import (
         build_client_service_catalog,
+        compact_selected_services,
         competitor_tree_for_architecture,
         ia_nodes_from_competitor_tree,
         merge_competitor_subservices,
@@ -799,7 +882,6 @@ async def run_site_architecture_plan(
         domain=domain,
         current_state=current,
         demand=demand,
-        seo_strategy=seo_strategy,
         commercial=commercial,
         website=website,
     )
@@ -822,11 +904,11 @@ async def run_site_architecture_plan(
     url_map_report = build_final_url_map(
         cluster_report,
         website=website_for_mapping,
-        content_audit=seo_strategy.get("content_audit") or demand.get("content_audit"),
-        serp_by_keyword=demand.get("serp_by_keyword") or seo_strategy.get("serp_by_keyword") or {},
+        content_audit=demand.get("content_audit"),
+        serp_by_keyword=demand.get("serp_by_keyword") or {},
         commercial=commercial,
         client_domain=domain,
-        pillar_structure=seo_strategy.get("core_topics"),
+        pillar_structure=None,
     )
     blueprint = apply_url_map_to_architecture(blueprint, url_map_report)
     blueprint["url_map_report"] = url_map_report
@@ -855,10 +937,12 @@ async def run_site_architecture_plan(
         or []
     )
     if not service_catalog:
+        from app.agents.search_demand import _page_target_seeds
+
         service_catalog = build_client_service_catalog(
-            services=_declared_services(commercial, demand),
+            services=[],
             website=website,
-            page_seeds=[],
+            page_seeds=_page_target_seeds(website),
         )
     if competitor_service_tree:
         service_catalog = merge_competitor_subservices(
@@ -912,6 +996,11 @@ async def run_site_architecture_plan(
                 by_path[path] = len(merged_tree) - 1
                 existing_paths.add(path)
         blueprint["target_url_tree"] = _normalize_url_tree(merged_tree)
+        blueprint["selected_services"] = compact_selected_services(
+            prioritization,
+            service_catalog=service_catalog,
+            ia_nodes=service_nodes,
+        )
 
     if competitor_service_tree:
         # Retained as a separate response field for consumers that display the
@@ -960,6 +1049,54 @@ async def run_site_architecture_plan(
             node["depth"] = max(1, parent.strip("/").count("/") + 2)
     blueprint["target_url_tree"] = _normalize_url_tree(tree_rows)
 
+    from app.services.sitemap_audit import (
+        apply_known_page_status,
+        build_sitemap_hierarchy,
+        fetch_sitemap_audit,
+        path_key,
+        stamp_page_hierarchy,
+        stamp_target_url_tree,
+    )
+
+    sitemap_skill = load_skill_file("seo-sitemap")
+
+    sitemap_audit = website.get("sitemap_audit") if isinstance(website.get("sitemap_audit"), dict) else None
+    if sitemap_audit is None and isinstance(demand.get("sitemap_audit"), dict):
+        sitemap_audit = demand.get("sitemap_audit")
+    if sitemap_audit is None and primary_url:
+        from app.config import get_settings
+
+        if not get_settings().use_mock_providers:
+            try:
+                sitemap_audit = await fetch_sitemap_audit(primary_url)
+            except Exception:  # noqa: BLE001
+                sitemap_audit = None
+    if isinstance(sitemap_audit, dict) and sitemap_audit.get("status") == "available":
+        known_pages = list(website.get("pages") or [])
+        known_pages.extend(list((website.get("seo_audit") or {}).get("pages") or []))
+        apply_known_page_status(sitemap_audit, known_pages)
+        existing_live = {
+            path_key(str(p.get("url") or p.get("path") or ""))
+            for p in known_pages
+            if isinstance(p, dict)
+        }
+        existing_live.discard("")
+        tree_rows = stamp_target_url_tree(
+            list(blueprint.get("target_url_tree") or []),
+            sitemap_audit,
+            existing_paths=existing_live,
+        )
+        blueprint["target_url_tree"] = tree_rows
+        hierarchy = list(website.get("page_hierarchy") or (website.get("seo_audit") or {}).get("page_hierarchy") or [])
+        if hierarchy:
+            blueprint["page_hierarchy"] = stamp_page_hierarchy(hierarchy, sitemap_audit)
+        blueprint["sitemap_audit"] = sitemap_audit
+        blueprint["sitemap_hierarchy"] = build_sitemap_hierarchy(
+            tree_rows,
+            sitemap_audit,
+            hierarchy_paths={path_key(str(r.get("path") or r.get("url") or "")) for r in hierarchy if isinstance(r, dict)},
+        )
+
     from app.services.phase_pipeline import enrich_phase6_pack
 
     blueprint = enrich_phase6_pack(blueprint)
@@ -976,6 +1113,12 @@ async def run_site_architecture_plan(
     try:
         system = (
             (skill[:6000] if skill else "You are an information architect.")
+            + (
+                "\n\nSitemap skill (audit the fetched sitemap; do not write or publish sitemap XML):\n"
+                + sitemap_skill
+                if sitemap_skill
+                else ""
+            )
             + "\nRead evidence: Google does not count slashes; prefer click depth; no strict silos.\n"
             "Return JSON with keys: executive_summary (string), navigation_notes (string), "
             "extra_depth_fixes (array of {url,action}), competitor_ia_notes (string). "

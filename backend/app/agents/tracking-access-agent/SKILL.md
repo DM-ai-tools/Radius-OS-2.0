@@ -32,7 +32,7 @@ Never write final `tracking_baseline` (System Access + Historical Baseline) unti
 
 ### T1 — Access collection & connection verification (AUTOMATED)
 
-Platforms: CMS, hosting, GSC, GA4, GTM, Google Business, CRM, call-tracking.  
+Platforms: CMS, hosting, GSC, GA4, GTM, CRM, call-tracking.
 OAuth connection test for GA4 / GSC / GTM; emit OAuth card for missing grants. Other platforms stay on the access checklist (`pending_setup`) until wired. Do not block the whole phase on one missing platform.
 
 ### T2 — Automated tracking audit (AUTOMATED)

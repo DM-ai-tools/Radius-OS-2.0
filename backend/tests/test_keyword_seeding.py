@@ -404,3 +404,56 @@ async def test_ahrefs_insufficient_plan_disables_later_explorer_calls(monkeypatc
     assert "ahrefs_insufficient_plan" in errs2
     assert calls["n"] == 1
     ahrefs.reset_keywords_explorer_block()
+
+
+@pytest.mark.asyncio
+async def test_ahrefs_plan_failure_is_rechecked_after_the_window(monkeypatch):
+    from app.config import get_settings
+    from app.integrations import ahrefs, provider_access
+
+    ahrefs.reset_keywords_explorer_block()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "use_mock_providers", False)
+    monkeypatch.setattr(settings, "ahrefs_api_key", "test-key", raising=False)
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(provider_access, "_now", lambda: clock["t"])
+
+    calls = {"n": 0}
+
+    class _Resp:
+        def __init__(self, status, text, payload=None):
+            self.status_code = status
+            self.text = text
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, params=None, headers=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Resp(403, '{ "error":"Insufficient plan" }')
+            return _Resp(200, "{}", {"keywords": [{"keyword": "seo", "volume": 100}]})
+
+    monkeypatch.setattr(ahrefs.httpx, "AsyncClient", lambda timeout=None: _Client())
+
+    rows, errs = await ahrefs.matching_terms("seo")
+    assert "ahrefs_insufficient_plan" in errs
+    assert ahrefs.keywords_explorer_blocked() == "ahrefs_insufficient_plan"
+
+    clock["t"] += provider_access.RECHECK_AFTER[provider_access.PLAN] + 1
+    assert ahrefs.keywords_explorer_blocked() is None
+
+    rows2, errs2 = await ahrefs.matching_terms("seo")
+    assert errs2 == []
+    assert rows2[0]["keyword"] == "seo"
+    assert ahrefs.keywords_explorer_blocked() is None
+    assert calls["n"] == 2
+    ahrefs.reset_keywords_explorer_block()

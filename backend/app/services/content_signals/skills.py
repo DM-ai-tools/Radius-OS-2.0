@@ -36,6 +36,8 @@ SKILL_FOR_PAGE_TYPE: dict[str, str] = {
     "faq": "faq-page",
     "email": "email",
 }
+# Claude SEO competitor-pages skill. Appended beside comparison-post; it does not replace it.
+UPSTREAM_COMPARISON_SKILL = "competitor-pages"
 DEFAULT_SKILL = "seo-blog-post"
 
 
@@ -77,6 +79,10 @@ def collect_skill(
 ) -> SignalResult:
     stem, why = skill_for(page_type, override=override)
     body = load_content_skill(stem)
+    if stem == "comparison-post":
+        upstream = load_content_skill(UPSTREAM_COMPARISON_SKILL)
+        if upstream:
+            body = f"{body.rstrip()}\n\n{upstream}" if body else upstream
     if not body:
         return unavailable(
             "skill",

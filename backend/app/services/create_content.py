@@ -1040,15 +1040,9 @@ def _acronym_candidates(*seeds: Any) -> dict[str, str]:
             bare = tok.replace("-", "").lower()
             if bare in _ACRONYM_SKIP or bare in mapping:
                 continue
-            if not (2 <= len(bare) <= 5 and bare.isalpha()):
-                continue
-            # Length alone cannot tell "AEO" from "rate", and guessing turned
-            # "conversion rate optimisation" into "conversion RATE optimisation".
-            # A real acronym is WRITTEN uppercase in the source; an ordinary word
-            # is not. Known acronyms are already forced above, so a lower-cased
-            # slug like "seo-services" is unaffected by this check.
-            if tok.replace("-", "").isupper():
-                mapping[bare] = bare.upper()
+            # Casing is the evidence. "AEO" is an acronym; "Rate" and "rate" are words.
+            if 2 <= len(tok) <= 5 and tok.isalpha() and tok.isupper():
+                mapping[tok.lower()] = tok
     return mapping
 
 
@@ -1865,6 +1859,103 @@ def _build_markdown(
     }
 
 
+_COMPARISON_EXCERPT_CHARS = 1200
+_COMPARISON_H2_CAP = 12
+COMPARISON_RIVAL_CAP = 3
+NO_COMPARISON_EVIDENCE = "There is no competitor page to compare."
+COMPARISON_DRAFT_FAILED = (
+    "Comparison draft was not written from the rival pages. No fallback prose is used."
+)
+
+
+def comparison_page_usable(page: Any) -> bool:
+    """A rival page can support a matrix when it has a title, an H1, or body text."""
+    title = str(getattr(page, "title", "") or "").strip()
+    h1s = getattr(page, "h1s", None) or []
+    body = str(getattr(page, "body_text", "") or "").strip()
+    return bool(title or any(str(h).strip() for h in h1s) or body)
+
+
+def format_comparison_evidence(client_name: str, pages: list[Any]) -> str:
+    """Prompt block of rival facts. Blank cells stay blank; bodies are capped."""
+    client = client_name or "the client"
+    lines = [
+        "COMPARISON EVIDENCE",
+        f"The client option is {client}. Disclose that plainly. "
+        "Score the client only from the positioning, products, differentiation, "
+        "and required coverage already in this prompt.",
+        "Rival pages below are the only facts you may use for the other columns. "
+        "Leave a cell blank when a fact is absent. Do not invent prices, features, or scores.",
+        "Open with a verdict in the first 100 words. State the criteria, then apply "
+        "the same criteria to the client and each rival. Name rivals in the body and "
+        "the side-by-side section. Keep the H1 as the brief title — do not put rival "
+        "brand names in the H1.",
+    ]
+    for page in pages:
+        name = str(getattr(page, "name", "") or "").strip() or "Rival"
+        domain = str(getattr(page, "domain", "") or "").strip() or "n/a"
+        source = str(getattr(page, "source", "") or "").strip() or "unknown"
+        url = str(getattr(page, "url", "") or "").strip() or "n/a"
+        title = str(getattr(page, "title", "") or "").strip() or "(not retrieved)"
+        h1s = [str(h).strip() for h in (getattr(page, "h1s", None) or []) if str(h).strip()]
+        h2s = [str(h).strip() for h in (getattr(page, "h2s", None) or []) if str(h).strip()]
+        lines.append(f"- {name} ({domain})")
+        lines.append(f"  Source: {source}")
+        lines.append(f"  URL: {url}")
+        lines.append(f"  Title: {title}")
+        lines.append(f"  H1: {'; '.join(h1s) if h1s else '(not retrieved)'}")
+        lines.append(
+            f"  H2: {'; '.join(h2s[:_COMPARISON_H2_CAP]) if h2s else '(not retrieved)'}"
+        )
+        depth = bool(getattr(page, "depth_available", False))
+        body = str(getattr(page, "body_text", "") or "").strip()
+        if depth and body:
+            excerpt = body[:_COMPARISON_EXCERPT_CHARS]
+            lines.append(f"  Body excerpt: {excerpt}")
+        else:
+            lines.append("  Body text was not retrieved.")
+    return "\n".join(lines)
+
+
+def comparison_evidence_record(pages: list[Any]) -> dict[str, Any]:
+    """Reviewer record of what was compared. Full rival bodies are not stored."""
+    rivals: list[dict[str, Any]] = []
+    for page in pages:
+        title = str(getattr(page, "title", "") or "").strip()
+        h1s = [str(h).strip() for h in (getattr(page, "h1s", None) or []) if str(h).strip()]
+        body = str(getattr(page, "body_text", "") or "").strip()
+        depth = bool(getattr(page, "depth_available", False)) and bool(body)
+        missing: list[str] = []
+        if not title:
+            missing.append("title")
+        if not h1s:
+            missing.append("h1")
+        if not depth:
+            missing.append("body")
+        rivals.append(
+            {
+                "name": str(getattr(page, "name", "") or "").strip(),
+                "domain": str(getattr(page, "domain", "") or "").strip(),
+                "url": str(getattr(page, "url", "") or "").strip(),
+                "source": str(getattr(page, "source", "") or "").strip(),
+                "retrieved": comparison_page_usable(page),
+                "missing": missing,
+            }
+        )
+    return {"rivals": rivals}
+
+
+def _comparison_refusal(brief: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "refused": True,
+        "reason": reason,
+        "route_to": None,
+        "keyword": brief.get("keyword"),
+        "url": brief.get("url"),
+    }
+
+
 async def _llm_draft_article(
     brief: dict[str, Any],
     client_name: str,
@@ -1876,6 +1967,7 @@ async def _llm_draft_article(
     related: list[str] | None = None,
     outline: list[dict[str, Any]] | None = None,
     content_context: dict[str, Any] | None = None,
+    comparison_block: str | None = None,
 ) -> dict[str, Any] | None:
     """Full ready-to-publish page for the resolved page type."""
     skill = load_skill_file("create-content")
@@ -1895,7 +1987,8 @@ async def _llm_draft_article(
             if payload.get("available"):
                 body = str((payload.get("data") or {}).get("instructions") or "")
                 if body:
-                    extras.append(body[:2500])
+                    cap = len(body) if name == "skill" and "name: seo-competitor-pages" in body else 2500
+                    extras.append(body[:cap])
         rules = business_rules_block(content_context)
         if rules:
             extras.append(rules)
@@ -1962,6 +2055,12 @@ async def _llm_draft_article(
     if signal_block:
         # Signals last so they qualify the house rules rather than being buried.
         system = system + "\n\n" + signal_block
+    if page_type == "comparison":
+        from app.services.content_signals.skills import load_content_skill
+
+        upstream = load_content_skill("competitor-pages")
+        if upstream and upstream not in system:
+            system = system + "\n\n" + upstream
     image_note = ""
     if image_specs:
         image_note = (
@@ -1993,6 +2092,7 @@ async def _llm_draft_article(
         f"DO NOT: {playbook['not']}\n"
         f"VOICE: {playbook['voice']}\n"
         f"LENGTH: {playbook['length']}\n"
+        + (f"{comparison_block.strip()}\n" if comparison_block and comparison_block.strip() else "")
         + (f"ANGLE ({brief.get('angle')}): {angle_line}\n" if angle_line else "")
         + f"ASSIGNED PRIMARY KEYWORD: “{kw}”. Write the whole page for this query and this page type.\n"
         f"{related_block}"
@@ -2094,6 +2194,7 @@ async def write_one_page(
     enhance_brief: bool = True,
     content_context: dict[str, Any] | None = None,
     google_policy: dict[str, Any] | None = None,
+    comparison_pages: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Write a single page. Never call in a loop to fill a calendar unattended.
 
@@ -2125,6 +2226,17 @@ async def write_one_page(
             "keyword": (brief or {}).get("keyword") if isinstance(brief, dict) else None,
             "url": (brief or {}).get("url") if isinstance(brief, dict) else None,
         }
+
+    page_type = resolve_page_type(brief if isinstance(brief, dict) else None)
+    comparison_block = ""
+    comparison_record: dict[str, Any] | None = None
+    if page_type == "comparison":
+        pages = list(comparison_pages or [])
+        usable = [page for page in pages if comparison_page_usable(page)]
+        if not usable:
+            return _comparison_refusal(brief, NO_COMPARISON_EVIDENCE)
+        comparison_block = format_comparison_evidence(client_name, usable)
+        comparison_record = comparison_evidence_record(pages)
 
     _primary, related = related_keywords(
         brief,
@@ -2158,7 +2270,10 @@ async def write_one_page(
             related=related,
             outline=outline,
             content_context=content_context,
+            comparison_block=comparison_block or None,
         )
+    if page_type == "comparison" and not drafted:
+        return _comparison_refusal(brief, COMPARISON_DRAFT_FAILED)
     draft = _build_markdown(
         brief=brief,
         client_name=client_name,
@@ -2176,6 +2291,8 @@ async def write_one_page(
     )
     draft["ok"] = True
     draft["refused"] = False
+    if comparison_record is not None:
+        draft["comparison_evidence"] = comparison_record
     if content_context:
         # Saved with the piece so the same inputs can be replayed and compared.
         draft["content_context"] = content_context

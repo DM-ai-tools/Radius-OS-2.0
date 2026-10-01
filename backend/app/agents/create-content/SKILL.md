@@ -104,6 +104,14 @@ Do not fill these with plausible-sounding invention. Same for statistics, quotes
 - **Expertise nobody has (esp. YMYL)** → refuse
 - **URL already exists and performs** → route to `content-audit`
 
+## Site preview (client design)
+
+After the draft is written, **Preview on client site** measures design from the
+**previous page on the internal-linking / publishing plan** (hub parent, prior
+`publishing_order` title, or previous roadmap rank). Claude rearranges the draft
+body into that page's section bands; colors and fonts stay measured from the live
+site (Context.dev / CSS) and are never invented.
+
 ## Handoffs
 
 | Concern | Owner |

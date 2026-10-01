@@ -68,6 +68,54 @@ async def cache_set(key: str, value: Any, ttl_seconds: int) -> None:
         log.warning("cache_set_failed", key=key, error=str(exc))
 
 
+async def cache_get_many(keys: list[str]) -> dict[str, Any]:
+    """Batch read. One MGET instead of one GET (and one thread hop) per key.
+
+    Callers that look up hundreds of keys — the keyword validation gate — would
+    otherwise pay a thread round-trip each. Missing and undecodable values are
+    simply absent from the result.
+    """
+    if not keys:
+        return {}
+    r = await get_redis()
+    if not r:
+        return {}
+    try:
+        raws = await asyncio.to_thread(r.mget, list(keys))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cache_get_many_failed", count=len(keys), error=str(exc))
+        return {}
+    out: dict[str, Any] = {}
+    for key, raw in zip(keys, raws or []):
+        if not raw:
+            continue
+        try:
+            out[key] = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def cache_set_many(values: dict[str, Any], ttl_seconds: int) -> None:
+    """Batch write via a single pipeline round-trip."""
+    if not values:
+        return
+    r = await get_redis()
+    if not r:
+        return
+
+    def _write() -> None:
+        pipe = r.pipeline()
+        for key, value in values.items():
+            pipe.setex(key, ttl_seconds, json.dumps(value))
+        pipe.execute()
+
+    try:
+        await asyncio.to_thread(_write)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cache_set_many_failed", count=len(values), error=str(exc))
+
+
 async def cache_delete(key: str) -> None:
     r = await get_redis()
     if not r:
@@ -78,9 +126,17 @@ async def cache_delete(key: str) -> None:
         log.warning("cache_delete_failed", key=key, error=str(exc))
 
 
-def competitor_cache_key(client_id: str) -> str:
+def competitor_cache_key(client_id: str, *, fingerprint: str | None = None) -> str:
+    """Cache key for a competitor scan.
+
+    The fingerprint carries the CDD inputs the scan depends on (industry,
+    services). Without it a 14-day cached scan survives a CDD update that
+    changes the client's industry — the cache would keep serving competitors
+    from the old vertical. Including it makes the cache self-invalidating.
+    """
     # v5 — industry-dynamic competitor discovery (any vertical, not agency-default)
-    return f"searchfit:competitor_scan:v5:{client_id}"
+    suffix = f":{fingerprint}" if fingerprint else ""
+    return f"searchfit:competitor_scan:v5:{client_id}{suffix}"
 
 
 def competitor_cache_ttl() -> int:

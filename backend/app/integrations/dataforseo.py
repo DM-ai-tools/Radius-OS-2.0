@@ -227,6 +227,16 @@ async def _post(path: str, payload: list[dict[str, Any]]) -> dict[str, Any] | No
     auth = _auth_header()
     if not auth:
         return None
+    if await _over_daily_budget():
+        await record_api_call(
+            provider="dataforseo",
+            operation=path,
+            status="error",
+            error_detail="dataforseo_daily_budget_exceeded",
+            estimated_cost_usd=0,
+            request_meta={"tasks": len(payload), "blocked": True},
+        )
+        return None
     url = f"{api_base()}{path}"
     delays = (0.4, 1.2)
     last_body: dict[str, Any] | None = None
@@ -302,6 +312,35 @@ async def _post(path: str, payload: list[dict[str, Any]]) -> dict[str, Any] | No
             return None
         await asyncio.sleep(delays[attempt])
     return None
+
+
+# Assumed cost of the next Labs/SERP call. The real price arrives only after
+# the response, so the cap stops when today's spend plus this reserve would
+# cross the configured budget.
+_BUDGET_RESERVE_USD = 0.02
+
+
+async def _over_daily_budget() -> bool:
+    """True when another DataForSEO call would cross today's configured cap.
+
+    A cap of 0 disables the check. A meter that cannot be read does not block.
+    """
+    from app.services.api_meter import provider_spend_today_usd
+
+    cap = float(get_settings().dataforseo_daily_budget_usd or 0)
+    if cap <= 0:
+        return False
+    spent = await provider_spend_today_usd("dataforseo")
+    if spent is None:
+        return False
+    if spent + _BUDGET_RESERVE_USD >= cap:
+        log.warning(
+            "dataforseo_budget_blocked",
+            spent_usd=round(spent, 4),
+            cap_usd=cap,
+        )
+        return True
+    return False
 
 
 def _response_cost(body: dict[str, Any] | None) -> float | None:
@@ -1246,3 +1285,183 @@ async def keywords_for_site(
         errors.append("dataforseo_keywords_for_site_failed")
         return [], errors
     return _keyword_rows(body, endpoint="keywords_for_site"), errors
+
+
+def _norm_keyword(value: Any) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def pick_ranking_url(searches: list[dict[str, Any]], keyword: str) -> dict[str, Any] | None:
+    """The top-search row whose keyword is this query and that has a ranking URL.
+
+    A near miss is not a match. No URL means the row cannot point a fetch.
+    """
+    want = _norm_keyword(keyword)
+    if not want:
+        return None
+    for row in searches:
+        if not isinstance(row, dict):
+            continue
+        if _norm_keyword(row.get("keyword")) != want:
+            continue
+        url = str(row.get("url") or "").strip()
+        if url:
+            return row
+    return None
+
+
+async def relevant_pages(
+    domain: str,
+    *,
+    location_code: int = DEFAULT_LOCATION,
+    language_code: str = DEFAULT_LANGUAGE,
+    limit: int = 10,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Pages on a domain that rank, with organic traffic when DataForSEO measured it."""
+    errors: list[str] = []
+    target = normalize_target(domain)
+    if not target:
+        return [], errors
+    if not _auth_header():
+        errors.append("dataforseo_unavailable")
+        return [], errors
+    body = await _post(
+        "/dataforseo_labs/google/relevant_pages/live",
+        [
+            {
+                "target": target,
+                "location_code": coerce_labs_location(location_code),
+                "language_code": language_code,
+                "limit": max(1, min(int(limit), MAX_LABS_LIMIT)),
+            }
+        ],
+    )
+    if body is None:
+        errors.append("dataforseo_relevant_pages_failed")
+        return [], errors
+    out: list[dict[str, Any]] = []
+    for item in _task_items(body):
+        url = str(item.get("page_address") or "").strip()
+        if not url:
+            continue
+        organic = ((item.get("metrics") or {}).get("organic") or {}) if isinstance(item.get("metrics"), dict) else {}
+        if not isinstance(organic, dict):
+            organic = {}
+        etv = _float_or_none(organic.get("etv"))
+        out.append(
+            {
+                "url": url,
+                "organic_traffic": int(round(etv)) if etv is not None else None,
+                "keyword_count": _int_or_none(organic.get("count")),
+                "source": "dataforseo",
+            }
+        )
+    return out, errors
+
+
+async def top_searches(
+    domain: str,
+    *,
+    location_code: int = DEFAULT_LOCATION,
+    language_code: str = DEFAULT_LANGUAGE,
+    limit: int = 20,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Queries a domain ranks for, including the URL in that result when present."""
+    errors: list[str] = []
+    target = normalize_target(domain)
+    if not target:
+        return [], errors
+    if not _auth_header():
+        errors.append("dataforseo_unavailable")
+        return [], errors
+    body = await _post(
+        "/dataforseo_labs/google/top_searches/live",
+        [
+            {
+                "target": target,
+                "location_code": coerce_labs_location(location_code),
+                "language_code": language_code,
+                "limit": max(1, min(int(limit), MAX_LABS_LIMIT)),
+            }
+        ],
+    )
+    if body is None:
+        errors.append("dataforseo_top_searches_failed")
+        return [], errors
+    out: list[dict[str, Any]] = []
+    for item in _task_items(body):
+        kw_data = item.get("keyword_data") if isinstance(item.get("keyword_data"), dict) else item
+        kw = str(kw_data.get("keyword") or item.get("keyword") or "").strip()
+        if not kw:
+            continue
+        info = kw_data.get("keyword_info") if isinstance(kw_data.get("keyword_info"), dict) else {}
+        serp = item.get("ranked_serp_element") if isinstance(item.get("ranked_serp_element"), dict) else {}
+        serp_item = serp.get("serp_item") if isinstance(serp.get("serp_item"), dict) else {}
+        out.append(
+            {
+                "keyword": kw,
+                "url": str(serp_item.get("url") or serp_item.get("relative_url") or "").strip() or None,
+                "position": _int_or_none(serp_item.get("rank_absolute") or serp_item.get("rank_group")),
+                "volume": _int_or_none(info.get("search_volume")),
+                "domain": target,
+                "source": "dataforseo",
+            }
+        )
+    return out, errors
+
+
+async def bulk_traffic_estimation(
+    domains: list[str],
+    *,
+    location_code: int = DEFAULT_LOCATION,
+    language_code: str = DEFAULT_LANGUAGE,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Estimated organic traffic for each domain. Missing targets are omitted."""
+    errors: list[str] = []
+    targets = []
+    seen: set[str] = set()
+    for raw in domains:
+        target = normalize_target(raw)
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        targets.append(target)
+    if not targets:
+        return [], errors
+    if not _auth_header():
+        errors.append("dataforseo_unavailable")
+        return [], errors
+    body = await _post(
+        "/dataforseo_labs/google/bulk_traffic_estimation/live",
+        [
+            {
+                "targets": targets[:1000],
+                "location_code": coerce_labs_location(location_code),
+                "language_code": language_code,
+                "item_types": ["organic"],
+            }
+        ],
+    )
+    if body is None:
+        errors.append("dataforseo_traffic_failed")
+        return [], errors
+    out: list[dict[str, Any]] = []
+    for item in _task_items(body):
+        target = normalize_target(str(item.get("target") or ""))
+        if not target:
+            continue
+        metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+        organic = metrics.get("organic") if isinstance(metrics.get("organic"), dict) else {}
+        etv = _float_or_none(organic.get("etv"))
+        cost = _float_or_none(organic.get("estimated_paid_traffic_cost"))
+        if etv is None and cost is None:
+            continue
+        out.append(
+            {
+                "domain": target,
+                "organic_traffic": int(round(etv)) if etv is not None else None,
+                "organic_traffic_cost": cost,
+                "source": "dataforseo",
+            }
+        )
+    return out, errors

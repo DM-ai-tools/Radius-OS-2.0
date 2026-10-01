@@ -306,6 +306,17 @@ async def _ensure_fixture(db, slug: str, args) -> tuple[Client, ChatSession, Use
 # --- main -------------------------------------------------------------------
 
 
+async def _reload_profile(db, client_id):
+    """Fetch the profile fresh when the tracked instance cannot be refreshed."""
+    from app.models import ClientDigitalProfile
+
+    return (
+        await db.execute(
+            select(ClientDigitalProfile).where(ClientDigitalProfile.client_id == client_id)
+        )
+    ).scalar_one_or_none()
+
+
 async def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--fixture", required=True)
@@ -353,6 +364,7 @@ async def main() -> int:
                 select(ClientDigitalProfile).where(ClientDigitalProfile.client_id == client.id)
             )).scalar_one()
             before_status = getattr(profile, status_attr, "not_started")
+            client_uuid = client.id
             c0, k0 = await _cost_snapshot(db)
             t0 = time.monotonic()
             events, error = [], None
@@ -412,8 +424,24 @@ async def main() -> int:
                     await db.refresh(profile)
                     approved = True
                 except Exception as exc:  # noqa: BLE001
-                    approved = f"APPROVE FAILED: {exc}"
+                    approved = f"APPROVE FAILED: {type(exc).__name__}: {exc}"
+                    traceback.print_exc()
                     await db.rollback()
+            # rollback() and commit() both expire the instance. Reading an
+            # attribute without refreshing first triggers a SYNC lazy load and
+            # raises MissingGreenlet, which masked the real approve failure.
+            # A rollback above expires BOTH instances; refresh them before any
+            # attribute read, or the next getattr raises MissingGreenlet and
+            # masks whatever actually failed.
+            client_id = client_uuid
+            try:
+                await db.refresh(profile)
+            except Exception:  # noqa: BLE001
+                profile = await _reload_profile(db, client_id)
+            try:
+                await db.refresh(client)
+            except Exception:  # noqa: BLE001
+                client = await db.get(Client, client_id)
             after_approve = getattr(profile, status_attr, "not_started")
 
             c1, k1 = await _cost_snapshot(db)
@@ -465,7 +493,7 @@ async def main() -> int:
                 "blocked": any(e.get("type") == "error" or "blocked" in str(e.get("content", "")).lower()
                                for e in (events or [])),
                 "egress_violations": sorted(set(egress_violations)) if num <= 2 else None,
-                "findings_ledger": await _findings(db, client.id, agent_key),
+                "findings_ledger": await _findings(db, client_uuid, agent_key),
                 "summaries": summaries,
             }
             (out / f"phase{num:02d}_{agent_key}.json").write_text(

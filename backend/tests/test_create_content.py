@@ -8,6 +8,9 @@ from app.services.content_strategy import build_priority_queue
 from app.services.create_content import (
     ANGLE_GUIDANCE,
     _is_instructional,
+    _normalize_acronyms,
+    _place_phrase,
+    _short_audience,
     angle_guidance,
     collect_image_specs,
     draft_gate,
@@ -95,7 +98,7 @@ async def test_write_one_page_includes_review_queue():
     assert "share of search" in md
     assert "**cta:**" not in md
     assert "people who searched" not in md
-    assert out.get("page_type") == "article"
+    assert out.get("page_type") == "blog"
 
 
 def test_strategy_queue_includes_image_suggestions():
@@ -116,6 +119,16 @@ def test_strategy_queue_includes_image_suggestions():
         domain="acme.example",
         industry="SEO",
         location="Melbourne",
+        topic_plan={
+            "topic_ideas": [
+                {
+                    "title": "Local SEO for Melbourne",
+                    "keyword": "local seo",
+                    "intent": "commercial",
+                    "opportunity_score": 70,
+                }
+            ]
+        },
     )
     assert q
     suggestions = q[0].get("image_suggestions") or []
@@ -288,12 +301,13 @@ async def test_write_one_page_does_not_stamp_placeholders_on_every_section():
     md = out.get("markdown") or ""
     assert "briefed outcome" not in md.lower()
     assert "cover this section" not in md.lower()
+    assert "depends on the situation behind" not in md.lower()
     assert md.lower().count("[verify]") == 0
-    assert md.lower().count("[author input required") == 0
+    # Unanswered FAQ becomes an editor placeholder — not a stub answer.
     assert "What is share of search?" in md
+    assert "[AUTHOR INPUT REQUIRED — write a direct" in md
     assert "[VERIFY] — answer only from verified knowledge" not in md
     assert "Named reviewer" in md
-    assert "First-hand placeholders: none" in md
 
 
 def test_resolve_page_type_prefers_ia_and_url():
@@ -310,6 +324,10 @@ def test_resolve_page_type_prefers_ia_and_url():
     )
     assert resolve_page_type({"keyword": "crm vs spreadsheets", "url": "/compare/crm-vs-spreadsheets"}) == "comparison"
     assert resolve_page_type({"keyword": "how to measure seo", "url": "/guides/measure-seo"}) == "guide"
+    assert resolve_page_type({"keyword": "what is seo", "intent": "informational"}) == "guide"
+    assert resolve_page_type({"keyword": "seo pricing", "intent": "transactional"}) == "landing"
+    assert resolve_page_type({"keyword": "best seo tools", "intent": "commercial", "content_type": "listicle"}) == "listicle"
+    assert resolve_page_type({"keyword": "random topic"}) == "page"
 
 
 @pytest.mark.asyncio
@@ -534,3 +552,180 @@ def test_llm_figure_slots_are_not_kept_beside_generated_images():
     assert md.count("/media/drafts/hero.png") == 1
     assert md.count("/media/drafts/diagram.png") == 1
     assert "[FIGURE" not in md
+
+
+@pytest.mark.asyncio
+async def test_draft_does_not_leak_writer_instructions_or_persona_dump():
+    out = await write_one_page(
+        brief=_ready_brief(
+            keyword="aeo",
+            title="Aeo With Click Trends",
+            url="/aeo/",
+            content_type="service",
+            search_intent="commercial",
+            audience=(
+                "Primary: Australian founders, owners, directors of service-based businesses "
+                "aged 30–55 with $1M–$20M AUD annual revenue, an email list of 1,000+ contacts.."
+            ),
+            preflight={
+                "url": "/aeo/",
+                "parent": "/",
+                "page_type": "service",
+                "author": "Jane Strategist",
+                "author_standing": "AEO practitioner",
+                "blockers": [],
+            },
+            outline=[
+                {"title": "Aeo With Click Trends", "notes": ["Named steps from first call to handover"]},
+                {"title": "What is included", "notes": ["Deliverables, scope, what is not included"]},
+            ],
+            faq=[{"q": "What does AEO mean?"}],
+            differentiation="Hands-on AEO for Australian SMBs — no lock-in contracts.",
+        ),
+        client_name="Click Trends",
+        use_llm=False,
+        location="Australia-wide",
+        marketing={
+            "geographic_focus": "Australia-wide",
+            "positioning": "behaviour-based email journeys, segmentation, deliverability",
+            "products_services": ["Email Marketing", "AEO"],
+            "target_audience": (
+                "Primary: Australian founders aged 30–55 with $1M–$20M AUD annual revenue"
+            ),
+        },
+    )
+    md = out.get("markdown") or ""
+    low = md.lower()
+    assert "skip generic pitches" not in low
+    assert "ranking pages often lead" not in low
+    assert "related terms used in support" not in low
+    assert "depends on the situation behind" not in low
+    assert "in australia-wide" not in low
+    assert "across australia" in low or "australia" in low
+    assert "aged 30" not in low
+    assert "$1m" not in low
+    assert "email list of 1,000" not in low
+    assert "email journeys" not in low
+    assert "AEO" in md
+    assert "Aeo" not in md.replace("AEO", "")
+    # Duplicate H1-as-H2 retitled
+    assert md.count("## AEO With Click Trends") == 0 or md.count("# AEO With Click Trends") >= 1
+
+
+def test_short_audience_and_place_helpers():
+    assert "aged" not in _short_audience(
+        "Primary: Australian founders, owners aged 30–55 with $1M revenue"
+    ).lower()
+    assert _place_phrase("Australia-wide") == " across Australia"
+    assert _place_phrase("US-wide") == " across the US"
+    assert _place_phrase("Chicago") == " in Chicago"
+    assert _place_phrase("nationwide") == " nationwide"
+    assert _normalize_acronyms("Aeo and seo", "aeo") == "AEO and SEO"
+    assert _normalize_acronyms("Hvac repair tips", "hvac repair") == "HVAC repair tips"
+    assert _normalize_acronyms("Saas onboarding", "saas onboarding") == "SaaS onboarding"
+    assert _short_audience("", industry="dental practice") == "dental practice buyers and decision-makers"
+    assert _short_audience("") == "business buyers and decision-makers"
+
+
+@pytest.mark.asyncio
+async def test_draft_is_topic_agnostic_for_hvac_and_saas():
+    """Same anti-leak / scoping rules must work outside SEO/AEO verticals."""
+    hvac = await write_one_page(
+        brief=_ready_brief(
+            keyword="hvac maintenance",
+            title="Hvac Maintenance",
+            url="/services/hvac-maintenance/",
+            content_type="service",
+            search_intent="commercial",
+            audience="Facility managers aged 35–55 with $2M budgets",
+            preflight={
+                "url": "/services/hvac-maintenance/",
+                "parent": "/services/",
+                "page_type": "service",
+                "author": "Alex Engineer",
+                "author_standing": "HVAC technician",
+                "blockers": [],
+            },
+            outline=[
+                {"title": "Hvac Maintenance", "notes": ["Named inspection steps"]},
+                {"title": "What is included", "notes": ["Filters, coils, safety checks"]},
+            ],
+            differentiation="Same-day HVAC diagnostics with named parts warranty — no retainer lock-in.",
+        ),
+        client_name="CoolAir Pros",
+        use_llm=False,
+        location="Texas-wide",
+        industry="HVAC",
+        marketing={
+            "geographic_focus": "Texas-wide",
+            "positioning": "enterprise SaaS analytics dashboards",
+            "products_services": ["SaaS Analytics", "HVAC Maintenance"],
+            "target_audience": "Facility managers aged 35–55 with $2M budgets",
+        },
+    )
+    hvac_md = hvac.get("markdown") or ""
+    hvac_low = hvac_md.lower()
+    assert "HVAC" in hvac_md
+    assert "Hvac" not in hvac_md.replace("HVAC", "")
+    assert "in texas-wide" not in hvac_low
+    assert "across texas" in hvac_low
+    assert "aged 35" not in hvac_low
+    assert "saas analytics" not in hvac_low
+    assert "hvac maintenance" in hvac_low
+
+    saas = await write_one_page(
+        brief=_ready_brief(
+            keyword="saas onboarding",
+            title="Saas Onboarding",
+            url="/blog/saas-onboarding/",
+            content_type="article",
+            search_intent="informational",
+            audience="Product managers",
+            preflight={
+                "url": "/blog/saas-onboarding/",
+                "parent": "/blog/",
+                "page_type": "article",
+                "author": "Sam PM",
+                "author_standing": "SaaS onboarding lead",
+                "blockers": [],
+            },
+            outline=[
+                {"title": "Activation checklist", "notes": ["Time-to-value steps"]},
+            ],
+            differentiation="Time-to-value playbooks from live SaaS cohorts with named activation metrics.",
+        ),
+        client_name="LaunchPad",
+        use_llm=False,
+        location="nationwide",
+        industry="SaaS",
+        marketing={
+            "geographic_focus": "nationwide",
+            "products_services": ["SaaS Onboarding", "Roof Repair"],
+        },
+    )
+    saas_md = saas.get("markdown") or ""
+    assert "SaaS" in saas_md
+    assert "Saas" not in saas_md.replace("SaaS", "")
+    assert "roof repair" not in saas_md.lower()
+
+
+def test_image_specs_use_human_caption_not_prompt():
+    specs = collect_image_specs(
+        _ready_brief(keyword="aeo", title="AEO"),
+        client_name="Click Trends",
+        industry="SEO",
+    )
+    assert specs
+    for s in specs:
+        assert not str(s.get("alt") or "").lower().startswith("hero:")
+        assert "photorealistic" not in str(s.get("caption") or "").lower()
+        assert s.get("prompt")  # kept for generation only
+        assert s.get("caption") != s.get("prompt")
+
+    hvac_specs = collect_image_specs(
+        _ready_brief(keyword="hvac repair", title="HVAC Repair"),
+        client_name="CoolAir",
+        industry="HVAC",
+    )
+    assert hvac_specs
+    assert any("HVAC" in str(s.get("alt") or "") for s in hvac_specs)

@@ -103,6 +103,9 @@ class Settings(BaseSettings):
     dataforseo_language_code: str = "en"
     # sandbox.dataforseo.com for dev and the opt-in integration test.
     dataforseo_sandbox: bool = False
+    # Stop further DataForSEO calls once today's recorded spend plus one call
+    # would reach this many USD. 0 disables the cap.
+    dataforseo_daily_budget_usd: float = 0.0
     # Expansion pushes this floor to Labs via filters. Default 50.
     keyword_expand_min_volume: int = 10
     # related_keywords depth is 0–4. Default 1 (the seed plus one hop).
@@ -110,12 +113,14 @@ class Settings(BaseSettings):
     # Ads volume vs clickstream volume. Flag when the larger is more than this
     # many times the smaller. Both numbers still come from DataForSEO.
     volume_discrepancy_ratio: float = 2.0
-    # SERP-overlap cluster refinement. Priced per keyword (one request each),
-    # so it runs over the head terms only; the tail keeps token clustering.
+    # SERP-overlap cluster refinement. Live SERP is one paid HTTP call per
+    # keyword (DataForSEO does not batch live tasks), so this runs over the
+    # head terms only; the tail keeps token clustering. 40 head terms at
+    # concurrency 10 is enough overlap signal without a multi-minute stall.
     serp_clustering_enabled: bool = True
-    serp_clustering_head_terms: int = 100
+    serp_clustering_head_terms: int = 40
     serp_clustering_min_shared: int = 4
-    serp_clustering_concurrency: int = 5
+    serp_clustering_concurrency: int = 10
     moz_api_key: str = ""
     # Ahrefs Site Audit (Phase 7) — project resolved by URL when unset
     ahrefs_site_audit_project_id: int | None = None

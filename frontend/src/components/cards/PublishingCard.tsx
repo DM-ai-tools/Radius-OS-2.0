@@ -1,10 +1,12 @@
 import { WordPressStatus } from "../../api";
 import { PresentableValue } from "./PresentableValue";
+import FocusBox from "./FocusBox";
+import { useStageFocus } from "../../lib/stageFocus";
 
 type Props = {
   payload: Record<string, unknown>;
   canAct: boolean;
-  onAction: (action: string) => void;
+  onAction: (action: string, edits?: Record<string, unknown>) => void;
   /** Live status, fetched by ChatPage — not the last-run snapshot in the payload. */
   wordpressStatus?: WordPressStatus | null;
   onConnectWordPress?: () => void;
@@ -24,6 +26,7 @@ export default function PublishingCard({
   onConnectWordPress,
   onDisconnectWordPress,
 }: Props) {
+  const focus = useStageFocus(payload);
   const queue = asRows(payload.publish_queue);
   const checklist = Array.isArray(payload.publish_checklist)
     ? (payload.publish_checklist as string[])
@@ -80,6 +83,8 @@ export default function PublishingCard({
           <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+                <th style={{ padding: "6px 8px" }}>Focus</th>
+                <th style={{ padding: "6px 8px" }}>Work</th>
                 <th style={{ padding: "6px 8px" }}>URL</th>
                 <th style={{ padding: "6px 8px" }}>Title</th>
                 <th style={{ padding: "6px 8px" }}>Keyword</th>
@@ -88,7 +93,13 @@ export default function PublishingCard({
             </thead>
             <tbody>
               {queue.slice(0, 25).map((q, i) => (
-                <tr key={`${String(q.url)}-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
+                <tr key={`${String(q.url)}-${i}`} style={{ borderBottom: "1px solid var(--line)", opacity: focus.focused(q) ? 1 : 0.45 }}>
+                  <td style={{ padding: "6px 8px" }}>
+                    <FocusBox row={q} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />
+                  </td>
+                  <td style={{ padding: "6px 8px" }}>
+                    {String(q.work_label || q.page_action || "—")}
+                  </td>
                   <td style={{ padding: "6px 8px", fontSize: 11 }}>{String(q.url || "—")}</td>
                   <td style={{ padding: "6px 8px", fontWeight: 600 }}>{String(q.title || "—")}</td>
                   <td style={{ padding: "6px 8px" }}>{String(q.keyword || "—")}</td>
@@ -155,7 +166,8 @@ export default function PublishingCard({
           <h4 style={{ marginBottom: 8 }}>QA checklist</h4>
           <ul className="missing-list">
             {qa.map((q, i) => (
-              <li key={i}>
+              <li key={i} style={{ opacity: focus.focused(q) ? 1 : 0.45 }}>
+                <FocusBox row={q} focused={focus.focused} onToggle={focus.toggle} disabled={!canAct} />{" "}
                 {String(q.item || q.check || "—")}
                 {q.status ? (
                   <span style={{ color: "var(--muted)" }}> — {String(q.status)}</span>
@@ -168,7 +180,7 @@ export default function PublishingCard({
 
       {canAct && (
         <div className="card-actions">
-          <button type="button" className="btn btn-primary" onClick={() => onAction("approve")}>
+          <button type="button" className="btn btn-primary" onClick={() => onAction("approve", focus.edits)}>
             Approve publishing package
           </button>
           <button type="button" className="btn btn-ghost" onClick={() => onAction("reject")}>

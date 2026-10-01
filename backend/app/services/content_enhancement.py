@@ -45,6 +45,8 @@ _ACRONYMS = frozenset(
         "cta",
         "url",
         "cms",
+        "aeo",
+        "geo",
     }
 )
 _ANGLE_DIFF = {

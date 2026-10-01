@@ -76,6 +76,15 @@ Every page resolves to exactly one type: Home, Category/hub, Spoke, Service/prod
 
 See `references/url-conventions.md`. Subfolders over subdomains (ops call). One page = one intent = one URL. Don't restructure for slash count.
 
+Read `sitemap_hierarchy` on the blueprint when it is present. Each node keeps the parent, depth, and slug this skill assigned. The sitemap verdict only says whether the XML agrees:
+
+- `in_sitemap` — the URL is listed
+- `sitemap_gap` — an existing page is absent from the XML
+- `planned_only` — a new IA URL is correctly absent
+- `unassigned` — a sitemap URL matches no tree node and no hierarchy row
+
+Do not move a page or invent a redirect because of that verdict. Publishing or fixing the XML file stays with Technical SEO.
+
 ### Step 3b — Map clusters to live URLs (before inventing new paths)
 
 Run `url_mapping.build_final_url_map()` for every keyword cluster:

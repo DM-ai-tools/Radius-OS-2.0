@@ -17,6 +17,7 @@ from app.integrations.google_oauth import (
     OAUTH_PROVIDERS,
     PROVIDER_LABELS,
     build_authorize_url,
+    credential_grant_status,
     exchange_code,
     expires_at_from,
     frontend_redirect_base,
@@ -25,7 +26,7 @@ from app.integrations.google_oauth import (
     scopes_for,
 )
 from app.models import ApiCredential, Client, User
-from app.security import create_access_token, decode_access_token, encrypt_token
+from app.security import create_access_token, decode_access_token, decrypt_token, encrypt_token
 from app.services.audit import log_event
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
@@ -33,13 +34,20 @@ router = APIRouter(prefix="/oauth", tags=["oauth"])
 
 class MockGrant(BaseModel):
     client_id: UUID
-    provider: str  # ga4 | search_console | gtm | google_business
+    provider: str  # ga4 | search_console | gtm
     scope: str = "read"
 
 
 class AuthorizeBody(BaseModel):
     client_id: UUID
     provider: str
+
+
+def _demo_oauth_allowed() -> bool:
+    """Placeholder grants exist for local demos only. Production must use Google."""
+    from app.config import get_settings
+
+    return get_settings().environment != "production"
 
 
 async def _revoke_prior(db: AsyncSession, client_id: UUID, provider: str) -> None:
@@ -118,6 +126,11 @@ async def authorize_url(
         raise HTTPException(404, "Client not found")
 
     if not oauth_configured():
+        if not _demo_oauth_allowed():
+            raise HTTPException(
+                503,
+                "Google OAuth is not configured. Demo grants are disabled in production.",
+            )
         return {
             "mode": "mock",
             "url": None,
@@ -249,9 +262,10 @@ async def mock_grant(
 ):
     """Dev/demo OAuth grant — stores encrypted placeholder token.
 
-    Still available when Google OAuth is configured (useful for demos).
-    Prefer /authorize-url → Google consent for real connections.
+    Disabled when ENVIRONMENT=production. Real access is /authorize-url → Google.
     """
+    if not _demo_oauth_allowed():
+        raise HTTPException(404, "Not found")
     await require_permission(user, db, "tracking_access_agent", need_trigger=True)
     if body.provider not in OAUTH_PROVIDERS:
         raise HTTPException(400, f"Invalid provider. Allowed: {', '.join(OAUTH_PROVIDERS)}")
@@ -287,13 +301,21 @@ async def list_credentials(
         )
     )
     rows = result.scalars().all()
-    return [
-        {
-            "id": str(r.id),
-            "provider": r.provider,
-            "scope": r.scope,
-            "granted_at": r.granted_at.isoformat() if r.granted_at else None,
-            "expires_at": r.expires_at.isoformat() if r.expires_at else None,
-        }
-        for r in rows
-    ]
+    out = []
+    for r in rows:
+        try:
+            blob = decrypt_token(r.encrypted_token)
+        except Exception:  # noqa: BLE001
+            blob = ""
+        status = credential_grant_status(r.expires_at, blob)
+        out.append(
+            {
+                "id": str(r.id),
+                "provider": r.provider,
+                "scope": r.scope,
+                "granted_at": r.granted_at.isoformat() if r.granted_at else None,
+                "expires_at": r.expires_at.isoformat() if r.expires_at else None,
+                "status": status,
+            }
+        )
+    return out

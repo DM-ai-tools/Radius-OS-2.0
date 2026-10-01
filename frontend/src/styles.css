@@ -1157,6 +1157,131 @@ a {
   margin: 0 0 16px;
 }
 
+.topic-pick-select {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 16px;
+  max-width: 720px;
+}
+
+.topic-pick-select-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.topic-pick-dropdown {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1.5px solid var(--dash, #d4cdc4);
+  border-radius: 10px;
+  background: var(--surface, #fff);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.topic-pick-selected {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface, #fff) 92%, var(--line) 8%);
+}
+
+.topic-brief-panel {
+  margin-top: 4px;
+  padding: 14px 14px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+}
+
+.topic-brief-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.topic-brief-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.topic-brief-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.topic-brief-body p {
+  margin: 0;
+}
+
+.topic-brief-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+
+.topic-brief-outline {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.topic-keyword-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.topic-keyword-chip {
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface, #fff) 88%, var(--line) 12%);
+}
+
+.topic-kind-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.topic-kind-tag--create {
+  color: #0f5132;
+  background: color-mix(in srgb, #198754 14%, transparent);
+  border-color: color-mix(in srgb, #198754 28%, transparent);
+}
+
+.topic-kind-tag--optimize {
+  color: #084298;
+  background: color-mix(in srgb, #0d6efd 14%, transparent);
+  border-color: color-mix(in srgb, #0d6efd 28%, transparent);
+}
+
 .topic-pick {
   display: flex;
   align-items: flex-start;

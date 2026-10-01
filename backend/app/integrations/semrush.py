@@ -36,27 +36,40 @@ _DATABASE = {
     "fr": "fr",
 }
 
-_units_blocked: str | None = None
+_SEMRUSH = "semrush"
+_auth_blocked: str | None = None
 
 
 def explorer_blocked() -> str | None:
-    return _units_blocked
+    return keywords_explorer_blocked()
 
 
 def keywords_explorer_blocked() -> str | None:
-    """Same name keyword seeding already checks, so the quota switch still works."""
-    return _units_blocked
+    """Quota block while its recheck window is open. Auth failures stay until reset."""
+    from app.integrations.provider_access import active_access_block
+
+    return _auth_blocked or active_access_block(_SEMRUSH)
 
 
 def reset_keywords_explorer_block() -> None:
-    global _units_blocked
-    _units_blocked = None
+    global _auth_blocked
+    from app.integrations.provider_access import clear_access_failure
+
+    _auth_blocked = None
+    clear_access_failure(_SEMRUSH)
 
 
-def _mark_blocked(reason: str) -> None:
-    global _units_blocked
-    _units_blocked = reason
-    log.warning("semrush_explorer_disabled", reason=reason)
+def _mark_quota_blocked(reason: str, *, kind: str) -> None:
+    from app.integrations.provider_access import note_access_failure
+
+    note_access_failure(_SEMRUSH, kind, reason)
+    log.warning("semrush_quota_recheck_scheduled", reason=reason)
+
+
+def _mark_auth_blocked(reason: str) -> None:
+    global _auth_blocked
+    _auth_blocked = reason
+    log.warning("semrush_auth_blocked", reason=reason)
 
 
 def _configured() -> bool:
@@ -119,8 +132,9 @@ def _keyword_row(raw: dict[str, str], *, endpoint: str) -> dict[str, Any] | None
 
 async def _fetch(url: str, params: dict[str, Any]) -> tuple[str | None, str | None]:
     """Return (body, error). ERROR 50 (nothing found) is an empty success."""
-    if _units_blocked:
-        return None, _units_blocked
+    blocked = keywords_explorer_blocked()
+    if blocked:
+        return None, blocked
     if not _configured():
         return None, "semrush_unavailable"
     settings = get_settings()
@@ -138,18 +152,31 @@ async def _fetch(url: str, params: dict[str, Any]) -> tuple[str | None, str | No
     if text.lstrip().upper().startswith("ERROR"):
         upper = text.upper()
         if "NOTHING FOUND" in upper or "ERROR 50" in upper:
+            from app.integrations.provider_access import clear_access_failure
+
+            clear_access_failure(_SEMRUSH)
             return "", None
         if any(token in upper for token in ("ERROR 131", "ERROR 132", "ERROR 133", "API UNITS", "LIMIT EXCEEDED")):
-            _mark_blocked("semrush_units_exhausted")
+            from app.integrations.provider_access import CREDIT
+
+            _mark_quota_blocked("semrush_units_exhausted", kind=CREDIT)
             return None, "semrush_units_exhausted"
         if "ERROR 120" in upper or "WRONG KEY" in upper or resp.status_code in (401, 403):
-            _mark_blocked("semrush_auth_failed")
+            _mark_auth_blocked("semrush_auth_failed")
             return None, "semrush_auth_failed"
         log.warning("semrush_http_error", status=resp.status_code, snippet=text[:120])
         return None, "semrush_http_error"
+    if resp.status_code == 429:
+        from app.integrations.provider_access import RATE_LIMIT
+
+        _mark_quota_blocked("semrush_rate_limited", kind=RATE_LIMIT)
+        return None, "semrush_rate_limited"
     if resp.status_code >= 400:
         log.warning("semrush_http_error", status=resp.status_code, snippet=text[:120])
         return None, "semrush_http_error"
+    from app.integrations.provider_access import clear_access_failure
+
+    clear_access_failure(_SEMRUSH)
     return text, None
 
 

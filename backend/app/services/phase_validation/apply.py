@@ -125,6 +125,16 @@ async def run_phase_with_validation(
     Validator outages do not wipe phase output (pass_with_warnings / unavailable path).
     Rejected outputs cannot remain pending_signoff with approve enabled.
     """
+    # CDD guards run before every path below, including the validation-disabled
+    # short-circuits: a phase must never start on stale inputs, and every run
+    # records the CDD version it began against.
+    from app.services.cdd_gate import record_phase_start_safe, stale_upstream_block
+
+    blocked = await stale_upstream_block(db, client_id=client.id, agent_key=agent_key)
+    if blocked:
+        return blocked
+    await record_phase_start_safe(db, client_id=client.id, agent_key=agent_key)
+
     settings = get_settings()
     if not getattr(settings, "feature_phase_validation", True):
         return await runner(

@@ -136,13 +136,14 @@ def test_slim_ia_keeps_redirect_map_and_tree_depth():
     assert node.get("parent") == "/"
 
 
-def test_suggested_path_is_a_service_page():
+def test_suggested_path_matches_page_type():
     assert _suggested_path("buy seo software", "transactional", "landing").startswith(
-        "/services/"
+        "/pricing/"
     )
-    assert _suggested_path("what is seo", "informational", "blog").startswith("/services/")
-    assert _suggested_path("seo checklist", "commercial", "guide").startswith("/services/")
-    assert "/blog/" not in _suggested_path("what is seo", "informational", "blog")
+    assert _suggested_path("what is seo", "informational", "blog").startswith("/blog/")
+    assert _suggested_path("seo checklist", "commercial", "guide").startswith("/guides/")
+    assert _suggested_path("local seo", "commercial", "service").startswith("/services/")
+    assert "/services/" not in _suggested_path("what is seo", "informational", "blog")
 
 
 def test_priority_queue_reads_slim_cluster_volume_keys():
@@ -161,6 +162,16 @@ def test_priority_queue_reads_slim_cluster_volume_keys():
             }
         ],
         domain="acme.example",
+        topic_plan={
+            "topic_ideas": [
+                {
+                    "title": "Local SEO",
+                    "keyword": "local seo",
+                    "intent": "commercial",
+                    "opportunity_score": 66,
+                }
+            ]
+        },
     )
     assert q
     assert q[0]["volume"] == 1200
@@ -196,6 +207,38 @@ def test_combined_queue_refresh_beats_new():
     actions = [r["action"] for r in out["combined_priority_queue"]]
     assert "refresh" in actions
     assert "create" not in actions  # same topic dropped
+
+
+def test_combined_queue_keeps_service_optimize_and_blog_create():
+    out = build_combined_priority_queue(
+        content_audit={"inventory": [], "summary_counts": {}},
+        content_strategy={
+            "priority_queue": [
+                {
+                    "title": "Email Marketing",
+                    "keyword": "email marketing",
+                    "action": "optimize",
+                    "work_label": "Optimize service page",
+                    "suggested_url": "/email-marketing/",
+                    "priority": "Quick win",
+                },
+                {
+                    "title": "Email Marketing: a practical guide",
+                    "keyword": "email marketing guide",
+                    "action": "create",
+                    "work_label": "Create blog page",
+                    "suggested_url": "/blog/email-marketing-guide/",
+                    "priority": "Big bet",
+                },
+            ],
+            "pillars": [{"name": "Email Marketing"}],
+        },
+    )
+    rows = out["combined_priority_queue"]
+    assert rows[0]["action"] == "optimize"
+    assert rows[0]["work_label"] == "Optimize service page"
+    assert rows[1]["action"] == "create"
+    assert rows[1]["work_label"] == "Create blog page"
 
 
 async def test_content_audit_blocks_empty_inventory():

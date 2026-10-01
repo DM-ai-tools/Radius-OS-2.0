@@ -307,6 +307,10 @@ def _search_demand_sections() -> list[SectionSpec]:
                 ("Keywords", "keyword_count"),
                 ("Quick wins", "quick_win_count"),
                 ("Source", "source"),
+                # Surfaces the coverage-fallback warning when live keyword APIs
+                # were unavailable, so estimated volumes in this report are not
+                # mistaken for measured demand.
+                ("Data quality", "keyword_data_quality.warning"),
             ],
         ),
         SectionSpec(
@@ -538,9 +542,9 @@ def _competitor_sections() -> list[SectionSpec]:
         SectionSpec(
             title="Tier Overview",
             table_source="tier_overview",
-            table_headers=["Rank", "Name", "Tier", "Composite", "Threat"],
-            table_keys=["rank", "name", "tier_name", "composite", "future_threat"],
-            table_weights=[0.5, 1.2, 1.0, 0.7, 0.8],
+            table_headers=["Rank", "Name", "Website", "Tier", "Composite", "Threat"],
+            table_keys=["rank", "name", "url", "tier_name", "composite", "future_threat"],
+            table_weights=[0.4, 1.1, 1.3, 0.9, 0.6, 0.7],
         ),
         SectionSpec(
             title="Parameter Gaps",

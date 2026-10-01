@@ -30,6 +30,7 @@ PHASE7_SKILL_DIRS = (
     "rendering-audit",
     "cwv-measurement",
     "hreflang-validator",
+    "seo-sitemap",
 )
 
 
@@ -482,6 +483,27 @@ async def run_technical_seo_plan(
     all_issues: list[dict[str, Any]] = []
     if use_ahrefs and ahrefs_data:
         all_issues = enrich_issues_with_confidence(list(ahrefs_data.get("issues") or []))
+    sitemap_audit = tech.get("sitemap_audit") if isinstance(tech.get("sitemap_audit"), dict) else None
+    if sitemap_audit is None and not settings.use_mock_providers:
+        from app.services.sitemap_audit import fetch_sitemap_audit
+
+        try:
+            sitemap_audit = await fetch_sitemap_audit(primary_url)
+        except Exception:  # noqa: BLE001
+            sitemap_audit = None
+    if sitemap_audit and sitemap_audit.get("status") == "available":
+        from app.services.sitemap_audit import apply_known_page_status, checklist_issues
+
+        pages_for_status = list((seo or {}).get("pages") or [])
+        if isinstance((ahrefs_data or {}).get("pages"), list):
+            pages_for_status.extend(ahrefs_data.get("pages") or [])
+        apply_known_page_status(sitemap_audit, pages_for_status)
+        if gsc.get("status") == "available":
+            sitemap_audit["gsc_note"] = (
+                f"Search Console: {gsc.get('sitemap_count', 0)} submitted sitemap(s), "
+                f"{len(gsc.get('issues') or [])} indexation signal(s)."
+            )
+        all_issues.extend(enrich_issues_with_confidence(checklist_issues(sitemap_audit)))
     if gsc.get("status") == "available":
         all_issues.extend(enrich_issues_with_confidence(list(gsc.get("issues") or [])))
 
@@ -717,8 +739,11 @@ async def run_technical_seo_plan(
         gsc_available=gsc.get("status") == "available",
         cwv_available=bool(cwv_field),
         rendering_available=rendering.get("status") == "available",
-        sitemap_available=bool(gsc.get("sitemap_count")),
+        sitemap_available=bool(
+            (sitemap_audit or {}).get("status") == "available" or gsc.get("sitemap_count")
+        ),
         homepage_checked=bool(seo or tech),
+        sitemap_audit=sitemap_audit if (sitemap_audit or {}).get("status") == "available" else None,
     )
 
     return {
@@ -750,6 +775,7 @@ async def run_technical_seo_plan(
         "hreflang_check": hreflang if hreflang.get("status") == "available" else None,
         "internal_linking": internal_linking,
         "gsc_indexation": gsc if gsc.get("status") == "available" else None,
+        "sitemap_audit": sitemap_audit if (sitemap_audit or {}).get("status") == "available" else None,
         "seo_audit": {
             "score": seo.get("score") or seo.get("overall_score"),
             "pages_audited": (

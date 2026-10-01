@@ -109,6 +109,34 @@ def estimate_provider_cost_usd(provider: str, *, units: int = 1) -> Decimal:
     return Decimal(str(round(unit * max(1, units), 6)))
 
 
+async def provider_spend_today_usd(provider: str) -> float | None:
+    """Sum of recorded cost for this provider since UTC midnight.
+
+    None means the meter could not be read. Callers must not treat that as zero
+    and must not invent a spend figure.
+    """
+    from datetime import datetime, timezone
+
+    from sqlalchemy import func, select
+
+    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        async with AsyncSessionLocal() as db:
+            total = await db.scalar(
+                select(func.coalesce(func.sum(ApiUsageLog.estimated_cost_usd), 0)).where(
+                    ApiUsageLog.provider == provider,
+                    ApiUsageLog.created_at >= start,
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("api_meter_spend_read_failed", provider=provider, error=str(exc)[:200])
+        return None
+    try:
+        return float(total or 0)
+    except (TypeError, ValueError):
+        return None
+
+
 async def record_api_call(
     *,
     provider: str,

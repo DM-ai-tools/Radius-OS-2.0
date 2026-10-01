@@ -21,14 +21,20 @@ DESIGN_CAPTURE_VERSION = 3
 
 def design_source_url(
     *,
+    previous_page_url: str = "",
     existing_page_url: str = "",
     parent_pillar_page_url: str = "",
     reference_design_source: str = "",
     client_website_url: str = "",
     profile_website_url: str = "",
 ) -> str:
-    """Preference order for the page whose design the new content must wear."""
+    """Preference order for the page whose design the new content must wear.
+
+    Prefer the previous page on the internal-linking / publish plan when known,
+    then an existing URL for refresh, then hub/parent, then home.
+    """
     for candidate in (
+        previous_page_url,
         existing_page_url,
         parent_pillar_page_url,
         reference_design_source,
@@ -39,6 +45,228 @@ def design_source_url(
         if url.startswith("http"):
             return url
     return ""
+
+
+def _norm_path(url: str) -> str:
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        from urllib.parse import urlparse
+
+        return (urlparse(raw).path or "/").rstrip("/").lower() or "/"
+    path = raw if raw.startswith("/") else f"/{raw}"
+    return path.rstrip("/").lower() or "/"
+
+
+def _abs_url(path_or_url: str, primary_url: str) -> str:
+    raw = str(path_or_url or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    base = str(primary_url or "").rstrip("/")
+    if not base:
+        return ""
+    return base + (raw if raw.startswith("/") else f"/{raw}")
+
+
+def _norm_label(value: Any) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def resolve_previous_design_page(
+    *,
+    page_url: str = "",
+    page_keyword: str = "",
+    primary_url: str = "",
+    on_page_seo: dict[str, Any] | None = None,
+    content_planning: dict[str, Any] | None = None,
+    topic_plan: dict[str, Any] | None = None,
+    site_architecture: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Find the page whose live design this draft should copy.
+
+    Evidence order:
+    1. Internal linking plan — parent hub / strongest inbound ``from`` for this page
+    2. Topic ``publishing_order`` — prior title mapped onto the locked roadmap
+    3. Content planning roadmap — previous ``priority_rank`` sibling
+    4. IA parent pillar
+    """
+    on_page = dict(on_page_seo or {})
+    planning = dict(content_planning or {})
+    plan = dict(topic_plan or {})
+    ia = dict(site_architecture or {})
+    current_path = _norm_path(page_url)
+    current_kw = _norm_label(page_keyword)
+    primary = str(primary_url or "").strip()
+
+    def _match_row(row: dict[str, Any]) -> bool:
+        path = _norm_path(str(row.get("url") or row.get("path") or ""))
+        kw = _norm_label(
+            row.get("keyword") or row.get("primary_keyword") or row.get("title") or ""
+        )
+        if current_path and path and path == current_path:
+            return True
+        if current_kw and kw and kw == current_kw:
+            return True
+        return False
+
+    # --- 1) Internal linking plan (Phase 11) ---------------------------------
+    linking = on_page.get("internal_linking") if isinstance(on_page.get("internal_linking"), dict) else {}
+    links = list(linking.get("links") or on_page.get("internal_links") or [])
+    inbound: list[dict[str, Any]] = []
+    parent_candidate = ""
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        to_path = _norm_path(str(link.get("to") or ""))
+        from_path = _norm_path(str(link.get("from") or ""))
+        if not current_path or to_path != current_path:
+            continue
+        reason = str(link.get("reason") or "").lower()
+        if reason in {"parent_hub", "hub_to_spoke", "parent"} or "parent" in reason:
+            parent_candidate = from_path
+        inbound.append(link)
+    if parent_candidate:
+        return {
+            "url": _abs_url(parent_candidate, primary),
+            "reason": "internal_linking_parent",
+            "path": parent_candidate,
+        }
+    if inbound:
+        # Prefer a live inbound source over planned-only.
+        live = next(
+            (
+                ln
+                for ln in inbound
+                if str(ln.get("target_status") or "").lower() in {"", "live"}
+                or str(ln.get("from_status") or "").lower() == "live"
+            ),
+            inbound[0],
+        )
+        frm = _norm_path(str(live.get("from") or ""))
+        if frm:
+            return {
+                "url": _abs_url(frm, primary),
+                "reason": "internal_linking_inbound",
+                "path": frm,
+            }
+
+    # Per-page packages sometimes nest linking under pages[]
+    for page in on_page.get("pages") or on_page.get("queue") or []:
+        if not isinstance(page, dict) or not _match_row(page):
+            continue
+        nested = page.get("internal_linking") if isinstance(page.get("internal_linking"), dict) else {}
+        nested_links = list(nested.get("links") or page.get("internal_links") or [])
+        for link in nested_links:
+            if not isinstance(link, dict):
+                continue
+            to_path = _norm_path(str(link.get("to") or ""))
+            from_path = _norm_path(str(link.get("from") or ""))
+            if current_path and to_path == current_path and from_path:
+                return {
+                    "url": _abs_url(from_path, primary),
+                    "reason": "page_internal_linking",
+                    "path": from_path,
+                }
+        parent = str(page.get("parent") or "").strip()
+        if parent:
+            return {
+                "url": _abs_url(parent, primary),
+                "reason": "on_page_parent",
+                "path": _norm_path(parent),
+            }
+
+    # --- 2) Topic publishing_order → prior title on the roadmap --------------
+    roadmap = [
+        r
+        for r in (planning.get("pages") or planning.get("roadmap") or [])
+        if isinstance(r, dict)
+    ]
+    order_raw = list(plan.get("publishing_order") or [])
+    order_labels: list[str] = []
+    for item in order_raw:
+        if isinstance(item, dict):
+            order_labels.append(
+                _norm_label(item.get("title") or item.get("keyword") or item.get("url") or "")
+            )
+        else:
+            order_labels.append(_norm_label(item))
+    order_labels = [x for x in order_labels if x]
+
+    def _row_label(row: dict[str, Any]) -> str:
+        return _norm_label(
+            row.get("title") or row.get("keyword") or row.get("primary_keyword") or ""
+        )
+
+    if order_labels and roadmap:
+        idx = -1
+        for i, label in enumerate(order_labels):
+            if current_kw and label == current_kw:
+                idx = i
+                break
+            for row in roadmap:
+                if _match_row(row) and _row_label(row) == label:
+                    idx = i
+                    break
+            if idx >= 0:
+                break
+        if idx > 0:
+            prev_label = order_labels[idx - 1]
+            for row in roadmap:
+                if _row_label(row) == prev_label:
+                    path = str(row.get("url") or row.get("path") or "")
+                    if path:
+                        return {
+                            "url": _abs_url(path, primary),
+                            "reason": "publishing_order_previous",
+                            "path": _norm_path(path),
+                        }
+
+    # --- 3) Roadmap priority — previous ranked page --------------------------
+    ranked = sorted(
+        roadmap,
+        key=lambda r: int(r.get("priority_rank") or 999),
+    )
+    for i, row in enumerate(ranked):
+        if not _match_row(row):
+            continue
+        if i == 0:
+            break
+        prev = ranked[i - 1]
+        path = str(prev.get("url") or prev.get("path") or "")
+        if path:
+            return {
+                "url": _abs_url(path, primary),
+                "reason": "roadmap_previous",
+                "path": _norm_path(path),
+            }
+
+    # --- 4) IA parent pillar -------------------------------------------------
+    parent_pillar = str(ia.get("parent_pillar_page_url") or "").strip()
+    if parent_pillar.startswith("http"):
+        return {
+            "url": parent_pillar,
+            "reason": "ia_parent_pillar",
+            "path": _norm_path(parent_pillar),
+        }
+    for node in ia.get("target_url_tree") or []:
+        if not isinstance(node, dict):
+            continue
+        if not _match_row(node):
+            continue
+        parent = str(node.get("parent") or "").strip()
+        if parent:
+            return {
+                "url": _abs_url(parent, primary),
+                "reason": "ia_tree_parent",
+                "path": _norm_path(parent),
+            }
+
+    return {"url": "", "reason": "", "path": ""}
 
 
 def _quote(value: str) -> str:

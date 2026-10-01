@@ -23,6 +23,11 @@ from app.integrations import brandfetch, firecrawl, wordpress
 from app.integrations.wordpress import WordPressConnection
 from app.logging_config import get_logger
 from app.services.publish_preview import build_content_html, build_page_preview, preview_design_meta
+from app.services.google_policy_gate import (
+    evaluate_content_policy,
+    finalization_allowed,
+    policy_config_from_settings,
+)
 from app.services.wp_content import validate_publish_payload
 from app.services.wp_publish_strategy import PublishTarget, publish_to_wordpress
 
@@ -140,6 +145,7 @@ async def run_publishing_plan(
     mode: str = MODE_PREVIEW,
     reference_url: str | None = None,
     wordpress_connection: WordPressConnection | None = None,
+    google_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     on_page = dict(on_page_seo or {})
     ia = dict(site_architecture or {})
@@ -147,6 +153,7 @@ async def run_publishing_plan(
     mode = (mode or MODE_PREVIEW).lower()
     if mode not in VALID_MODES:
         mode = MODE_PREVIEW
+    policy_cfg = policy_config_from_settings(google_policy)
 
     if not on_page_gate_ok(on_page_seo_status, on_page):
         return {
@@ -172,17 +179,43 @@ async def run_publishing_plan(
     from app.services.wp_site_design import fetch_wordpress_design
 
     site_design = await fetch_wordpress_design(primary_url)
-    from app.services.design_capture import capture_page_design, design_source_url, merge_site_design
+    from app.services.design_capture import (
+        capture_page_design,
+        design_source_url,
+        merge_site_design,
+        resolve_previous_design_page,
+    )
 
     ref_url = reference_url or _pick_reference_url(ia, primary_url)
+    first_page = pages[0] if pages else {}
+    previous = resolve_previous_design_page(
+        page_url=str(first_page.get("url") or first_page.get("path") or ""),
+        page_keyword=str(first_page.get("keyword") or ""),
+        primary_url=primary_url,
+        on_page_seo=on_page,
+        content_planning=(
+            production.get("content_planning")
+            if isinstance(production.get("content_planning"), dict)
+            else None
+        ),
+        topic_plan=(
+            production.get("topic_plan")
+            if isinstance(production.get("topic_plan"), dict)
+            else None
+        ),
+        site_architecture=ia,
+    )
+    previous_url = str(previous.get("url") or "")
     source_url = design_source_url(
-        existing_page_url=str((pages[0] if pages else {}).get("existing_page_url") or ""),
+        previous_page_url=previous_url,
+        existing_page_url=str(first_page.get("existing_page_url") or ""),
         parent_pillar_page_url=str(ia.get("parent_pillar_page_url") or ""),
-        reference_design_source=ref_url,
+        reference_design_source=previous_url or ref_url,
         client_website_url=primary_url,
     )
     site_design = merge_site_design(site_design, await capture_page_design(source_url))
-    scrape = await firecrawl.scrape_page(ref_url) if ref_url else {"available": False}
+    scrape_target = previous_url or source_url or ref_url
+    scrape = await firecrawl.scrape_page(scrape_target) if scrape_target else {"available": False}
     layout = firecrawl.layout_hints(scrape)
 
     has_connection = wordpress.connection_configured(wordpress_connection)
@@ -251,6 +284,20 @@ async def run_publishing_plan(
         )
         preview["content_source"] = content_source
         payload = preview["cms_payload"]
+        policy_item = {
+            "item_id": url,
+            "url": url,
+            "keyword": page.get("keyword") or draft.get("keyword"),
+            "title": payload.get("title") or draft.get("title"),
+            "meta_description": payload.get("excerpt") or draft.get("meta_description"),
+            "markdown": draft.get("markdown") or "",
+            "cta": draft.get("cta"),
+            "html": content_html,
+            "images": draft.get("images"),
+            "landing_reachable": draft.get("landing_reachable"),
+        }
+        policy_report = evaluate_content_policy(policy_item, **policy_cfg)
+        preview["google_policy"] = policy_report
 
         # Run the same gate in preview so a reviewer sees what would block a real run.
         preview["validation"] = validate_publish_payload(
@@ -269,7 +316,41 @@ async def run_publishing_plan(
                     "cms": "wordpress" if has_connection else "not_connected",
                     "content_source": content_source,
                     "would_block": not preview["validation"]["ok"],
+                    "google_policy": policy_report,
                     "note": "Dry run — no CMS write attempted",
+                }
+            )
+            continue
+
+        if not finalization_allowed(
+            policy_report,
+            human_approved=bool(draft.get("google_policy_approved")),
+        ):
+            publish_queue.append(
+                {
+                    "url": url,
+                    "slug": slug,
+                    "title": payload["title"],
+                    "keyword": page.get("keyword"),
+                    "status": "policy_blocked",
+                    "cms": "wordpress",
+                    "content_source": content_source,
+                    "google_policy": policy_report,
+                    "note": (
+                        "Returned for revision. The draft was not modified and was not written to the CMS."
+                    ),
+                }
+            )
+            verification.append(
+                {
+                    "slug": slug,
+                    "verified": False,
+                    "reason": "google_policy_gate",
+                    "overall_status": policy_report.get("overall_status"),
+                    "action_required": (
+                        "Revise the draft using the policy findings. "
+                        "Flagged or failed content is not finalized."
+                    ),
                 }
             )
             continue
@@ -298,6 +379,8 @@ async def run_publishing_plan(
             "slug": slug,
             "title": payload["title"],
             "keyword": page.get("keyword"),
+            "work_label": page.get("work_label"),
+            "page_action": page.get("action"),
             "status": write.get("status") if trace.get("ok") or write.get("ok") else "failed",
             "cms": "wordpress",
             "content_source": content_source,

@@ -106,25 +106,22 @@ async def fill_client_form_from_url(url: str) -> dict[str, Any]:
     )
     parsed = await _perplexity_json(system, user)
     if not parsed:
-        # Deterministic stub when LLM unavailable
-        host = url.split("//", 1)[-1].split("/", 1)[0].removeprefix("www.")
-        parsed = {
-            "name": host.split(".")[0].replace("-", " ").title(),
-            "industry": "",
-            "company_size": "",
-            "headquarters_location": "",
-            "target_audience": "",
-            "geographic_focus": "",
-            "known_competitors": "",
-            "website_priorities": "Improve organic visibility and lead quality",
-            "objectives": ["Increase organic traffic", "Generate more qualified leads"],
-            "business_keywords": "",
-            "b2b_b2c": "",
-            "business_model": "",
-            "_note": "Mock/fallback fill — configure OpenRouter + Perplexity for live research.",
+        out: dict[str, Any] = {
+            "primary_url": url,
+            "status": "unavailable",
+            "needs_review": True,
+            "unavailable_reason": (
+                "Discovery research could not be parsed. Needs review. "
+                "No priorities, objectives, or positioning were inferred."
+            ),
         }
+        if title:
+            observed = title.split("|")[0].split("-")[0].strip()[:80]
+            if observed:
+                out["name"] = observed
+        return out
 
-    out: dict[str, Any] = {}
+    out = {}
     for k, v in parsed.items():
         if k.startswith("_") or k in PERSONAL_KEYS:
             continue
@@ -137,6 +134,94 @@ async def fill_client_form_from_url(url: str) -> dict[str, Any]:
     return out
 
 
+_LLM_KEY_ALIASES = {
+    "company_name": "business_name",
+    "company": "business_name",
+    "client_name": "business_name",
+    "url": "website_url",
+    "website": "website_url",
+    "primary_url": "website_url",
+    "site": "website_url",
+    "industry": "inferred_industry",
+    "products_services": "products",
+    "location": "geographic_focus",
+    "geo": "geographic_focus",
+    "audience": "target_demographic",
+    "target_audience": "target_demographic",
+    "goals": "objectives",
+    "goal": "business_goal",
+    "competitor": "competitors",
+    "known_competitors": "competitors",
+    "average_order_value": "average_ticket_size",
+}
+
+
+def _cdd_allowed_keys() -> set[str]:
+    return set(RESEARCH_FIELDS) | set(CLIENT_ONLY_FIELDS) | set(ACCESS_FIELDS) | {
+        "business_name",
+        "website_url",
+        "competitors",
+    }
+
+
+def _lookup_cdd_key(label: str) -> str | None:
+    raw = " ".join(str(label or "").lower().replace("_", " ").split()).strip(" :?-")
+    if not raw or raw in PERSONAL_KEYS:
+        return None
+    key = CDD_LABEL_ALIASES.get(raw) or CDD_LABEL_ALIASES.get(raw.rstrip("?").strip())
+    if not key:
+        snake = raw.replace(" ", "_")
+        key = _LLM_KEY_ALIASES.get(snake) or _LLM_KEY_ALIASES.get(raw)
+        if snake in _cdd_allowed_keys():
+            key = snake
+    if not key:
+        # Prefer the label containing the alias (more specific wording). Do not
+        # let a short token such as "business" claim every "business …" alias.
+        for alias, target in CDD_LABEL_ALIASES.items():
+            if len(alias) < 8:
+                continue
+            if alias == raw or alias in raw:
+                key = target
+                break
+            if len(raw) >= 12 and raw in alias:
+                key = target
+                break
+    if key == "industry":
+        key = "inferred_industry"
+    if key in PERSONAL_KEYS or key not in _cdd_allowed_keys():
+        return None
+    return key
+
+
+def _coerce_cdd_payload(parsed: Any) -> dict[str, Any]:
+    """Flatten model JSON into a single field map, including nested or list shapes."""
+    if isinstance(parsed, list):
+        flat: dict[str, Any] = {}
+        for item in parsed:
+            flat.update(_coerce_cdd_payload(item))
+        return flat
+    if not isinstance(parsed, dict):
+        return {}
+    if any(k in parsed for k in ("field", "key", "label")) and "value" in parsed:
+        label = parsed.get("field") or parsed.get("key") or parsed.get("label")
+        return {str(label): parsed.get("value")}
+    nested_keys = ("fields", "cdd", "data", "discovery", "answers", "result")
+    if len(parsed) == 1:
+        only = next(iter(parsed.values()))
+        if isinstance(only, (dict, list)) and next(iter(parsed)) in nested_keys:
+            return _coerce_cdd_payload(only)
+    out: dict[str, Any] = {}
+    for key, value in parsed.items():
+        if isinstance(value, dict) and key in nested_keys:
+            out.update(_coerce_cdd_payload(value))
+            continue
+        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            out.update(_coerce_cdd_payload(value))
+            continue
+        out[str(key)] = value
+    return out
+
+
 async def extract_cdd_fields_from_text(text: str, *, filename: str = "") -> dict[str, Any]:
     """Map free-text / spreadsheet dump into CDD discovery field keys."""
     system = (
@@ -146,103 +231,138 @@ async def extract_cdd_fields_from_text(text: str, *, filename: str = "") -> dict
     )
     user = (
         f"Source file: {filename or 'upload'}\n"
-        f"Allowed keys: {cdd_json_schema_hint()}, business_name, website_url\n\n"
+        f"Allowed keys: {cdd_json_schema_hint()}, business_name, website_url, competitors\n\n"
         f"Document text:\n{text[:18000]}\n\n"
-        "Return JSON object keyed by those fields. Use null when unknown."
+        "Return one JSON object keyed by those fields. Use null when unknown."
     )
     parsed = await _perplexity_json(system, user)
-    if not parsed:
-        # Heuristic label:value scrape for APSA-style sheets already flattened
-        parsed = _heuristic_cdd_map(text)
-    return _sanitize_cdd(parsed or {})
+    from_model = _sanitize_cdd(_coerce_cdd_payload(parsed or {}))
+    # Labeled cells in the file win. The model fills keys the sheet did not
+    # state, and still recovers a narrative PDF when there are no labels.
+    from_sheet = _sanitize_cdd(_heuristic_cdd_map(text))
+    merged = dict(from_model)
+    for key, value in from_sheet.items():
+        if str(value or "").strip():
+            merged[key] = value
+    if not merged:
+        log.warning(
+            "cdd_extract_empty",
+            filename=filename,
+            text_chars=len(text or ""),
+            model_keys=list((parsed or {}).keys())[:12] if isinstance(parsed, dict) else [],
+        )
+    return merged
+
+
+def _is_document_stamp(value: str) -> bool:
+    """CDD header lines such as '21/09/2026 (draft)' are not field values."""
+    text = " ".join(str(value or "").split()).strip()
+    if not text or text.lower() in {"draft", "cdd", "untitled", "client discovery document"}:
+        return True
+    return bool(
+        re.match(
+            r"^(?:\d{1,2}[/.\\-]\d{1,2}[/.\\-]\d{2,4})(?:\s*\((?:draft|final|v\d+)\))?$",
+            text,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _sanitize_cdd(parsed: dict[str, Any]) -> dict[str, Any]:
-    allowed = set(RESEARCH_FIELDS) | set(CLIENT_ONLY_FIELDS) | set(ACCESS_FIELDS) | {
-        "business_name",
-        "website_url",
-        "inferred_industry",
-    }
-    # aliases
-    if "industry" in parsed and "inferred_industry" not in parsed:
-        parsed["inferred_industry"] = parsed.pop("industry")
-    if "average_order_value" in parsed and "average_ticket_size" not in parsed:
-        parsed["average_ticket_size"] = parsed.pop("average_order_value")
+    allowed = _cdd_allowed_keys()
     out: dict[str, Any] = {}
-    for k, v in parsed.items():
-        if k in PERSONAL_KEYS:
+    for raw_key, value in parsed.items():
+        key = _lookup_cdd_key(str(raw_key))
+        if not key or key not in allowed or key in PERSONAL_KEYS:
             continue
-        if k not in allowed:
+        if isinstance(value, dict) or value in (None, "", [], {}):
             continue
-        if v in (None, "", [], {}):
+        if isinstance(value, list):
+            value = ", ".join(str(item).strip() for item in value if str(item).strip())
+        if not str(value).strip():
             continue
-        out[k] = v
+        if _is_document_stamp(str(value)):
+            # Spreadsheet titles and file dates are not industry, products, or names.
+            continue
+        out[key] = value
     return out
+
+
+def _pipe_label_value_pairs(raw: str) -> list[tuple[str, str]]:
+    """Read label/value pairs from a pipe-joined spreadsheet row.
+
+    APSA CDDs are usually two columns. Extra trailing cells (dates, notes,
+    status) must not replace the value for the first label — that was how
+    ``21/09/2026 (draft)`` landed in Industry, Products, and Business Name.
+    """
+    parts = [p.strip() for p in raw.split("|")]
+    nonempty = [p for p in parts if p]
+    if len(nonempty) < 2:
+        return []
+    pairs: list[tuple[str, str]] = []
+    index = 0
+    while index < len(nonempty) - 1:
+        label = nonempty[index]
+        value = nonempty[index + 1]
+        if _lookup_cdd_key(label) and not _lookup_cdd_key(value):
+            pairs.append((label, value))
+            index += 2
+            continue
+        index += 1
+    return pairs
 
 
 def _heuristic_cdd_map(text: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for line in text.splitlines():
-        raw = line.strip()
+    lines = [line.strip() for line in text.splitlines()]
+    index = 0
+    access_keys = {
+        "analytics_access",
+        "gtm_access",
+        "google_ads_access",
+        "merchant_center_access",
+        "access_level",
+        "search_console_access",
+        "cms_access",
+        "hosting_access",
+        "google_business_access",
+    }
+    while index < len(lines):
+        raw = lines[index]
+        index += 1
         if not raw or raw.startswith("##"):
             continue
-        label = ""
-        value = ""
+
+        row_pairs: list[tuple[str, str]] = []
         if "|" in raw:
-            parts = [p.strip() for p in raw.split("|")]
-            # APSA dump style: idx|Label|Value  OR  Label|Value  OR  empty|Label|Value
-            nonempty = [p for p in parts if p]
-            if len(parts) >= 3 and parts[1]:
-                label = parts[1].lower().strip()
-                value = parts[2].strip() if len(parts) > 2 else ""
-                # Sometimes value is only in parentheses on the label
-                if not value and len(nonempty) >= 1:
-                    value = ""
-            elif len(parts) >= 2:
-                label = parts[0].lower().strip() or (parts[1].lower().strip() if len(parts) > 1 else "")
-                value = parts[1].strip() if parts[0] else (parts[2].strip() if len(parts) > 2 else "")
-                if not parts[0] and len(parts) >= 3:
-                    label = parts[1].lower().strip()
-                    value = parts[2].strip()
-            else:
+            row_pairs = _pipe_label_value_pairs(raw)
+            if not row_pairs:
                 continue
         elif ":" in raw:
             label, value = raw.split(":", 1)
-            label, value = label.lower().strip(), value.strip()
+            row_pairs = [(label.strip(), value.strip())]
         else:
-            # Standalone access question lines: "GTM? (pending)"
-            label = raw.lower().strip()
-            value = ""
+            row_pairs = [(raw, "")]
 
-        # Pull parenthetical note when cell has no separate value
-        if not value and "(" in label and ")" in label:
-            start = label.rfind("(")
-            end = label.rfind(")")
-            if start >= 0 and end > start:
-                value = label[start + 1 : end].strip()
-                label = label[:start].strip()
+        for label, value in row_pairs:
+            if not value and "(" in label and ")" in label:
+                start = label.rfind("(")
+                end = label.rfind(")")
+                if start >= 0 and end > start:
+                    value = label[start + 1 : end].strip()
+                    label = label[:start].strip()
 
-        key = CDD_LABEL_ALIASES.get(label)
-        if not key:
-            # fuzzy: strip trailing ?
-            key = CDD_LABEL_ALIASES.get(label.rstrip("?").strip())
-        if not key and label in CDD_LABEL_ALIASES.values():
-            key = label
-        if key and key not in PERSONAL_KEYS:
-            if key == "industry":
-                key = "inferred_industry"
-            if value:
+            key = _lookup_cdd_key(label)
+            if key and not value and index < len(lines) and len(row_pairs) == 1:
+                nxt = lines[index]
+                if nxt and not nxt.startswith("##") and not _lookup_cdd_key(nxt.split("|")[0]):
+                    value = nxt.split("|")[-1].strip() if "|" in nxt else nxt
+                    index += 1
+            if not key:
+                continue
+            if value and not _is_document_stamp(value):
                 out[key] = value
-            elif key in (
-                "analytics_access",
-                "gtm_access",
-                "google_ads_access",
-                "merchant_center_access",
-                "access_level",
-                "search_console_access",
-                "cms_access",
-                "hosting_access",
-            ):
+            elif key in access_keys:
                 out.setdefault(key, "To confirm")
     return out
 
@@ -268,9 +388,17 @@ def extract_text_from_upload(filename: str, data: bytes) -> str:
 
 
 def _xlsx_to_text(data: bytes) -> str:
+    cached = _xlsx_rows(data, data_only=True)
+    # data_only is blank until Excel has cached formula results.
+    if len(cached.strip()) < 40:
+        return _xlsx_rows(data, data_only=False)
+    return cached
+
+
+def _xlsx_rows(data: bytes, *, data_only: bool) -> str:
     import openpyxl
 
-    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=data_only)
     lines: list[str] = []
     for sheet in wb.sheetnames:
         ws = wb[sheet]

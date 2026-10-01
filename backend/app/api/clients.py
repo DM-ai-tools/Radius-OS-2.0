@@ -460,10 +460,14 @@ async def import_discovery_document(
         )
         raise HTTPException(400, validation_error or "Invalid CDD document")
 
-    # Apply business name / URL / industry onto client when present
+    # Apply business name / URL / industry onto client when present.
+    # Document stamps ("21/09/2026 (draft)") are CDD file titles, not names —
+    # writing them here was renaming the client card on every upload.
+    from app.services.intake_ai import _is_document_stamp
+
     if fields.get("business_name"):
         name = str(fields["business_name"]).strip()
-        if name:
+        if name and not _is_document_stamp(name):
             client.legal_name = name
             client.display_name = name
     if fields.get("website_url"):

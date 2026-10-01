@@ -142,6 +142,7 @@ PHASE_SKILL_COVERAGE: list[dict[str, Any]] = [
             "rendering_audit",
             "cwv_measurement",
             "hreflang_validator",
+            "seo_sitemap",
         ],
         "roles": ["technical_seo_specialist"],
         "implemented": True,
@@ -409,6 +410,14 @@ SKILL_ROLE_OWNERS: dict[str, dict[str, Any]] = {
         "trigger": ["technical_seo_specialist"],
         "approve": ["technical_seo_specialist"],
         "source": "Phase 7 companion — handoff from technical SEO (scripts/hreflang_check.py)",
+    },
+    "seo_sitemap": {
+        "label": "Sitemap",
+        "agent_key": "technical_seo",
+        "owner": "technical_seo_specialist",
+        "trigger": ["technical_seo_specialist"],
+        "approve": ["technical_seo_specialist"],
+        "source": "Phase 7 companion — Claude SEO sitemap skill (audit only)",
     },
     "content_audit": {
         "label": "Existing Content Audit",

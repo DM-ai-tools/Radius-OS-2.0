@@ -85,7 +85,9 @@ async def run_semantic_validation(
     )
 
     async def _default_call(system: str, user_msg: str) -> dict[str, Any] | None:
-        return await synthesize_json(system, user_msg, max_tokens=3500)
+        # 5 checks × long evidence/messages often exceed 3500 tokens and truncate
+        # mid-string; repair+retry in synthesize_json still needs headroom.
+        return await synthesize_json(system, user_msg, max_tokens=8192)
 
     call = caller or _default_call
     try:

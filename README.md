@@ -73,7 +73,7 @@ npm run dev
 
 Open http://localhost:5173 — no login required (`AUTH_DISABLED=true`).
 
-Seed client: **Acme Retail Co.** Click it to open the chat and run all four phases.
+Seed client: **Acme Retail Co.** Click it to open the chat and run Phases 1–12.
 
 `GET /health` reports Postgres + Redis status.
 
@@ -137,7 +137,7 @@ Phases 13–17 (Local, Links/PR, CRO, Reporting, Continuous) are out of scope fo
 - `POST /api/v1/sessions/{id}/messages` (REST chat turn)
 - `WS /api/v1/ws/chat/{session_id}?token=…`
 - `POST /api/v1/clients/{id}/phases/{agent_key}/review`
-- `POST /api/v1/oauth/mock-grant`
+- `POST /api/v1/oauth/mock-grant` (development only — 404 when `ENVIRONMENT=production`)
 - `GET /api/v1/clients/{id}/readiness` · `POST .../readiness/gate`
 
 ## Tests
@@ -154,6 +154,6 @@ pytest -q
 ## Assumptions
 
 - Ahrefs primary / Moz fallback for backlinks; mock providers when keys absent.
-- GTM via OAuth mock grant (manual export path can be added later).
+- GTM via Google OAuth. The demo grant exists only outside production.
 - Readiness threshold **90** (PRD).
 - Long-running jobs run inline when Celery/Redis unavailable; Celery tasks defined for production.

@@ -214,6 +214,79 @@ def _url_host_variants(url: str) -> list[str]:
     return variants or [url]
 
 
+# Review sites, social networks, and software directories are not competing businesses.
+# Crawling them pulls unrelated keywords into later recommendations.
+_NON_BUSINESS_REGISTRABLE = frozenset(
+    {
+        "clutch.co",
+        "g2.com",
+        "capterra.com",
+        "goodfirms.co",
+        "sortlist.com",
+        "designrush.com",
+        "upcity.com",
+        "linkedin.com",
+        "facebook.com",
+        "instagram.com",
+        "youtube.com",
+        "youtu.be",
+        "twitter.com",
+        "x.com",
+        "tiktok.com",
+        "wikipedia.org",
+        "google.com",
+        "yelp.com",
+        "yellowpages.com",
+        "yellowpages.com.au",
+        "trustpilot.com",
+        "glassdoor.com",
+        "crunchbase.com",
+        "semrush.com",
+        "ahrefs.com",
+        "similarweb.com",
+        "reddit.com",
+        "pinterest.com",
+        "medium.com",
+    }
+)
+
+_DEAD_SITE_ERRORS = frozenset(
+    {
+        "dns_resolution_failed",
+        "parked_or_placeholder",
+        "blocked_unsafe_host",
+        "fetch_failed",
+    }
+)
+
+
+def is_non_business_host(host: str) -> bool:
+    """True for directories, social profiles, and other non-competitor hosts."""
+    raw = (host or "").strip().lower()
+    if "://" in raw:
+        raw = urlparse(raw).hostname or ""
+    raw = raw.split("/")[0].split(":")[0].removeprefix("www.")
+    if not raw or "." not in raw:
+        return True
+    extracted = tldextract.extract(raw)
+    registrable = ".".join(part for part in (extracted.domain, extracted.suffix) if part)
+    return registrable in _NON_BUSINESS_REGISTRABLE or raw in _NON_BUSINESS_REGISTRABLE
+
+
+def site_is_dead(fetched: dict[str, Any] | None) -> bool:
+    """True when a homepage clearly does not exist (DNS, parked, 404).
+
+    Bot challenges and timeouts stay alive — the host is real, the fetch was blocked.
+    """
+    if not fetched:
+        return True
+    err = str(fetched.get("error") or "")
+    status = int(fetched.get("status_code") or 0)
+    if err in _DEAD_SITE_ERRORS or status in {404, 410}:
+        return True
+    return status == 0 and "dns" in err.lower()
+
+
 def _looks_parked_or_placeholder(result: dict[str, Any]) -> bool:
     final_host = _host_bare(urlparse(str(result.get("url") or "")).netloc)
     if any(m in final_host for m in _PARKING_HOST_MARKERS):
@@ -398,7 +471,7 @@ async def fetch_url(
                         requested=url,
                         resolved=str(resp.url),
                     )
-                    last = result
+                    last = {**result, "text": "", "error": "parked_or_placeholder"}
                     continue
                 # Reject near-empty shells that aren't a real page
                 if len(resp.text) < 250 and "<a " not in resp.text.lower() and "<title" not in resp.text.lower():

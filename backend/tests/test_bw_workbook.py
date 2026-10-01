@@ -66,6 +66,57 @@ def test_search_demand_analysis_sorted_by_volume():
     assert rows[1]["status"] == "NEW"
 
 
+def test_blog_url_is_not_labelled_service_category():
+    """Keywords seeded from a service still land on /blog/ for content clusters.
+
+    Category dimension is the destination page type; parent_category keeps the
+    service root (e.g. SEO). Labelling /blog/seo-firms as ``service`` was wrong
+    for every TOFU keyword on a service seed.
+    """
+    rows = build_search_demand_analysis_rows(
+        [
+            {
+                "keyword": "seo firms",
+                "volume": 880,
+                "funnel": "TOFU",
+                "target_type": "service",
+                "target": "SEO",
+                "seed": "SEO",
+            }
+        ],
+        clusters=[
+            {
+                "name": "SEO firms",
+                "primary_keyword": "seo firms",
+                "content_type": "guide",
+                "recommended_url": "/blog/seo-firms",
+                "keywords": [{"keyword": "seo firms"}],
+            }
+        ],
+    )
+    assert len(rows) == 1
+    assert rows[0]["target_url"] == "/blog/seo-firms"
+    assert rows[0]["category_dimension"] == "blog"
+    assert rows[0]["parent_category"] == "SEO"
+
+
+def test_service_landing_url_keeps_service_category():
+    rows = build_search_demand_analysis_rows(
+        [
+            {
+                "keyword": "seo services",
+                "volume": 2400,
+                "funnel": "BOFU",
+                "target_type": "service",
+                "target": "SEO",
+                "recommended_url": "/seo/",
+            }
+        ],
+    )
+    assert rows[0]["category_dimension"] == "service"
+    assert rows[0]["parent_category"] == "SEO"
+
+
 def test_tofu_mofu_filters_bofu():
     rows = build_tofu_mofu_content_strategy_rows(
         [

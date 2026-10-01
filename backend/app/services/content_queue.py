@@ -180,12 +180,34 @@ def build_combined_priority_queue(
         # Same topic as refresh → refresh wins; drop new-content duplicate
         if _claimed(kw, path) or action in ("refresh", "consolidate"):
             continue
+        if action in ("optimize", "optimise"):
+            queue.append(
+                {
+                    "rank": len(queue) + 1,
+                    "source": "content-strategy",
+                    "owner": "content-strategy",
+                    "action": "optimize",
+                    "work_label": item.get("work_label") or "Optimize service page",
+                    "disposition": "optimise",
+                    "title": item.get("title") or kw or path,
+                    "keyword": kw or None,
+                    "url": path or None,
+                    "intent": item.get("intent"),
+                    "priority": item.get("priority") or "Quick win",
+                    "effort": "Medium",
+                    "supports_service_id": item.get("supports_service_id"),
+                    "note": item.get("rationale") or "Optimize the selected service page",
+                }
+            )
+            _claim(kw, path)
+            continue
         queue.append(
             {
                 "rank": len(queue) + 1,
                 "source": "content-strategy",
                 "owner": "content-strategy",
                 "action": "create",
+                "work_label": item.get("work_label") or "Create page",
                 "disposition": None,
                 "title": item.get("title") or kw or path,
                 "keyword": kw or None,
@@ -196,7 +218,8 @@ def build_combined_priority_queue(
                 "business_fit": item.get("business_fit"),
                 "est_words": item.get("est_words"),
                 "image_suggestions": item.get("image_suggestions") or [],
-                "note": "Genuine gap — no existing page owned for this topic",
+                "supports_service_id": item.get("supports_service_id"),
+                "note": item.get("rationale") or "Genuine gap — no existing page owned for this topic",
             }
         )
         _claim(kw, path)

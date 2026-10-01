@@ -1,19 +1,23 @@
-"""Phase 1 — Discovery Agent (D1–D5) per discovery-agent skill."""
+"""Phase 1 — Discovery Agent (D1–D5) per discovery-agent skill.
+
+Cold start asks for the Client Discovery Document first. Public-site research is
+not run on init. After CDD upload the questionnaire is prefilled; on submit,
+AI gap-fill drafts only remaining blanks, then the CSM confirmation gate.
+"""
 
 from __future__ import annotations
 
-from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.prompts import load_skill
-from app.integrations.llm import live_pre_research
 from app.models import (
     Client,
+    ClientDigitalProfile,
     DiscoveryResponse,
-    FindingsLedger,
 )
 from app.services.agent_runtime import get_profile
 from app.services.audit import log_event
@@ -38,6 +42,129 @@ def _conf_label(confidence: float | None) -> str:
     return "low"
 
 
+def _blank_field(key: str) -> dict[str, Any]:
+    return {
+        "value": None,
+        "prefilled": False,
+        "client_only": key in CLIENT_ONLY_FIELDS,
+        "confidence": "unknown",
+        **{k: v for k, v in (FIELD_META.get(key) or {}).items() if k != "client_only"},
+    }
+
+
+def build_questionnaire_fields(
+    *,
+    intake: dict[str, Any] | None = None,
+    prior_rows: list[DiscoveryResponse] | None = None,
+) -> dict[str, Any]:
+    """Empty catalog, then overlay intake + CDD / questionnaire rows."""
+    questionnaire_fields: dict[str, Any] = {
+        key: _blank_field(key) for key in list(RESEARCH_FIELDS) + list(CLIENT_ONLY_FIELDS)
+    }
+    intake = dict(intake or {})
+    for key in list(RESEARCH_FIELDS) + list(CLIENT_ONLY_FIELDS):
+        if key in intake and intake[key] not in (None, "", [], {}):
+            questionnaire_fields[key]["value"] = intake[key]
+            questionnaire_fields[key]["prefilled"] = True
+            questionnaire_fields[key]["from_intake"] = True
+
+    # Newest row wins the value. CDD / AI origin is kept when a later client
+    # submit repeats the same value, so the UI can still color the source.
+    _rank = {"client_questionnaire": 3, "cdd_upload": 2, "ai_gap_fill": 1}
+    chosen: dict[str, DiscoveryResponse] = {}
+    origin: dict[str, str] = {}
+    for row in reversed(list(prior_rows or [])):
+        if row.field_key == "competitors":
+            continue
+        if row.source not in _rank:
+            continue
+        val = (row.field_value or {}).get("value")
+        if val in (None, "", [], {}):
+            continue
+        prev = chosen.get(row.field_key)
+        prev_val = (prev.field_value or {}).get("value") if prev else None
+        if row.source == "client_questionnaire" and origin.get(row.field_key) in {"cdd", "ai"}:
+            if prev_val != val:
+                origin[row.field_key] = "client"
+        elif row.source == "cdd_upload":
+            origin[row.field_key] = "cdd"
+        elif row.source == "ai_gap_fill" and origin.get(row.field_key) != "cdd":
+            origin[row.field_key] = "ai"
+        elif row.field_key not in origin:
+            origin[row.field_key] = "client"
+        current = chosen.get(row.field_key)
+        if current is None or _rank[row.source] >= _rank[current.source]:
+            chosen[row.field_key] = row
+
+    for key, row in chosen.items():
+        val = (row.field_value or {}).get("value")
+        meta = questionnaire_fields.get(key) or _blank_field(key)
+        src = origin.get(key)
+        questionnaire_fields[key] = {
+            **meta,
+            "value": val,
+            "prefilled": True,
+            "from_cdd_upload": src == "cdd",
+            "from_ai": src == "ai",
+            "confidence": (
+                "high"
+                if src == "cdd"
+                else "low"
+                if src == "ai"
+                else (meta.get("confidence") or "high")
+            ),
+        }
+    return questionnaire_fields
+
+
+def build_discovery_questionnaire_card(
+    *,
+    client: Client,
+    fields: dict[str, Any],
+    confirm_rerun: bool = False,
+    profile: ClientDigitalProfile | None = None,
+) -> dict[str, Any]:
+    return {
+        "card_type": "discovery_report",
+        "title": "Phase 1 — Discovery questionnaire",
+        "subtitle": "Review CDD fields, complete blanks, then submit",
+        "fields": fields,
+        "research_fields": {},
+        "discrepancies": [],
+        "objective_options": OBJECTIVE_OPTIONS,
+        "field_catalog": field_ui_meta(),
+        "agent_key": "discovery_agent",
+        "actions": ["submit_questionnaire", "upload_cdd"],
+        "required_role": required_role_for("discovery_agent"),
+        "step": "Phase 1",
+        "prior_approved": (
+            {
+                "commercial_scope": profile.commercial_scope if profile else None,
+                "marketing_context": profile.marketing_context if profile else None,
+            }
+            if confirm_rerun and profile is not None
+            else None
+        ),
+        "client_name": client.display_name,
+    }
+
+
+async def load_discovery_prior_rows(
+    db: AsyncSession, client_id: UUID
+) -> list[DiscoveryResponse]:
+    return list(
+        (
+            await db.execute(
+                select(DiscoveryResponse)
+                .where(DiscoveryResponse.client_id == client_id)
+                .order_by(DiscoveryResponse.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
 async def run_discovery(
     db: AsyncSession,
     *,
@@ -46,8 +173,10 @@ async def run_discovery(
     user_id: UUID,
     message: str,
 ) -> list[dict]:
-    """Execute D1 + D2 emission. D3/D4 follow questionnaire submit. D5 on approve."""
-    _ = load_skill("discovery_agent")  # ensure skill contract is loadable
+    """Emit CDD upload prompt. Questionnaire + AI gap-fill follow upload/submit."""
+    _ = load_skill("discovery_agent")
+    _ = session_id
+    _ = user_id
     events: list[dict] = []
     profile = await get_profile(db, client.id)
 
@@ -88,114 +217,71 @@ async def run_discovery(
         )
         return events
 
+    # If a CDD was already uploaded this session, skip the prompt and show the form.
+    prior_rows = await load_discovery_prior_rows(db, client.id)
+    has_cdd = any(
+        r.source == "cdd_upload"
+        and (r.field_value or {}).get("value") not in (None, "", [], {})
+        for r in prior_rows
+    )
+
     profile.discovery_status = "in_progress"
     await db.flush()
 
-    events.append(
-        {
-            "type": "system_notice",
-            "content": (
-                f"Phase 1 — Discovery research for {client.display_name}"
-                + (
-                    f" ({client.industry})"
-                    if client.industry
-                    else " (inferring industry from public footprint)"
-                )
-                + " — website, local/social signals, and review themes…"
-            ),
-        }
-    )
-
-    # D1 — automated pre-research BEFORE any client questions
-    research = await live_pre_research(
-        client.display_name,
-        client.primary_url,
-        industry=client.industry,
-    )
-    discrepancy_by_field = {}
-    for item in research.get("discrepancies") or []:
-        if not isinstance(item, dict):
-            continue
-        key = str(item.get("field_key") or "").strip()
-        if not key:
-            continue
-        discrepancy_by_field[key] = str(item.get("explanation") or "").strip()
-
-    # Persist inferred industry so competitor/tracking phases stay vertical-aware
-    inferred_payload = research.get("inferred_industry") or {}
-    inferred_industry = inferred_payload.get("value") if isinstance(inferred_payload, dict) else None
-    if isinstance(inferred_industry, str):
-        inferred_industry = inferred_industry.strip() or None
-    if inferred_industry and not (client.industry or "").strip():
-        client.industry = inferred_industry
-    elif inferred_industry and client.industry and inferred_industry.lower() != client.industry.lower():
-        discrepancy_by_field.setdefault(
-            "inferred_industry",
-            f"Intake industry was '{client.industry}'; site research suggests '{inferred_industry}'.",
+    if has_cdd:
+        intake = ((profile.marketing_context or {}).get("client_intake") or {}) if profile.marketing_context else {}
+        fields = build_questionnaire_fields(intake=intake, prior_rows=prior_rows)
+        card = build_discovery_questionnaire_card(
+            client=client, fields=fields, confirm_rerun=confirm_rerun, profile=profile
         )
-
-    research_rows: list[DiscoveryResponse] = []
-    draft_fields: dict[str, dict] = {}
-    for field_key, payload in research.items():
-        if field_key == "discrepancies":
-            continue
-        if not isinstance(payload, dict):
-            payload = {"value": payload, "confidence": 0.3}
-        conf = float(payload.get("confidence", 0.5) or 0.5)
-        row = DiscoveryResponse(
-            client_id=client.id,
-            source="pre_research",
-            field_key=field_key,
-            field_value={"value": payload.get("value")},
-            confidence=Decimal(str(conf)),
-            discrepancy_flag=field_key in discrepancy_by_field,
-            status="pending",
+        events.append(
+            {
+                "type": "agent_message",
+                "agent_key": "discovery_agent",
+                "content": (
+                    f"Phase 1 Discovery for {client.display_name}: CDD fields are loaded. "
+                    "Review, complete any blanks, then submit — AI will draft only what is still missing."
+                ),
+            }
         )
-        db.add(row)
-        research_rows.append(row)
-        draft_fields[field_key] = {
-            "value": payload.get("value"),
-            "confidence": _conf_label(conf),
-            "confidence_score": conf,
-            "source": "pre_research",
-        }
-    await db.flush()
-
-    # Publish draft into shared playground memory immediately (before CSM approve)
-    commercial_draft: dict = {}
-    marketing_draft: dict = dict(profile.marketing_context or {})
-    for field_key, meta in draft_fields.items():
-        val = meta.get("value")
-        if val in (None, "", [], {}):
-            continue
-        if field_key in (
-            "business_model",
-            "products",
-            "positioning",
-            "geographic_focus",
-            "b2b_b2c",
-            "business_goal",
-        ):
-            commercial_draft[field_key] = val
-        else:
-            marketing_draft[field_key] = val
-    if commercial_draft:
-        commercial_draft["_draft"] = True
-        profile.commercial_scope = {**(profile.commercial_scope or {}), **commercial_draft}
-    if marketing_draft:
-        marketing_draft["_draft"] = True
-        profile.marketing_context = marketing_draft
-
-    for row in research_rows:
-        db.add(
-            FindingsLedger(
-                client_id=client.id,
-                agent_key="discovery_agent",
-                source_table="discovery_responses",
-                source_id=row.id,
-                confidence=_conf_label(float(row.confidence) if row.confidence is not None else None),
-                status="pending",
-            )
+        events.append({"type": "structured_card", "payload": card})
+    else:
+        events.append(
+            {
+                "type": "system_notice",
+                "content": (
+                    f"Phase 1 — Discovery for {client.display_name}: upload the Client "
+                    "Discovery Document (Excel, Word, or PDF) to begin."
+                ),
+            }
+        )
+        events.append(
+            {
+                "type": "agent_message",
+                "agent_key": "discovery_agent",
+                "content": (
+                    f"Upload the CDD for {client.display_name} to start Discovery. "
+                    "After the file is imported, confirm the extracted fields and fill any "
+                    "gaps. AI drafts only remaining blanks after you submit — nothing is "
+                    "researched until then."
+                ),
+            }
+        )
+        events.append(
+            {
+                "type": "structured_card",
+                "payload": {
+                    "card_type": "discovery_cdd_prompt",
+                    "title": "Phase 1 — Upload Client Discovery Document",
+                    "subtitle": "CDD first — then confirm fields and submit",
+                    "agent_key": "discovery_agent",
+                    "actions": ["upload_cdd"],
+                    "required_role": required_role_for("discovery_agent"),
+                    "step": "Phase 1",
+                    "client_name": client.display_name,
+                    "hint": "Accepted: .xlsx, .xlsm, .csv, .docx, .pdf, .txt",
+                },
+            }
         )
 
     await log_event(
@@ -203,108 +289,13 @@ async def run_discovery(
         client_id=client.id,
         actor_type="agent",
         event_type="tool_call",
-        event_detail={"tool": "web_research", "agent": "discovery_agent", "step": "D1"},
+        event_detail={
+            "tool": "discovery_cdd_prompt" if not has_cdd else "discovery_questionnaire",
+            "agent": "discovery_agent",
+            "step": "D1",
+        },
     )
 
-    # One Phase 1 report: public research is pre-filled into the confirmation form.
-    intake = ((profile.marketing_context or {}).get("client_intake") or {}) if profile.marketing_context else {}
-    questionnaire_fields = {}
-    for key, meta in draft_fields.items():
-        questionnaire_fields[key] = {
-            "value": meta["value"] if key not in CLIENT_ONLY_FIELDS else (
-                meta["value"] if meta["confidence"] != "low" else None
-            ),
-            "prefilled": key not in CLIENT_ONLY_FIELDS or meta["confidence"] != "low",
-            "client_only": key in CLIENT_ONLY_FIELDS,
-            "confidence": meta["confidence"],
-            **{k: v for k, v in (FIELD_META.get(key) or {}).items() if k != "client_only"},
-        }
-    for key in list(RESEARCH_FIELDS) + list(CLIENT_ONLY_FIELDS):
-        if key not in questionnaire_fields:
-            questionnaire_fields[key] = {
-                "value": None,
-                "prefilled": False,
-                "client_only": key in CLIENT_ONLY_FIELDS,
-                "confidence": "unknown",
-                **{k: v for k, v in (FIELD_META.get(key) or {}).items() if k != "client_only"},
-            }
-        # Early intake may pre-fill overlapping client fields (e.g. objectives)
-        if key in intake and intake[key] not in (None, "", [], {}):
-            current = questionnaire_fields[key].get("value")
-            if current in (None, "", [], {}):
-                questionnaire_fields[key]["value"] = intake[key]
-                questionnaire_fields[key]["prefilled"] = True
-                questionnaire_fields[key]["from_intake"] = True
-
-    # Merge any prior CDD upload rows
-    prior_rows = (
-        await db.execute(
-            select(DiscoveryResponse)
-            .where(DiscoveryResponse.client_id == client.id)
-            .order_by(DiscoveryResponse.created_at.desc())
-        )
-    ).scalars().all()
-    seen_keys: set[str] = set()
-    for row in prior_rows:
-        if row.field_key in seen_keys:
-            continue
-        seen_keys.add(row.field_key)
-        # Competitor discovery belongs exclusively to Phase 4. Ignore legacy
-        # or uploaded competitor rows when rebuilding the Phase 1 report.
-        if row.field_key == "competitors":
-            continue
-        if row.source not in ("cdd_upload", "client_questionnaire"):
-            continue
-        val = (row.field_value or {}).get("value")
-        if val in (None, "", [], {}):
-            continue
-        meta = questionnaire_fields.get(row.field_key) or {
-            "client_only": row.field_key in CLIENT_ONLY_FIELDS,
-            **{k: v for k, v in (FIELD_META.get(row.field_key) or {}).items() if k != "client_only"},
-        }
-        meta = {
-            **meta,
-            "value": val,
-            "prefilled": True,
-            "from_cdd_upload": row.source == "cdd_upload",
-            "confidence": meta.get("confidence") or "high",
-        }
-        questionnaire_fields[row.field_key] = meta
-
-    discovery_report = {
-        "card_type": "discovery_report",
-        "title": "Phase 1 — Discovery report",
-        "subtitle": "Public research, client context, and commercial scope",
-        "fields": questionnaire_fields,
-        "research_fields": draft_fields,
-        "discrepancies": research.get("discrepancies", []),
-        "objective_options": OBJECTIVE_OPTIONS,
-        "field_catalog": field_ui_meta(),
-        "agent_key": "discovery_agent",
-        "actions": ["submit_questionnaire", "upload_cdd"],
-        "required_role": required_role_for("discovery_agent"),
-        "step": "Phase 1",
-        "prior_approved": (
-            {
-                "commercial_scope": profile.commercial_scope,
-                "marketing_context": profile.marketing_context,
-            }
-            if confirm_rerun
-            else None
-        ),
-    }
-    events.append(
-        {
-            "type": "agent_message",
-            "agent_key": "discovery_agent",
-            "content": (
-                f"Phase 1 Discovery report ready for {client.display_name}. "
-                "Public research is pre-filled; confirm the facts and complete any client-only "
-                "commercial fields before the single confirmation gate."
-            ),
-        }
-    )
-    events.append({"type": "structured_card", "payload": discovery_report})
     events.append(
         {
             "type": "phase_status",
@@ -317,19 +308,54 @@ async def run_discovery(
     events.append(
         {
             "type": "system_notice",
-            "content": "Next: submit the Discovery report, then approve the single confirmation gate.",
+            "content": (
+                "Next: upload the CDD, confirm fields, submit the questionnaire, "
+                "then approve the confirmation gate."
+                if not has_cdd
+                else "Next: submit the Discovery questionnaire, then approve the confirmation gate."
+            ),
         }
     )
     return events
+
+
+async def build_questionnaire_events_after_cdd(
+    db: AsyncSession,
+    *,
+    client: Client,
+) -> list[dict]:
+    """Emit the editable questionnaire after a successful CDD import."""
+    profile = await get_profile(db, client.id)
+    prior_rows = await load_discovery_prior_rows(db, client.id)
+    intake = ((profile.marketing_context or {}).get("client_intake") or {}) if profile.marketing_context else {}
+    fields = build_questionnaire_fields(intake=intake, prior_rows=prior_rows)
+    card = build_discovery_questionnaire_card(client=client, fields=fields, profile=profile)
+    return [
+        {
+            "type": "agent_message",
+            "agent_key": "discovery_agent",
+            "content": (
+                f"CDD imported for {client.display_name}. Review the extracted fields, "
+                "complete anything blank, then submit. AI will fill only remaining gaps."
+            ),
+        },
+        {"type": "structured_card", "payload": card},
+        {
+            "type": "system_notice",
+            "content": "Next: submit the Discovery questionnaire, then approve the confirmation gate.",
+        },
+    ]
 
 
 async def build_discovery_signoff_events(
     db: AsyncSession,
     *,
     client_id: UUID,
+    ai_filled: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Build the single Discovery confirmation gate after report submission."""
     events: list[dict] = []
+    ai_filled = dict(ai_filled or {})
     profile = await get_profile(db, client_id)
     client = (
         await db.execute(select(Client).where(Client.id == client_id))
@@ -342,10 +368,19 @@ async def build_discovery_signoff_events(
     ).scalars().all()
 
     from_research: dict = {}
+    from_cdd: dict = {}
     confirmed: dict = {}
     discrepancies = []
     for r in rows:
         val = (r.field_value or {}).get("value")
+        if r.source == "ai_gap_fill":
+            if r.field_key not in ai_filled and val not in (None, "", [], {}):
+                ai_filled[r.field_key] = {
+                    "value": val,
+                    "confidence": float(r.confidence) if r.confidence is not None else 0.4,
+                    "rationale": (r.field_value or {}).get("rationale"),
+                }
+            continue
         if r.source == "pre_research":
             from_research[r.field_key] = val
             if r.discrepancy_flag:
@@ -355,12 +390,16 @@ async def build_discovery_signoff_events(
                         "explanation": "Research vs client answer may conflict — review before sign-off.",
                     }
                 )
+        elif r.source == "cdd_upload":
+            from_cdd[r.field_key] = val
         elif r.source == "client_questionnaire":
             confirmed[r.field_key] = val
 
-    # Enrich discrepancies when research != confirmed
+    # Prefer CDD extract as the "from document" column when no pre_research ran.
+    baseline = from_research or from_cdd
+
     for key, cval in confirmed.items():
-        if key in from_research and from_research[key] != cval:
+        if key in baseline and baseline[key] != cval:
             if not any(
                 isinstance(d, dict) and d.get("field_key") == key for d in discrepancies
             ):
@@ -368,7 +407,9 @@ async def build_discovery_signoff_events(
                     {
                         "field_key": key,
                         "explanation": (
-                            f"Client answer differs from pre-research for {key.replace('_', ' ')}."
+                            f"Client answer differs from "
+                            f"{'pre-research' if from_research else 'CDD'} "
+                            f"for {key.replace('_', ' ')}."
                         ),
                     }
                 )
@@ -382,17 +423,25 @@ async def build_discovery_signoff_events(
         "card_type": "discovery_confirmation",
         "title": "Discovery confirmation gate",
         "subtitle": "Client Success Manager approval",
-        "from_research": from_research,
+        "from_research": baseline,
+        "from_cdd": from_cdd,
         "confirmed_by_client": confirmed,
         "discrepancies": discrepancies,
         "completeness_score": float(score),
         "missing_fields": missing,
+        "ai_filled": ai_filled,
         "agent_key": "discovery_agent",
         "actions": ["approve", "edit", "reject"],
         "required_role": required_role_for("discovery_agent"),
         "client_name": client.display_name,
         "step": "Confirmation gate",
     }
+    ai_note = (
+        f" {len(ai_filled)} blank field(s) were AI-drafted and count as low confidence "
+        "— verify them before approving."
+        if ai_filled
+        else ""
+    )
     events.append(
         {
             "type": "agent_message",
@@ -400,6 +449,7 @@ async def build_discovery_signoff_events(
             "content": (
                 f"Discovery is {float(score):.0f}% complete. Review the report, resolve any "
                 "discrepancies, and approve once to publish Commercial Scope + Marketing Context."
+                + ai_note
             ),
         }
     )
