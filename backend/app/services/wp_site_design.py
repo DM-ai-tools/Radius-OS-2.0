@@ -144,6 +144,7 @@ async def fetch_wordpress_design(primary_url: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return empty | {"error": type(exc).__name__}
     design = design_from_html(html, page_url=page_url, kit_css=kit_css)
+    design["page_html"] = html[:1_000_000]
     if not design["available"]:
         design["error"] = "no_public_design"
     return design

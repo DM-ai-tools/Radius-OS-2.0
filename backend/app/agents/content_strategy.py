@@ -159,7 +159,7 @@ async def run_content_strategy(
         event_detail={
             "job_type": "content_strategy",
             "pillars": len(summary.get("pillars") or []),
-            "queue": len(summary.get("priority_queue") or []),
+            "queue": len(summary.get("content_plan") or summary.get("priority_queue") or []),
         },
     )
     await db.flush()
@@ -173,7 +173,8 @@ async def run_content_strategy(
         **summary,
     }
 
-    qw = sum(1 for p in (summary.get("priority_queue") or []) if p.get("priority") == "Quick win")
+    queue = summary.get("content_plan") or summary.get("priority_queue") or []
+    qw = sum(1 for p in queue if isinstance(p, dict) and p.get("priority") == "Quick win")
     events.append(
         {
             "type": "agent_message",
@@ -181,7 +182,7 @@ async def run_content_strategy(
             "content": (
                 f"Phase 6 draft ready for {client.display_name}: "
                 f"{len(summary.get('core_topics') or [])} core topics, "
-                f"{len(summary.get('priority_queue') or [])} prioritized pieces "
+                f"{len(queue)} prioritized pieces "
                 f"({qw} quick wins), "
                 f"{len(summary.get('content_gaps') or [])} content gaps, "
                 "12-week calendar"
@@ -210,7 +211,7 @@ async def run_content_strategy(
     events.extend(
         handoff_events(
             "content_strategy",
-            result_line=f"{len(summary.get('priority_queue') or [])} topics in priority queue.",
+            result_line=f"{len(queue)} topics in the content plan.",
         )
     )
     return events

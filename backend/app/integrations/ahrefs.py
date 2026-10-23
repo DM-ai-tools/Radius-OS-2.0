@@ -152,11 +152,21 @@ async def _get_with_error(
                 return None, "ahrefs_forbidden"
             return None, "ahrefs_http_error"
 
+        units = resp.headers.get("x-api-units-cost-total-actual")
+        try:
+            unit_count = int(units) if units is not None else None
+        except (TypeError, ValueError):
+            unit_count = None
+        # Ahrefs bills API units, not a flat dollar per call. The unit count is
+        # stored so the tracker can show it; dollars stay unset.
         await record_api_call(
             provider="ahrefs",
             operation=path,
+            prompt_tokens=unit_count,
             latency_ms=int((time.perf_counter() - t0) * 1000),
             status="success",
+            apply_flat_estimate=False,
+            request_meta={"ahrefs_units": unit_count} if unit_count is not None else None,
         )
         if path.startswith("/keywords-explorer"):
             reset_keywords_explorer_block()

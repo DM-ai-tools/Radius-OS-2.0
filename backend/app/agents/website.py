@@ -129,9 +129,30 @@ def _seo_audit_measured(report: dict | None) -> bool:
         return False
     if report.get("status") in {"timeout", "error"} or report.get("audit_failed"):
         return False
-    pages = report.get("pages") or []
+    pages = [p for p in (report.get("pages") or []) if isinstance(p, dict)]
+    if pages:
+        return any(
+            not str(p.get("score_band") or "").lower().startswith("not measured")
+            for p in pages
+        )
     analyzed = report.get("pages_analyzed")
-    return bool(pages) or (isinstance(analyzed, int) and analyzed > 0)
+    return isinstance(analyzed, int) and analyzed > 0
+
+
+def _known_sitemap_pages(summary: dict | None) -> list[dict]:
+    """URLs already read from an XML sitemap, with page vs post kept apart."""
+    sitemap = summary.get("site_sitemap") if isinstance(summary, dict) else None
+    rows = sitemap.get("pages") if isinstance(sitemap, dict) else None
+    out: list[dict] = []
+    for row in rows or []:
+        if not isinstance(row, dict) or not row.get("url"):
+            continue
+        cluster = str(row.get("cluster") or "")
+        section = str(row.get("sitemap_section") or "")
+        if not section and cluster == "blog":
+            section = "post"
+        out.append({"url": str(row["url"]), "sitemap_section": section})
+    return out
 
 
 async def run_website(
@@ -276,6 +297,7 @@ async def run_website(
                 ),
             }
         )
+        known_pages = _known_sitemap_pages(profile.website_situation_summary)
         seo_audit_report = await bounded(
             run_seo_audit(
                 client.primary_url,
@@ -284,30 +306,45 @@ async def run_website(
                 max_pages=page_cap,
                 # Stop inside the audit before wait_for cancels, so partial pages survive.
                 time_budget_seconds=max(45.0, float(seo_audit_timeout) - 10.0),
+                known_pages=known_pages,
             ),
             "Comprehensive SEO audit",
             timeout=seo_audit_timeout,
         )
         if not _seo_audit_measured(seo_audit_report):
-            seo_audit_report = {
-                **(seo_audit_report or {}),
-                "site": (seo_audit_report or {}).get("site") or client.primary_url,
-                "pages_analyzed": int((seo_audit_report or {}).get("pages_analyzed") or 0),
-                "overall_score": None,
-                "score_band": "Not measured",
-                "audit_failed": True,
-                "error": (
-                    (seo_audit_report or {}).get("error_message")
-                    or (seo_audit_report or {}).get("error")
-                    or (seo_audit_report or {}).get("note")
-                    or "SEO audit did not measure any pages."
-                ),
-                "pages": [],
-                "critical": [],
-                "warnings": [],
-                "opportunities": [],
-                "severity": "warning",
-            }
+            kept_pages = [
+                p for p in ((seo_audit_report or {}).get("pages") or []) if isinstance(p, dict)
+            ]
+            if kept_pages:
+                # Captcha blocked the HTML, so nothing was scored. The page
+                # list is still the inventory the cluster chips count.
+                seo_audit_report = {
+                    **(seo_audit_report or {}),
+                    "pages_analyzed": len(kept_pages),
+                    "overall_score": None,
+                    "score_band": "Not measured",
+                    "audit_failed": False,
+                }
+            else:
+                seo_audit_report = {
+                    **(seo_audit_report or {}),
+                    "site": (seo_audit_report or {}).get("site") or client.primary_url,
+                    "pages_analyzed": int((seo_audit_report or {}).get("pages_analyzed") or 0),
+                    "overall_score": None,
+                    "score_band": "Not measured",
+                    "audit_failed": True,
+                    "error": (
+                        (seo_audit_report or {}).get("error_message")
+                        or (seo_audit_report or {}).get("error")
+                        or (seo_audit_report or {}).get("note")
+                        or "SEO audit did not measure any pages."
+                    ),
+                    "pages": [],
+                    "critical": [],
+                    "warnings": [],
+                    "opportunities": [],
+                    "severity": "warning",
+                }
         sa = WebsiteAudit(
             client_id=client.id,
             audit_type="seo_audit",

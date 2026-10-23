@@ -34,6 +34,7 @@ from app.services.keyword_opportunity import (
     detect_intent,
     is_noisy_keyword,
     is_stale_year_keyword,
+    normalize_provider_intent,
 )
 from app.services.keyword_relevance import (
     RelevanceContext,
@@ -273,7 +274,8 @@ def build_competitor_keyword_rows(
         if volume_int is None or volume_int <= int(min_volume):
             continue
 
-        intent = detect_intent(keyword, metrics.get("intent"))
+        provider_intent = normalize_provider_intent(metrics.get("intent"))
+        intent = detect_intent(keyword, provider_intent)
         rows.append(
             {
                 "keyword": keyword,
@@ -282,6 +284,8 @@ def build_competitor_keyword_rows(
                 "cpc": metrics.get("cpc"),
                 "traffic_potential": None,
                 "intent": intent,
+                "intent_basis": "measured" if provider_intent else "unmeasured",
+                "provider_intent": provider_intent,
                 "funnel": detect_funnel(keyword, intent),
                 "parent_topic": keyword,
                 "source": "competitor_page",

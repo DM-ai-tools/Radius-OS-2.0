@@ -136,8 +136,8 @@ async def score_entity_live(
     keys = [p[0] for p in PARAMS]
     labels = {p[0]: p[1] for p in PARAMS}
     industry_ctx = (industry or "infer from site — any vertical").strip()
-    # Skills always score on Anthropic Claude Sonnet (skill_model).
-    competitor_model = get_settings().skill_model
+    # Competitor scoring uses Gemini Pro through OpenRouter.
+    competitor_model = get_settings().competitor_model
     try:
         payload = await asyncio.wait_for(
             synthesize_json(

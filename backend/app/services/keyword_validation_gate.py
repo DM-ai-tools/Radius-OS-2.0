@@ -32,11 +32,11 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from app.config import get_settings
-from app.integrations.llm import _parse_json_content, _skill_chat
+from app.integrations.llm import _parse_json_content, keyword_analysis_chat, keyword_analysis_ready
 from app.logging_config import get_logger
 from app.services.cache import cache_get_many, cache_set_many
 
@@ -59,6 +59,16 @@ class KeywordVerdict:
     verdict: str
     score: float
     reason: str
+    intent: str = ""
+    topic: str = ""
+
+
+# v4 (2026-10-22): judged on business potential. Tool seekers, learning
+# material, platform navigation, consumer search use, other languages and other
+# markets are drops; informational queries stay only when the service can be
+# pitched from the answer. The version is in the cache key, so v3 verdicts are
+# not reused.
+PROMPT_VERSION = "kwjudge-v4"
 
 
 _SYSTEM = """\
@@ -72,16 +82,28 @@ A keyword is "keep" only if a real prospective BUYER of THIS service, from THIS
 business, in THIS market, would plausibly search it while looking for that
 service or researching the problem it solves.
 
-A keyword is relevant only when the whole query is the service, a capability of
-that service, a commercial need for it, or a useful informational topic that
-directly supports it. Do not keep a keyword because it shares one token
-(AI, email, marketing, google, website) with the service, or because it would
-have high volume. You are not given metrics. Do not invent them.
+Judge business potential: could THIS business naturally pitch THIS service to
+the person searching? Keep the query when it is the service, a capability of it,
+a commercial need for it, or a question from someone who could become a client
+(what it costs, how to choose a provider, whether they need it, a problem the
+service fixes). An informational query is kept only when the business could
+pitch the service from the answer. A definition, a general fact about how
+something works, or a do-it-yourself task where hiring help is never the answer
+has no business potential: drop it. Do not keep a keyword because it shares one
+token (AI, email, marketing, google, website) with the service, or because it
+would have high volume. You are not given metrics. Do not invent them.
 
 Use "drop" when the searcher is not a buyer at all (jobs, salary, careers,
-courses, "how to become"), when the keyword belongs to a different industry or a
-service this business does not sell, when it names a competitor's brand, or when
-it is a bare generic head term with no buying context.
+courses, certifications, templates, examples, "how to become"); when they want a
+tool, software, an app, a checker or a free resource rather than someone to do
+the work (unless this business sells that tool); when they are going to a
+platform itself (a login, or just the platform's name such as "google ads" or
+"google keyword planner"); when they are using a search engine rather than
+marketing on one ("advanced search on google", "ai search engine"); when the
+query is in another language or names a country or city this business does not
+serve; when the keyword belongs to a different industry or a service this
+business does not sell; when it names a competitor's brand; or when it is a bare
+generic head term with no buying context.
 
 Use "review" only when the keyword is genuinely ambiguous given the context.
 Do not use "review" to avoid deciding.
@@ -97,11 +119,84 @@ Hard rules:
 - "score" is your confidence 0.00-1.00 that this is a genuine buying-journey
   query for the named service at THIS business. Use the full range. If you mark
   a keyword "keep" but are not confident, give it a low score.
-- "reason" is at most 12 words, plain text.
+- A useful long-tail query can be relevant without repeating the exact service
+  name, when it describes a capability, problem, or buyer task of that service.
+  Do not drop it only because the service name is absent.
+- "intent" is informational, commercial, transactional, or navigational.
+- "topic" is a short name for the subject, taken from the query itself.
 
-Return JSON only, no markdown fences, exactly:
-{"keywords":[{"keyword":"<exact input>","relevant":true,"reason":"<=12 words"}]}
-"relevant" is true only for a keyword you would have marked keep. Do not add keywords. Do not output volume, CPC, difficulty, or intent."""
+Return JSON only, no markdown fences, one row per input keyword, in input order:
+{"r":[["<exact input keyword>","k","c","short topic"],["<exact input keyword>","d","i","short topic","why, <=8 words"]]}
+Row fields, in order:
+1. the keyword, echoed character-for-character;
+2. "k" if you would keep it (relevant), "d" if you would drop it;
+3. intent: "i" informational, "c" commercial, "t" transactional, "n" navigational;
+4. topic: at most 4 words, taken from the query;
+5. only on "d" rows: the reason, at most 8 words.
+Do not add keywords. Do not output volume, CPC, difficulty or scores."""
+
+# Haiku's keep and drop are final. Only "u" (unsure), a missing row, or a
+# failed screen is sent to Sonnet. That is what keeps this phase under its
+# dollar cap: the last live run sent nearly every keyword to Sonnet.
+_SCREEN_SYSTEM = """\
+You are the keyword filter for ONE business and ONE service. Your keep and
+your drop are final. A second, more expensive judge runs only on keywords
+you mark unsure.
+
+- "k" when the query is clearly something a prospective buyer of THIS service
+  would search. That decision stands.
+- "d" when it is clearly not: jobs, salary, careers, hiring, courses,
+  certifications, templates, examples, "how to become", login, a tool, software,
+  app or checker the searcher wants for themselves (unless the business sells
+  it), a platform's own name on its own ("google ads", "mailchimp"), someone
+  using a search engine rather than marketing on one, another language, a
+  market the business does not serve, a named product of another company, or a
+  different trade.
+- An informational query is "k" only when this business could pitch the
+  service from the answer; a definition or a do-it-yourself task is "d".
+- "u" only when you genuinely cannot tell. Use it rarely.
+
+Hard rules:
+- Return EXACTLY one row for every keyword in the input list.
+- Echo each keyword back character-for-character.
+- Do not invent keywords. Do not use volume.
+
+Return JSON only, no markdown fences:
+{"r":[["<exact input keyword>","k","c","topic"],["<exact input keyword>","d","n","topic","why, <=8 words"],["<exact input keyword>","u","c","topic"]]}
+Row fields: keyword, "k", "d", or "u", intent i/c/t/n, topic of at most 4 words,
+and a reason only on "d" rows.
+"""
+
+# The compact row format above replaced one JSON object per keyword (2026-10-09).
+# Same instructions, same judgement — only the reply is shorter: no keys, codes for
+# the verdict and intent, and a reason only where it is read (drops). Measured on
+# real Click Trends keywords: 99.5% agreement with the object format's stable
+# verdicts (the object format agrees with itself 98.4–98.9%), 43% fewer output
+# tokens, calls ~30 s instead of ~50 s. Verdicts mean the same, so cached
+# verdicts stay valid and PROMPT_VERSION is unchanged.
+_VERDICT_CODES = {"k": True, "d": False, "u": None}
+_INTENT_CODES = {
+    "i": "informational",
+    "c": "commercial",
+    "t": "transactional",
+    "n": "navigational",
+}
+
+
+def _from_compact(row: list[Any]) -> dict[str, Any] | None:
+    """A compact ``[keyword, k|d, intent, topic, reason?]`` row as an object row."""
+    if len(row) < 2 or not isinstance(row[0], str):
+        return None
+    code = str(row[1] or "").strip().lower()[:1]
+    intent = str(row[2] if len(row) > 2 else "").strip().lower()
+    return {
+        "keyword": row[0],
+        # Neither k nor d: undecided, which the object format expressed as null.
+        "relevant": _VERDICT_CODES.get(code),
+        "intent": _INTENT_CODES.get(intent[:1], intent),
+        "topic": row[3] if len(row) > 3 else "",
+        "reason": row[4] if len(row) > 4 else "",
+    }
 
 
 def _norm(text: Any) -> str:
@@ -120,11 +215,13 @@ def _sanitize(text: Any, *, limit: int = 80) -> str:
     return cleaned[:limit]
 
 
-# One verdict row — keyword, verdict, score and a short reason — costs roughly
-# this many output tokens. A 200-keyword batch against the 2048-token default
-# was cut off mid-array, and the JSONDecodeError quarantined all 200: on a real
-# Click Trends run that lost 174 of 283 keywords to "unjudged".
-TOKENS_PER_VERDICT = 40
+# Output tokens one keyword costs, including the reasoning Claude does before it
+# answers (about half of the total). Measured 2026-10-09 on real batches: ~45 per
+# keyword in the compact row format (the old object format cost ~80, and 80-keyword
+# batches overran the 8192 cap). A 200-keyword batch against the old 2048-token
+# default was cut off mid-array and quarantined all 200: on a real Click Trends run
+# that lost 174 of 283 keywords to "unjudged".
+TOKENS_PER_VERDICT = 70
 
 
 def tokens_for_batch(batch_size: int) -> int:
@@ -135,11 +232,8 @@ def tokens_for_batch(batch_size: int) -> int:
 
 
 def _provider_ready() -> bool:
-    """Whether a real judge can run. Skills require a direct Anthropic key."""
-    settings = get_settings()
-    if settings.use_mock_llm:
-        return False
-    return bool(settings.anthropic_api_key)
+    """Whether a real judge can run (Anthropic, or Claude Sonnet on OpenRouter)."""
+    return keyword_analysis_ready()
 
 
 async def _skill_judge(
@@ -154,7 +248,7 @@ async def _skill_judge(
     settings = get_settings()
     last_raw: str | None = None
     for attempt in range(2):
-        raw = await _skill_chat(
+        raw = await keyword_analysis_chat(
             system=system,
             user=user,
             model=settings.skill_model,
@@ -189,6 +283,29 @@ async def _skill_judge(
     return None
 
 
+async def _screen_judge(
+    system: str, user: str, *, batch_size: int = 0
+) -> dict[str, Any] | None:
+    """Haiku pre-screen. No OpenRouter retry — a miss goes to the Sonnet judge."""
+    settings = get_settings()
+    raw = await keyword_analysis_chat(
+        system=system,
+        user=user,
+        model=settings.keyword_screen_model,
+        max_tokens=tokens_for_batch(batch_size),
+        allow_fallback=False,
+    )
+    if not raw or not str(raw).strip():
+        return None
+    try:
+        parsed = _parse_json_content(raw)
+    except Exception:  # noqa: BLE001
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    return {"_raw": raw}
+
+
 def _coerce_score(raw: Any) -> float | None:
     if isinstance(raw, dict):
         raw = raw.get("score")
@@ -221,6 +338,8 @@ def _context_block(
     competitor_domains: list[str],
     service_label: str,
     target_type: str,
+    offered: list[str] | None = None,
+    audience: str | None = None,
 ) -> str:
     return "\n".join(
         [
@@ -229,8 +348,11 @@ def _context_block(
             f"Website: {_sanitize(primary_url, limit=120) or '(not provided)'}",
             f"Industry: {_sanitize(industry, limit=80) or '(not stated)'}",
             f"Market / geography: {_sanitize(geography, limit=80) or '(not stated)'}",
+            f"Target audience: {_sanitize(audience, limit=160) or '(not stated)'}",
             "All services this business sells: "
             + (", ".join(_sanitize(s) for s in services[:20]) or "(none on file)"),
+            "Sub-services this business offers: "
+            + (", ".join(_sanitize(s) for s in (offered or [])[:30]) or "(none recorded)"),
             "Client's own business keywords (from their discovery document): "
             + (", ".join(_sanitize(k) for k in cdd_keywords[:25]) or "(none on file)"),
             "",
@@ -267,9 +389,9 @@ def _salvage_verdict_rows(raw: str) -> list[dict[str, Any]]:
     were cut off are simply absent — they stay unjudged rather than guessed.
     """
     rows: list[dict[str, Any]] = []
-    # Stack of `{` positions, so an object nested inside the `{"verdicts": [...]}`
+    # Stack of `{` / `[` positions, so a row nested inside the `{"r": [...]}`
     # wrapper is still recovered — the wrapper itself never closes when the reply
-    # is truncated, so depth never returns to zero.
+    # is truncated, so depth never returns to zero. Compact rows are arrays.
     starts: list[int] = []
     in_string = False
     escaped = False
@@ -284,9 +406,9 @@ def _salvage_verdict_rows(raw: str) -> list[dict[str, Any]]:
             continue
         if ch == '"':
             in_string = True
-        elif ch == "{":
+        elif ch in "{[":
             starts.append(i)
-        elif ch == "}" and starts:
+        elif ch in "}]" and starts:
             start = starts.pop()
             try:
                 obj = json.loads(raw[start : i + 1])
@@ -294,6 +416,10 @@ def _salvage_verdict_rows(raw: str) -> list[dict[str, Any]]:
                 continue
             if isinstance(obj, dict) and obj.get("keyword"):
                 rows.append(obj)
+            elif isinstance(obj, list) and obj and isinstance(obj[0], str):
+                converted = _from_compact(obj)
+                if converted is not None and converted["keyword"]:
+                    rows.append(converted)
     return rows
 
 
@@ -328,7 +454,12 @@ def _parse_verdicts(
     if isinstance(payload, str):
         rows = _salvage_verdict_rows(payload)
     elif isinstance(payload, dict):
-        rows = payload.get("verdicts") or payload.get("results") or payload.get("keywords")
+        rows = (
+            payload.get("verdicts")
+            or payload.get("results")
+            or payload.get("keywords")
+            or payload.get("r")
+        )
         if not isinstance(rows, list) and isinstance(payload.get("_raw"), str):
             # The model's reply was cut off mid-array; recover the whole rows.
             rows = _salvage_verdict_rows(payload["_raw"])
@@ -338,6 +469,9 @@ def _parse_verdicts(
         rows = None
     if not isinstance(rows, list) or not rows:
         return {}
+    rows = [
+        (_from_compact(row) if isinstance(row, list) else row) for row in rows
+    ]
 
     sent_by_norm = {_norm(kw): kw for kw in sent.values()}
     out: dict[str, KeywordVerdict] = {}
@@ -361,6 +495,8 @@ def _parse_verdicts(
                 verdict=verdict,
                 score=score,
                 reason=_sanitize(row.get("reason"), limit=160),
+                intent=_intent_label(row.get("intent")),
+                topic=_sanitize(row.get("topic"), limit=80),
             )
             continue
         # When an id is supplied it must agree with the keyword string.
@@ -383,8 +519,17 @@ def _parse_verdicts(
             verdict=verdict,
             score=score,
             reason=_sanitize(row.get("reason"), limit=160),
+            intent=_intent_label(row.get("intent")),
+            topic=_sanitize(row.get("topic"), limit=80),
         )
     return out
+
+
+def _intent_label(raw: Any) -> str:
+    label = str(raw or "").strip().lower()
+    if label in {"informational", "commercial", "transactional", "navigational"}:
+        return label
+    return ""
 
 
 def _decide(verdict: KeywordVerdict, *, threshold: float) -> str:
@@ -418,20 +563,49 @@ def _quarantine(row: dict[str, Any], cause: str) -> dict[str, Any]:
 
 def _cache_key(client_id: str, context_fp: str, service: str, keyword: str, model: str) -> str:
     digest = hashlib.sha1(
-        f"{_norm(service)}|{_norm(keyword)}|{model}".encode()
+        f"{_norm(service)}|{_norm(keyword)}|{model}|{PROMPT_VERSION}".encode()
     ).hexdigest()[:20]
-    return f"searchfit:kwverdict:v2:{client_id}:{context_fp}:{digest}"
+    return f"searchfit:kwverdict:{PROMPT_VERSION}:{client_id}:{context_fp}:{digest}"
+
+
+def _offered_subservices(prioritization: dict[str, Any] | None) -> list[str]:
+    scope = (prioritization or {}).get("service_scope") if isinstance(prioritization, dict) else None
+    names: list[str] = []
+    if not isinstance(scope, dict):
+        return names
+    for entry in scope.values():
+        if not isinstance(entry, dict):
+            continue
+        for item in entry.get("offered") or []:
+            if isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+            else:
+                name = str(item or "").strip()
+            if name:
+                names.append(name)
+    return names
 
 
 def _context_fingerprint(
-    *, industry: str | None, services: list[str], cdd_keywords: list[str], geography: str | None
+    *,
+    industry: str | None,
+    services: list[str],
+    cdd_keywords: list[str],
+    geography: str | None,
+    competitor_names: list[str] | None = None,
+    offered: list[str] | None = None,
+    audience: str | None = None,
 ) -> str:
     blob = json.dumps(
         {
+            "prompt": PROMPT_VERSION,
             "industry": _norm(industry),
             "services": sorted(_norm(s) for s in services),
             "cdd": sorted(_norm(k) for k in cdd_keywords),
             "geo": _norm(geography),
+            "competitors": sorted(_norm(c) for c in (competitor_names or [])),
+            "offered": sorted(_norm(s) for s in (offered or [])),
+            "audience": _norm(audience),
         },
         sort_keys=True,
     )
@@ -497,6 +671,7 @@ async def validate_keywords(
     services: list[str] | None = None,
     cdd_keywords: list[str] | None = None,
     geography: str | None = None,
+    prioritization: dict[str, Any] | None = None,
     competitor_names: list[str] | None = None,
     competitor_domains: list[str] | None = None,
     caller: Judge | None = None,
@@ -507,6 +682,7 @@ async def validate_keywords(
     concurrency: int | None = None,
     call_timeout: float | None = None,
     cache_ttl_seconds: int | None = None,
+    deadline: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Judge every keyword. Returns ``(kept, dropped, audit)``.
 
@@ -539,6 +715,7 @@ async def validate_keywords(
         "judged": 0,
         "kept": 0,
         "dropped": 0,
+        "scope_dropped": 0,
         "quarantined": 0,
         "cached": 0,
         "api_calls": 0,
@@ -547,16 +724,25 @@ async def validate_keywords(
         "errors": [],
         "sample": [],
         "skipped": None,
+        "screen_calls": 0,
+        "screen_dropped": 0,
+        "screen_kept": 0,
     }
 
     if not rows:
         return [], [], audit
 
     from app.services.keyword_service_contract import partition_service_rejects
+    from app.services.service_scope import partition_scope_rejects
 
-    rows, hard_dropped = partition_service_rejects(
+    # Operator-declared scope first: a keyword about a sub-service we do not
+    # offer is dropped before any ontology or LLM judgement is spent on it.
+    rows, scope_dropped = partition_scope_rejects(rows, prioritization)
+    audit["scope_dropped"] = len(scope_dropped)
+    rows, contract_dropped = partition_service_rejects(
         rows, cdd_keywords=cdd_keywords, geography=geography
     )
+    hard_dropped = [*scope_dropped, *contract_dropped]
     audit["hard_rule_dropped"] = len(hard_dropped)
     audit["classifier_version"] = "service_contract_v2"
     for row in hard_dropped:
@@ -587,13 +773,25 @@ async def validate_keywords(
 
     judge: Judge = caller or _skill_judge
     model = settings.skill_model
+    offered = _offered_subservices(prioritization)
+    audience = ""
+    if isinstance(prioritization, dict):
+        audience = str(
+            prioritization.get("target_audience") or prioritization.get("audience") or ""
+        )
     context_fp = _context_fingerprint(
-        industry=industry, services=services, cdd_keywords=cdd_keywords, geography=geography
+        industry=industry,
+        services=services,
+        cdd_keywords=cdd_keywords,
+        geography=geography,
+        competitor_names=competitor_names,
+        offered=offered,
+        audience=audience,
     )
 
     # --- cache lookup ------------------------------------------------------
     def _service_of(row: dict[str, Any]) -> str:
-        return str(row.get("target") or row.get("seed") or "").strip() or "(unmapped)"
+        return str(row.get("service") or row.get("target") or row.get("seed") or "").strip() or "(unmapped)"
 
     keys_by_index: dict[int, str] = {
         i: _cache_key(client_id, context_fp, _service_of(row), str(row.get("keyword") or ""), model)
@@ -616,11 +814,27 @@ async def validate_keywords(
                     verdict=str(entry["verdict"]),
                     score=score,
                     reason=str(entry.get("reason") or ""),
+                    intent=_intent_label(entry.get("intent")),
+                    topic=str(entry.get("topic") or ""),
                 )
                 decided[i] = (_decide(verdict, threshold=threshold), verdict)
                 audit["cached"] += 1
                 continue
         pending.append((i, row))
+
+    # Identical keyword + service + context in this run shares one judgement.
+    siblings: dict[str, list[int]] = {}
+    unique_pending: list[tuple[int, dict[str, Any]]] = []
+    seen_keys: set[str] = set()
+    for i, row in pending:
+        key = keys_by_index[i]
+        siblings.setdefault(key, []).append(i)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_pending.append((i, row))
+    in_run_saved = len(pending) - len(unique_pending)
+    pending = unique_pending
 
     # --- batch by service --------------------------------------------------
     by_service: dict[str, list[tuple[int, dict[str, Any]]]] = {}
@@ -640,29 +854,100 @@ async def validate_keywords(
 
     async def _run_batch(service: str, items: list[tuple[int, dict[str, Any]]]) -> None:
         nonlocal calls_made
-        sent = {n: str(row.get("keyword") or "") for n, (_i, row) in enumerate(items, 1)}
         target_type = str(items[0][1].get("target_type") or "service")
-        user = _build_user_message(
-            _context_block(
-                client_name=client_name,
-                primary_url=primary_url,
-                industry=industry,
-                services=services,
-                cdd_keywords=cdd_keywords,
-                geography=geography,
-                competitor_names=competitor_names,
-                competitor_domains=competitor_domains,
-                service_label=service,
-                target_type=target_type,
-            ),
-            list(sent.values()),
+        context = _context_block(
+            client_name=client_name,
+            primary_url=primary_url,
+            industry=industry,
+            services=services,
+            cdd_keywords=cdd_keywords,
+            geography=geography,
+            competitor_names=competitor_names,
+            competitor_domains=competitor_domains,
+            service_label=service,
+            target_type=target_type,
+            offered=offered,
+            audience=audience,
         )
+        to_judge = list(items)
+        # Haiku keep and drop are final. Unsure, omitted, and failed screens
+        # still go to Sonnet. Injected test judges skip this.
+        if caller is None and get_settings().keyword_screen_enabled:
+            async with sem:
+                async with lock:
+                    if calls_made >= max_calls:
+                        for i, _row in items:
+                            decided[i] = ("quarantine:call_budget", None)  # type: ignore[assignment]
+                        return
+                    if deadline is not None and time.monotonic() >= deadline:
+                        for i, _row in items:
+                            decided[i] = ("quarantine:time_budget", None)  # type: ignore[assignment]
+                        return
+                    calls_made += 1
+                    audit["api_calls"] = calls_made
+                    audit["screen_calls"] += 1
+                screen_sent = {
+                    n: str(row.get("keyword") or "") for n, (_i, row) in enumerate(items, 1)
+                }
+                try:
+                    screen_payload = await asyncio.wait_for(
+                        _screen_judge(
+                            _SCREEN_SYSTEM,
+                            _build_user_message(context, list(screen_sent.values())),
+                            batch_size=len(items),
+                        ),
+                        timeout=call_timeout,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    audit["errors"].append(f"screen:{type(exc).__name__}"[:200])
+                    screen_payload = None
+            screen_verdicts = (
+                _parse_verdicts(screen_payload, screen_sent) if screen_payload else {}
+            )
+            suspect = bool(screen_verdicts) and (
+                len(screen_verdicts) == len(items)
+                and all(v.verdict == "drop" for v in screen_verdicts.values())
+                and all_drop_is_suspect(
+                    [
+                        {"keyword": v.keyword, "verdict": v.verdict, "reason": v.reason}
+                        for v in screen_verdicts.values()
+                    ]
+                )
+            )
+            if screen_verdicts and not suspect:
+                to_judge = []
+                for i, row in items:
+                    verdict = screen_verdicts.get(_norm(str(row.get("keyword") or "")))
+                    if verdict is not None and verdict.verdict == "drop":
+                        reason = verdict.reason or "obvious miss"
+                        decided[i] = (
+                            "drop",
+                            replace(verdict, reason=f"screen: {reason}"),
+                        )
+                        audit["screen_dropped"] += 1
+                    elif verdict is not None and verdict.verdict == "keep":
+                        decided[i] = (
+                            "keep",
+                            replace(verdict, reason=verdict.reason or "screen: keep"),
+                        )
+                        audit["screen_kept"] = int(audit.get("screen_kept") or 0) + 1
+                    else:
+                        to_judge.append((i, row))
+                if not to_judge:
+                    return
+
+        sent = {n: str(row.get("keyword") or "") for n, (_i, row) in enumerate(to_judge, 1)}
+        user = _build_user_message(context, list(sent.values()))
 
         async with sem:
             async with lock:
                 if calls_made >= max_calls:
-                    for i, _row in items:
+                    for i, _row in to_judge:
                         decided[i] = ("quarantine:call_budget", None)  # type: ignore[assignment]
+                    return
+                if deadline is not None and time.monotonic() >= deadline:
+                    for i, _row in to_judge:
+                        decided[i] = ("quarantine:time_budget", None)  # type: ignore[assignment]
                     return
                 calls_made += 1
                 audit["api_calls"] = calls_made
@@ -671,7 +956,7 @@ async def validate_keywords(
                 # The output budget has to cover one verdict per keyword sent;
                 # a fixed cap truncated big batches and lost every verdict.
                 try:
-                    coro = judge(_SYSTEM, user, batch_size=len(items))  # type: ignore[call-arg]
+                    coro = judge(_SYSTEM, user, batch_size=len(to_judge))  # type: ignore[call-arg]
                 except TypeError:
                     coro = judge(_SYSTEM, user)  # injected test judges take two args
                 payload = await asyncio.wait_for(coro, timeout=call_timeout)
@@ -684,13 +969,13 @@ async def validate_keywords(
                 payload = None
 
         if payload is None:
-            for i, _row in items:
+            for i, _row in to_judge:
                 decided[i] = (f"quarantine:{cause}", None)  # type: ignore[assignment]
             return
 
         verdicts = _parse_verdicts(payload, sent)
         if not verdicts:
-            for i, _row in items:
+            for i, _row in to_judge:
                 decided[i] = ("quarantine:malformed", None)  # type: ignore[assignment]
             return
 
@@ -700,7 +985,7 @@ async def validate_keywords(
         # like boilerplate. Quarantining a correct all-drop batch just leaves
         # those keywords in the pool flagged "unverified" instead of dropped.
         if (
-            len(verdicts) == len(items)
+            len(verdicts) == len(to_judge)
             and all(v.verdict == "drop" for v in verdicts.values())
             and all_drop_is_suspect(
                 [
@@ -709,11 +994,11 @@ async def validate_keywords(
                 ]
             )
         ):
-            for i, _row in items:
+            for i, _row in to_judge:
                 decided[i] = ("quarantine:all_drop_guard", None)  # type: ignore[assignment]
             return
 
-        for i, row in items:
+        for i, row in to_judge:
             verdict = verdicts.get(_norm(str(row.get("keyword") or "")))
             if verdict is None:
                 decided[i] = ("quarantine:omitted", None)  # type: ignore[assignment]
@@ -722,6 +1007,14 @@ async def validate_keywords(
 
     if batches:
         await asyncio.gather(*[_run_batch(service, items) for service, items in batches])
+    for indexes in siblings.values():
+        if len(indexes) < 2 or indexes[0] not in decided:
+            continue
+        for other in indexes[1:]:
+            decided[other] = decided[indexes[0]]
+            audit["cached"] += 1
+    if in_run_saved:
+        log.info("keyword_validation_cache_hit", in_run=in_run_saved)
     audit["elapsed_seconds"] = round(time.monotonic() - started, 2)
 
     # --- apply decisions ---------------------------------------------------
@@ -743,13 +1036,24 @@ async def validate_keywords(
                 "verdict": verdict.verdict,
                 "score": verdict.score,
                 "reason": verdict.reason,
+                "intent": verdict.intent,
+                "topic": verdict.topic,
             }
+        stamped = dict(row)
+        if verdict is not None and verdict.intent and row.get("intent_basis") != "measured":
+            stamped["intent"] = verdict.intent
+            stamped["intent_basis"] = "llm"
+        if verdict is not None and verdict.intent:
+            # Kept even when a provider label won, so a disagreement is visible.
+            stamped["llm_intent"] = verdict.intent
+        if verdict is not None and verdict.topic:
+            stamped["topic"] = verdict.topic
         if outcome == "keep":
-            kept.append(row)
+            kept.append(stamped)
             audit["kept"] += 1
         elif outcome == "drop":
             reason = (verdict.reason if verdict else "") or "llm_not_relevant"
-            dropped.append({**row, "relevance_drop_reason": reason})
+            dropped.append({**stamped, "relevance_drop_reason": reason})
             audit["dropped"] += 1
             if len(audit["sample"]) < 12:
                 audit["sample"].append(
@@ -761,7 +1065,7 @@ async def validate_keywords(
                     }
                 )
         else:  # review — kept, but never commercially targetable
-            kept.append(_quarantine(row, "review_band"))
+            kept.append(_quarantine(stamped, "review_band"))
             audit["quarantined"] += 1
             audit["quarantined_by_cause"]["review_band"] = (
                 audit["quarantined_by_cause"].get("review_band", 0) + 1
@@ -780,5 +1084,6 @@ async def validate_keywords(
         quarantined=audit["quarantined"],
         api_calls=audit["api_calls"],
         cached=audit["cached"],
+        screen_dropped=audit["screen_dropped"],
     )
     return kept, dropped, audit

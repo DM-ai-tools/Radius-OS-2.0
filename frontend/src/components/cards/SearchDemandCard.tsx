@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { createContext, useContext, useMemo, useState } from "react";
 
 type Props = {
   payload: Record<string, unknown>;
@@ -13,6 +13,72 @@ type KeywordFocus = {
   onToggle: (keyword: string) => void;
   disabled?: boolean;
 };
+
+const INTENTS = ["informational", "commercial", "transactional", "navigational"] as const;
+type IntentFilter = "all" | (typeof INTENTS)[number];
+
+/** The intent the keyword tables are filtered to ("all" shows everything). */
+const IntentFilterContext = createContext<IntentFilter>("all");
+
+function keywordIntent(row: Record<string, unknown>, fallback?: unknown): string {
+  const intent = String(row.intent || fallback || "").trim().toLowerCase();
+  return (INTENTS as readonly string[]).includes(intent) ? intent : intent;
+}
+
+function useIntentFilter<T extends Record<string, unknown>>(rows: T[]): T[] {
+  const filter = useContext(IntentFilterContext);
+  return filter === "all" ? rows : rows.filter((r) => keywordIntent(r) === filter);
+}
+
+function IntentFilterBar({
+  value,
+  onChange,
+  counts,
+}: {
+  value: IntentFilter;
+  onChange: (next: IntentFilter) => void;
+  counts: Record<string, number> | null;
+}) {
+  const options: IntentFilter[] = ["all", ...INTENTS];
+  return (
+    <div className="sd-intent-filter" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", margin: "10px 0" }}>
+      <span style={{ fontSize: 12, color: "var(--muted)" }}>Show keywords by intent</span>
+      <div className="ct-seg" role="group" aria-label="Filter keywords by intent">
+        {options.map((option) => {
+          const count = option === "all" ? null : counts?.[option];
+          return (
+            <button
+              key={option}
+              type="button"
+              className={value === option ? "is-on" : ""}
+              aria-pressed={value === option}
+              onClick={() => onChange(option)}
+            >
+              {option === "all" ? "All" : option[0].toUpperCase() + option.slice(1)}
+              {count != null ? ` ${count}` : ""}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Other wordings of the same search, folded into this keyword. */
+function VariantNote({ row }: { row: Record<string, unknown> }) {
+  const variants = Array.isArray(row.close_variants)
+    ? (row.close_variants as unknown[]).map(String).filter(Boolean)
+    : [];
+  if (!variants.length) return null;
+  return (
+    <span
+      title={`Same search, also worded as: ${variants.join(", ")}`}
+      style={{ display: "block", fontSize: 10, fontWeight: 500, color: "var(--muted)", cursor: "help", whiteSpace: "nowrap" }}
+    >
+      +{variants.length} {variants.length === 1 ? "variant" : "variants"}
+    </span>
+  );
+}
 
 function normKw(value: unknown): string {
   return String(value || "")
@@ -29,21 +95,44 @@ function kwRows(raw: unknown): Array<Record<string, unknown>> {
 }
 
 function fmtVol(v: unknown): string {
-  if (v == null || v === "" || v === "N/A") return v === "N/A" ? "N/A" : "—";
+  if (v == null || v === "" || v === "N/A") return "N/A";
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
   return n.toLocaleString();
 }
 
 function fmtNum(v: unknown): string {
-  if (v == null || v === "") return "—";
+  if (v == null || v === "") return "N/A";
   return String(v);
 }
 
 function fmtCpc(v: unknown): string {
-  if (v == null || v === "") return "—";
+  if (v == null || v === "") return "N/A";
   const n = Number(v);
   return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
+}
+
+const FUNNEL_ORDER = ["TOFU", "MOFU", "BOFU"];
+
+function funnelRank(row: Record<string, unknown>): number {
+  const stage = String(row.funnel_stage ?? row.funnel ?? "").toUpperCase();
+  const index = FUNNEL_ORDER.indexOf(stage);
+  return index === -1 ? FUNNEL_ORDER.length : index;
+}
+
+function volumeOf(row: Record<string, unknown>): number {
+  const value = Number(row.search_volume_mo ?? row.volume ?? 0);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function byFunnelThenVolume(rows: Array<Record<string, unknown>>) {
+  return [...rows].sort((a, b) => {
+    const stage = funnelRank(a) - funnelRank(b);
+    if (stage) return stage;
+    const volume = volumeOf(b) - volumeOf(a);
+    if (volume) return volume;
+    return String(a.keyword || "").localeCompare(String(b.keyword || ""));
+  });
 }
 
 function FunnelBadge({ stage }: { stage: unknown }) {
@@ -151,7 +240,11 @@ function SeedKeywordBlock({
   analysis: Map<string, Record<string, unknown>>;
   keywordFocus: KeywordFocus;
 }) {
-  const keywords = kwRows(seed.keywords).map((k) => enrichKeyword(k, analysis));
+  const allKeywords = byFunnelThenVolume(
+    kwRows(seed.keywords).map((k) => enrichKeyword(k, analysis)),
+  );
+  const keywords = useIntentFilter(allKeywords);
+  const filtered = keywords.length !== allKeywords.length;
   const counts =
     seed.class_counts && typeof seed.class_counts === "object"
       ? (seed.class_counts as Record<string, number>)
@@ -160,12 +253,19 @@ function SeedKeywordBlock({
     ? (seed.classes_missing as string[])
     : [];
 
+  // With a filter on, seeds that have none of that intent are hidden.
+  if (filtered && keywords.length === 0) return null;
+
   return (
     <details style={{ marginTop: 8 }}>
       <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 700 }}>
         {String(seed.seed_label || "Seed")}: {String(seed.seed || "—")}{" "}
         <span style={{ fontWeight: 500, color: "var(--muted)" }}>
-          ({Number(seed.keyword_count ?? keywords.length)} keywords)
+          (
+          {filtered
+            ? `${keywords.length} of ${allKeywords.length} keywords`
+            : `${Number(seed.keyword_count ?? keywords.length)} keywords`}
+          )
         </span>
         <span
           style={{
@@ -236,6 +336,8 @@ function SeedKeywordBlock({
                   </td>
                   <td style={{ padding: "3px 6px", fontWeight: 600 }}>
                     {keyword || "—"}
+                    {String(k.role || "") === "Primary" ? " · primary" : ""}
+                    <VariantNote row={k} />
                   </td>
                   <td style={{ padding: "3px 6px" }}>
                     {fmtVol(k.search_volume_mo ?? k.volume)}
@@ -589,6 +691,115 @@ function SubserviceCompetitorMatrix({
   );
 }
 
+function keywordStage(row: Record<string, unknown>, fallback: unknown): string {
+  const stage = String(row.funnel || fallback || "").trim().toUpperCase();
+  return FUNNEL_ORDER.includes(stage) ? stage : "—";
+}
+
+function focusViews(cluster: Record<string, unknown>): Array<Record<string, unknown>> {
+  const keywords = kwRows(cluster.keywords);
+  const groups = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of keywords) {
+    const funnel = keywordStage(row, cluster.funnel);
+    const intent = keywordIntent(row, cluster.intent);
+    const key = `${funnel}|${intent}`;
+    const bucket = groups.get(key) || [];
+    bucket.push(row);
+    groups.set(key, bucket);
+  }
+  if (groups.size <= 1) return [cluster];
+  const base = String(cluster.name || cluster.primary_keyword || "Cluster");
+  return [...groups.entries()]
+    .sort((a, b) => {
+      const [aFunnel, aIntent] = a[0].split("|");
+      const [bFunnel, bIntent] = b[0].split("|");
+      const stage = FUNNEL_ORDER.indexOf(aFunnel) - FUNNEL_ORDER.indexOf(bFunnel);
+      if (stage) return stage;
+      return INTENTS.indexOf(aIntent as (typeof INTENTS)[number]) - INTENTS.indexOf(bIntent as (typeof INTENTS)[number]);
+    })
+    .map(([key, rows]) => {
+      const [funnel, intent] = key.split("|");
+      const volume = rows.reduce((sum, row) => {
+        const n = Number(row.volume);
+        return sum + (Number.isFinite(n) ? n : 0);
+      }, 0);
+      return {
+        ...cluster,
+        name: `${base} (${funnel} · ${intent})`,
+        funnel,
+        intent,
+        keywords: rows,
+        keyword_count: rows.length,
+        est_traffic: volume || null,
+      };
+    });
+}
+
+function ClusterKeywords({
+  cluster: c,
+  index: i,
+  keywordFocus,
+}: {
+  cluster: Record<string, unknown>;
+  index: number;
+  keywordFocus: KeywordFocus;
+}) {
+  const all = kwRows(c.keywords);
+  const kws = useIntentFilter(all);
+  if (kws.length === 0 && all.length) return null;
+  const funnel = keywordStage(kws[0] || {}, c.funnel);
+  const intent = keywordIntent(kws[0] || {}, c.intent);
+  return (
+    <details open={i === 0} style={{ marginBottom: 8, fontSize: 13 }}>
+      <summary style={{ cursor: "pointer" }}>
+        <strong>{String(c.name || c.primary_keyword || `Cluster ${i + 1}`)}</strong>
+        <span style={{ marginLeft: 8 }}>
+          <FunnelBadge stage={funnel} />
+        </span>
+        <span style={{ color: "var(--muted)", fontWeight: 500 }}>
+          {" "}
+          · {intent}
+          {" "}
+          · {kws.length === all.length ? `${all.length} keywords` : `${kws.length} of ${all.length} keywords`}
+          {c.est_traffic != null || c.total_volume != null
+            ? ` · vol ${fmtVol(c.est_traffic ?? c.total_volume)}`
+            : ""}
+        </span>
+      </summary>
+      <div style={{ color: "var(--muted)", marginTop: 4, fontSize: 12 }}>
+        {String(c.recommended_content || c.content_type || "—")} ·{" "}
+        {String(c.recommended_url || "—")}
+      </div>
+      <ul className="missing-list" style={{ marginTop: 6 }}>
+        {kws.map((k) => {
+          const keyword = String(k.keyword || "");
+          const focused = keywordFocus.focused(keyword);
+          return (
+            <li key={keyword} style={{ opacity: focused ? 1 : 0.45 }}>
+              <label style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={focused}
+                  disabled={keywordFocus.disabled || !keyword}
+                  aria-label={`Focus ${keyword || "keyword"}`}
+                  onChange={() => keywordFocus.onToggle(keyword)}
+                />
+                <span>
+                  <FunnelBadge stage={keywordStage(k, funnel)} /> {keyword || "—"}
+                  {k.volume != null ? ` · vol ${fmtVol(k.volume)}` : ""}
+                  {k.role ? ` · ${String(k.role)}` : ""}
+                  {` · ${keywordIntent(k, intent)}`}
+                  <VariantNote row={k} />
+                </span>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+    </details>
+  );
+}
+
 function ClusterSection({
   clusterReport,
   reportClusters,
@@ -602,64 +813,35 @@ function ClusterSection({
   roadmap: Array<Record<string, unknown>>;
   keywordFocus: KeywordFocus;
 }) {
+  const shownOrphans = useIntentFilter(orphans);
+  const focused = reportClusters
+    .flatMap((cluster) => focusViews(cluster))
+    .sort((a, b) => {
+      const stage = funnelRank(a) - funnelRank(b);
+      if (stage) return stage;
+      const intent =
+        INTENTS.indexOf(keywordIntent({}, a.intent) as (typeof INTENTS)[number]) -
+        INTENTS.indexOf(keywordIntent({}, b.intent) as (typeof INTENTS)[number]);
+      if (intent) return intent;
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
   return (
     <section style={{ marginTop: 8, marginBottom: 16 }}>
       <h4 style={{ marginBottom: 6 }}>Keyword clusters</h4>
       <p style={{ fontSize: 13, marginTop: 0 }}>
-        Total: {String(clusterReport.total_keywords ?? "—")} · Clusters:{" "}
-        {String(clusterReport.clusters_created ?? reportClusters.length)} · Orphans:{" "}
+        Each cluster is one topic, one funnel stage, and one search intent. Total:{" "}
+        {String(clusterReport.total_keywords ?? "—")} · Clusters:{" "}
+        {String(focused.length || clusterReport.clusters_created || reportClusters.length)} · Orphans:{" "}
         {String(clusterReport.orphan_count ?? orphans.length)}
       </p>
-      {reportClusters.map((c, i) => {
-        const kws = kwRows(c.keywords);
-        return (
-          <details
-            key={`${String(c.name || c.primary_keyword)}-${i}`}
-            open={i === 0}
-            style={{ marginBottom: 8, fontSize: 13 }}
-          >
-            <summary style={{ cursor: "pointer" }}>
-              <strong>{String(c.name || c.primary_keyword || `Cluster ${i + 1}`)}</strong>
-              <span style={{ color: "var(--muted)", fontWeight: 500 }}>
-                {" "}
-                · {kws.length} keywords
-                {c.est_traffic != null || c.total_volume != null
-                  ? ` · vol ${fmtVol(c.est_traffic ?? c.total_volume)}`
-                  : ""}
-              </span>
-            </summary>
-            <div style={{ color: "var(--muted)", marginTop: 4, fontSize: 12 }}>
-              Intent: {String(c.intent || "—")} ·{" "}
-              {String(c.recommended_content || c.content_type || "—")} ·{" "}
-              {String(c.recommended_url || "—")}
-            </div>
-            <ul className="missing-list" style={{ marginTop: 6 }}>
-              {kws.map((k) => {
-                const keyword = String(k.keyword || "");
-                const focused = keywordFocus.focused(keyword);
-                return (
-                  <li key={keyword} style={{ opacity: focused ? 1 : 0.45 }}>
-                    <label style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
-                      <input
-                        type="checkbox"
-                        checked={focused}
-                        disabled={keywordFocus.disabled || !keyword}
-                        aria-label={`Focus ${keyword || "keyword"}`}
-                        onChange={() => keywordFocus.onToggle(keyword)}
-                      />
-                      <span>
-                        {keyword || "—"}
-                        {k.volume != null ? ` · vol ${fmtVol(k.volume)}` : ""}
-                        {k.role ? ` · ${String(k.role)}` : ""}
-                      </span>
-                    </label>
-                  </li>
-                );
-              })}
-            </ul>
-          </details>
-        );
-      })}
+      {focused.map((c, i) => (
+        <ClusterKeywords
+          key={`${String(c.name || c.primary_keyword)}-${i}`}
+          cluster={c}
+          index={i}
+          keywordFocus={keywordFocus}
+        />
+      ))}
       {roadmap.length ? (
         <>
           <h4 style={{ marginBottom: 6, marginTop: 12 }}>Content roadmap</h4>
@@ -674,11 +856,11 @@ function ClusterSection({
           </ol>
         </>
       ) : null}
-      {orphans.length ? (
+      {shownOrphans.length ? (
         <div style={{ marginTop: 8 }}>
           <h4 style={{ marginBottom: 6 }}>Orphan keywords</h4>
           <ul className="missing-list">
-            {orphans.map((o) => {
+            {shownOrphans.map((o) => {
               const keyword = String(o.keyword || "");
               const focused = keywordFocus.focused(keyword);
               return (
@@ -692,8 +874,9 @@ function ClusterSection({
                       onChange={() => keywordFocus.onToggle(keyword)}
                     />
                     <span>
-                      {keyword || "—"}
+                      <FunnelBadge stage={keywordStage(o, "")} /> {keyword || "—"}
                       {o.volume != null ? ` · vol ${fmtVol(o.volume)}` : ""}
+                      {o.intent ? ` · ${keywordIntent(o, "")}` : ""}
                     </span>
                   </label>
                 </li>
@@ -841,6 +1024,7 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
       }))
       .filter((row) => row.keyword),
   );
+  const [intentFilter, setIntentFilter] = useState<IntentFilter>("all");
   const [manualKeyword, setManualKeyword] = useState("");
   const [manualCompetitor, setManualCompetitor] = useState("");
 
@@ -885,6 +1069,7 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
   };
 
   return (
+    <IntentFilterContext.Provider value={intentFilter}>
     <div className="structured-card structured-card--report">
       <h3 className="card-title">{String(payload.title || "Search Demand")}</h3>
       <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
@@ -972,6 +1157,10 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
 
       <SubserviceCompetitorMatrix rows={subserviceMatrix} />
 
+      {seedClusters.length > 0 || serviceClusters.length > 0 || clusterReport ? (
+        <IntentFilterBar value={intentFilter} onChange={setIntentFilter} counts={intentCounts} />
+      ) : null}
+
       {seedClusters.length > 0 || serviceClusters.length > 0 ? (
         <>
           <h4 style={{ marginBottom: 6 }}>
@@ -1027,7 +1216,7 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
         </p>
       )}
 
-      {(evergreen.length || trends.length || avoid.length) && (
+      {evergreen.length + trends.length + avoid.length > 0 && (
         <section style={{ margin: "16px 0 12px" }}>
           <h4 style={{ marginBottom: 6 }}>Priority highlights</h4>
           <div
@@ -1126,5 +1315,6 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
         </div>
       )}
     </div>
+    </IntentFilterContext.Provider>
   );
 }

@@ -20,6 +20,28 @@ from app.services.content_production import (
 )
 from app.services.create_content import draft_gate
 
+# A model reply in the writer's JSON shape. Drafting needs one: since 2026-10-16 a
+# failed model call is refused instead of filled with template text.
+FAKE_DRAFT_REPLY = {
+    "opening": (
+        "Acme gives teams a measured, practical way to act on this topic, with a named owner "
+        "and a clear first step that a buyer can take this week."
+    ),
+    "page_markdown": "",
+    "sections": [
+        {
+            "title": "How the work runs",
+            "body": (
+                "Every engagement starts with a short audit of what is already in place. "
+                "We agree the scope in writing before any work begins, so the buyer knows "
+                "what is included and what is not."
+            ),
+        }
+    ],
+    "faq": [],
+    "cta": "Book a short call with Acme to talk through your situation and the first step.",
+}
+
 
 def test_preflight_stops_when_existing_page_owns_intent():
     pre = preflight(
@@ -405,7 +427,7 @@ async def test_production_drafts_only_one_writer_ready_page():
     assert len(listed.get("topic_choices") or []) == 2
     assert listed["topic_choices"][0]["keyword"] == "ready topic"
 
-    with patch("app.services.create_content.synthesize_json", new=AsyncMock(return_value=None)):
+    with patch("app.services.create_content.synthesize_json", new=AsyncMock(return_value=FAKE_DRAFT_REPLY)):
         out = await run_content_production_plan(
             client_name="Acme",
             primary_url="https://acme.example",
@@ -513,7 +535,7 @@ async def test_ui_topic_selection_reaches_each_existing_page_type_draft():
     for page_type in page_types:
         with patch(
             "app.services.create_content.synthesize_json",
-            new=AsyncMock(return_value=None),
+            new=AsyncMock(return_value=FAKE_DRAFT_REPLY),
         ):
             drafted = await run_content_production_plan(
                 client_name="Acme",

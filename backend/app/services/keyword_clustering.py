@@ -5,14 +5,31 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.services.keyword_opportunity import (
-    detect_funnel as _detect_funnel,
+from app.logging_config import get_logger
+from app.services.keyword_cluster_roles import (
+    RoleContext,
+    conflicting_intents,
+    finalize_cluster,
+    finalize_clusters,
+    label_keyword,
+    sync_roadmap,
+)
+from app.services.keyword_cluster_structure import (
+    SPLIT_THRESHOLD,
+    assign_pillars,
+    cluster_modifier_pattern,
+    split_name,
+    stable_cluster_id,
+    split_oversized,
 )
 from app.services.keyword_opportunity import (
+    detect_funnel,
     detect_intent,
 )
 from app.services.keyword_pipeline import run_keyword_pipeline
 from app.services.topic_naming import specific_cluster_name
+
+log = get_logger("keyword_clustering")
 
 _STOP = {"the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with"}
 # Shared agency heads — never enough alone to nest a seed under a service
@@ -41,6 +58,10 @@ _GENERIC_SERVICE_GROUP_TOKENS = frozenset(
         "company",
         "campaign",
         "campaigns",
+        # "Google Business Profile optimization" is not an AEO service just
+        # because the service name ends in "optimization".
+        "optimization",
+        "optimisation",
     }
 )
 _PLATFORM_TOKEN_ALIASES: dict[str, frozenset[str]] = {
@@ -71,6 +92,69 @@ _BRAND_HINTS = ("brand", "official", "login", "pricing", "cost")
 # keyword_count and reported via keywords_truncated — never silently dropped.
 _MAX_CLUSTER_KEYWORDS = 50
 
+# Cluster fields written by keyword_cluster_roles.finalize_cluster.
+_ROLE_FIELDS = (
+    "intent_distribution",
+    "funnel_distribution",
+    "role_counts",
+    "label_confidence",
+    "primary_selection",
+)
+_ORPHAN_LABEL_FIELDS = (
+    "intent",
+    "intent_source",
+    "intent_confidence",
+    "funnel",
+    "funnel_source",
+    "funnel_confidence",
+    "label_disagreement",
+)
+
+
+def _row_labels(row: dict[str, Any], ctx: RoleContext) -> tuple[str, str]:
+    labels = label_keyword(row, brand_tokens=ctx.brand_tokens)
+    return labels["intent"], labels["funnel"]
+
+
+def _det_name(key: str, pkw: str, intent: str) -> str:
+    """Rule-path cluster name from its primary keyword and grouping key."""
+    head = _head_topic(pkw)
+    if key.startswith("cmp:"):
+        return specific_cluster_name(pkw, intent=intent, head=head, mod="comparison")
+    if key.startswith("loc:"):
+        # The grouping key matches locations as substrings ("us" in "australia");
+        # the name uses a whole-word location, and never repeats one the
+        # keyword already says ("local seo sydney", not "... Sydney in Sydney").
+        from app.services.keyword_cluster_structure import pattern_of
+
+        pattern, loc = pattern_of(pkw)
+        if pattern != "location" or not loc or loc == "near me" or loc in _norm(pkw).split() or loc in _norm(pkw):
+            return specific_cluster_name(pkw, intent=intent, head=head)
+        return specific_cluster_name(pkw, intent=intent, head=head, mod=f"location:{loc}")
+    if key.startswith("brand:"):
+        return specific_cluster_name(pkw, intent="navigational", head=head)
+    return specific_cluster_name(pkw, intent=intent, head=head, mod=_modifier_bucket(pkw))
+
+
+def _member_row(r: dict[str, Any]) -> dict[str, Any]:
+    """A cluster member: the row's facts. Roles and labels are added by the decider."""
+    return {
+        "keyword": r.get("keyword"),
+        "volume": r.get("volume"),
+        "difficulty": r.get("difficulty"),
+        "cpc": r.get("cpc"),
+        "opportunity_score": r.get("opportunity_score"),
+        "gap_flag": r.get("gap_flag"),
+        "specificity": r.get("specificity"),
+        # Carried from keyword_relevance.py's evaluate_keyword() so the
+        # cluster contract keeps *why* each keyword survived cleaning,
+        # not just that it did.
+        "relevance_reason": r.get("relevance_reason"),
+        "relevance_evidence": r.get("relevance_evidence") or None,
+        "volume_estimated": r.get("volume_estimated"),
+        "close_variants": r.get("close_variants") or None,
+    }
+
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
@@ -93,6 +177,28 @@ def _distinctive_service_tokens(kw: str) -> set[str]:
             if tok in family:
                 expanded.update(family)
     return expanded
+
+
+# Words that say a query is about paid advertising, not just about a platform.
+_PAID_HEADS = frozenset(
+    {"ads", "ad", "advertising", "advert", "ppc", "sem", "cpc", "paid"}
+    | _PLATFORM_TOKEN_ALIASES["google"] - {"google"}
+)
+
+
+def _family_tokens(tokens: set[str]) -> set[str]:
+    """Collapse platform aliases to one token per family.
+
+    ``_distinctive_service_tokens`` expands "google" into adwords/gads/… so a
+    service and a seed that use different aliases still meet. Counting that
+    expansion as overlap lets one shared word score seven times; collapse it so a
+    shared platform is a single match.
+    """
+    out: set[str] = set()
+    for tok in tokens:
+        family = next((name for name, al in _PLATFORM_TOKEN_ALIASES.items() if tok in al), None)
+        out.add(f"@{family}" if family else tok)
+    return out
 
 
 def _platform_family_key(kw: str) -> str:
@@ -125,51 +231,13 @@ def _stem_key(kw: str) -> str:
 
 
 def _nest_subservices(group: dict[str, Any]) -> None:
-    """Move sub-service page seeds into nested buckets under each CDD service."""
-    subservices_map: dict[str, dict[str, Any]] = {}
-    regular_seeds: list[dict[str, Any]] = []
-    for seed in group.get("seeds") or []:
-        if str(seed.get("target_type") or "").lower() != "sub_service":
-            regular_seeds.append(seed)
-            continue
-        name = str(seed.get("target") or seed.get("seed") or "").strip()
-        key = _norm(name)
-        bucket = subservices_map.get(key)
-        if not bucket:
-            bucket = {
-                "subservice": name,
-                "page_path": seed.get("page_path"),
-                "parent_service": group.get("service"),
-                "seed_count": 0,
-                "keyword_count": 0,
-                "total_volume": 0,
-                "seeds": [],
-            }
-            subservices_map[key] = bucket
-        bucket["seeds"].append(seed)
-        bucket["seed_count"] += 1
-        bucket["keyword_count"] += int(seed.get("keyword_count") or 0)
-        bucket["total_volume"] += sum(
-            int(row.get("volume") or 0)
-            for row in seed.get("keywords") or []
-            if isinstance(row, dict) and isinstance(row.get("volume"), (int, float))
-        )
+    """Keep every keyword theme as a seed of the parent service.
 
-    group["seeds"] = regular_seeds
-    subservices = list(subservices_map.values())
-    for sub in subservices:
-        sub["seeds"].sort(
-            key=lambda row: (
-                -int(row.get("keyword_count") or 0),
-                str(row.get("seed") or "").lower(),
-            )
-        )
-        for index, seed in enumerate(sub["seeds"], start=1):
-            seed["seed_index"] = index
-            seed["seed_label"] = f"Sub-seed {index}"
-    subservices.sort(key=lambda row: str(row.get("subservice") or "").lower())
-    group["subservices"] = subservices
-    group["subservice_count"] = len(subservices)
+    Local SEO and Technical SEO are different seeds under SEO. They are not
+    turned into sub-services.
+    """
+    group["subservices"] = []
+    group["subservice_count"] = 0
 
 
 def build_service_seed_clusters(
@@ -211,7 +279,27 @@ def build_service_seed_clusters(
         target = str(cluster.get("target") or seed).strip()
         seed_key = _norm_service_key(seed)
         target_key = _norm_service_key(target)
-        if str(cluster.get("target_type") or "").lower() == "service":
+        # Seeds generated per service already carry the service that owns them. That
+        # assignment is authoritative: it is not re-guessed from token overlap, which
+        # is how a seed used to end up under the wrong service.
+        assigned = str(cluster.get("service") or "").strip()
+        if assigned:
+            if str(cluster.get("service_id") or "") == "_other":
+                return other_key, "assigned_other", 0
+            assigned_key = _norm_service_key(assigned)
+            owner = next((s for s in clean_services if _norm_service_key(s) == assigned_key), None)
+            if owner:
+                return _norm(owner), "assigned_service", 100
+        parent_seg = str(cluster.get("parent_segment") or "").strip()
+        if parent_seg:
+            parent_key = _norm_service_key(parent_seg)
+            parent = next(
+                (s for s in clean_services if _norm_service_key(s) == parent_key),
+                None,
+            )
+            if parent:
+                return _norm(parent), "parent_service_seed", 100
+        if str(cluster.get("target_type") or "").lower() in {"service", "seed"}:
             explicit = next(
                 (
                     s
@@ -223,17 +311,28 @@ def build_service_seed_clusters(
             if explicit:
                 return _norm(explicit), "explicit_service_target", 100
 
-        source_tokens = _distinctive_service_tokens(f"{seed} {target}")
+        source_text = f"{seed} {target}"
+        source_tokens = _family_tokens(_distinctive_service_tokens(source_text))
         if not source_tokens:
             return other_key, "no_service_overlap", 0
+        source_is_paid = bool(_tokens(source_text) & _PAID_HEADS)
         best_key = ""
         best_score = 0
         for service in clean_services:
-            service_tokens = _distinctive_service_tokens(service)
+            service_tokens = _family_tokens(_distinctive_service_tokens(service))
             if not service_tokens:
                 continue
             overlap = source_tokens & service_tokens
             if not overlap:
+                continue
+            # "Google Business Profile" shares the platform word with "Google Ads
+            # Management" but is not about ads. A platform alone only proves
+            # a paid-ads service when the seed also talks about paid advertising.
+            if (
+                all(tok.startswith("@") for tok in overlap)
+                and _tokens(service) & _PAID_HEADS
+                and not source_is_paid
+            ):
                 continue
             score = len(overlap) * 10
             if service_tokens.issubset(source_tokens):
@@ -245,7 +344,9 @@ def build_service_seed_clusters(
                 for row in (cluster.get(cls) or [])[:10]:
                     if not isinstance(row, dict):
                         continue
-                    kw_tokens = _distinctive_service_tokens(str(row.get("keyword") or ""))
+                    kw_tokens = _family_tokens(
+                        _distinctive_service_tokens(str(row.get("keyword") or ""))
+                    )
                     score += min(3, len(kw_tokens & service_tokens))
             if score > best_score:
                 best_key = _norm(service)
@@ -296,11 +397,24 @@ def build_service_seed_clusters(
                         "relevance_unverified": bool(row.get("relevance_unverified")),
                         "commercial_target_eligible": row.get("commercial_target_eligible"),
                         "gap_flag": bool(row.get("gap_flag")),
+                        "role": row.get("role"),
+                        # Other wordings of this same search (keyword_variants).
+                        "close_variants": row.get("close_variants") or [],
                     }
                 )
+        keywords.sort(
+            key=lambda row: (
+                0 if str(row.get("role") or "") == "Primary" else 1,
+                {"exact": 0, "phrase": 1, "related": 2, "broad": 3}.get(
+                    str(row.get("match_class") or ""), 4
+                ),
+                -int(row.get("volume") or 0) if isinstance(row.get("volume"), (int, float)) else 0,
+            )
+        )
 
         entry = {
             "seed": cluster.get("seed"),
+            "primary_keyword": cluster.get("primary_keyword") or cluster.get("seed"),
             "target": cluster.get("target") or cluster.get("seed"),
             "target_type": cluster.get("target_type") or "keyword",
             "page_type": cluster.get("page_type"),
@@ -368,7 +482,48 @@ def clean_and_dedupe(
     return result["keywords"]
 
 
-def _detect_intent(kw: str, existing: str | None = None) -> str:
+def _legacy_text_intent(keyword: str) -> str:
+    """The keyword-text intent rule as it stood before 2026-10-19. Grouping only."""
+    k = _norm(keyword)
+    geo = ("melbourne", "sydney", "brisbane", "perth", "adelaide", "gold coast", "near me",
+           "australia", "auckland", "wellington")
+    service = ("seo", "sem", "ppc", "ads", "adwords", "marketing", "agency", "web design",
+               "web development", "website", "aeo", "geo")
+    educational = ("what is", "what are", "how to", "guide", "meaning", "definition")
+    buying = ("buy", "pricing", "price", "cost", "hire", "quote")
+    if any(g in k for g in geo) and any(x in k for x in service):
+        if any(x in k for x in educational):
+            return "informational"
+        return "transactional" if any(x in k for x in buying) else "commercial"
+    if any(x in k for x in (*buying, "near me", "agency", "services", "company", "consultant")):
+        if any(x in k for x in ("what is", "what are", "guide", "how to", "meaning")):
+            return "informational"
+        return "transactional" if any(x in k for x in buying) else "commercial"
+    if any(x in k for x in ("best", "top", "vs", "versus", "alternative", "review", "compare")):
+        return "commercial"
+    if any(x in k for x in ("how to", "what is", "what are", "guide", "tips", "examples")):
+        return "informational"
+    if re.search(r"\b(login|sign in|signin|portal|dashboard|my account|customer portal)\b", k):
+        return "navigational"
+    if re.search(r"\b(official site|official website|contact number|phone number)\b", k):
+        return "navigational"
+    return "informational"
+
+
+def _grouping_intent(kw: str, row: dict[str, Any] | None = None) -> str:
+    """Intent used ONLY inside the grouping key. Never a label.
+
+    Grouping is frozen as it stood before 2026-10-19: the better labels from
+    ``keyword_opportunity.detect_intent`` must not move keywords between
+    clusters. So this reproduces the label the old pipeline held for the row
+    (the provider's label, the validation model's label, or the old text rule)
+    and then applies the old simplified rule. Labels come from
+    ``keyword_cluster_roles.label_keyword``.
+    """
+    row = row or {}
+    existing = row.get("intent")
+    if row.get("intent_basis") != "llm" and "provider_intent" in row:
+        existing = row.get("provider_intent") or _legacy_text_intent(kw)
     if existing and existing not in ("mixed", ""):
         return str(existing).lower()
     k = _norm(kw)
@@ -377,6 +532,29 @@ def _detect_intent(kw: str, existing: str | None = None) -> str:
     if any(x in k for x in ("best", "top", "vs", "versus", "alternative", "review", "compare")):
         return "commercial"
     return "informational"
+
+
+_GROUP_INTENTS = frozenset({"informational", "commercial", "transactional", "navigational"})
+_GROUP_FUNNELS = frozenset({"TOFU", "MOFU", "BOFU"})
+
+
+def _grouping_funnel(kw: str, row: dict[str, Any] | None, intent: str) -> str:
+    """Funnel used only in the grouping key, so one cluster is one buyer stage."""
+    stored = str((row or {}).get("funnel") or "").strip().upper()
+    if stored in _GROUP_FUNNELS:
+        return stored
+    return detect_funnel(kw, intent)
+
+
+def _key_focus(key: str) -> tuple[str, str]:
+    """Intent and funnel encoded at the end of a grouping key."""
+    body = key.split("|plat:")[0]
+    parts = body.split("|")
+    funnel = parts[-1] if parts and parts[-1] in _GROUP_FUNNELS else ""
+    if funnel:
+        parts = parts[:-1]
+    intent = parts[-1] if parts and parts[-1] in _GROUP_INTENTS else ""
+    return intent, funnel
 
 
 
@@ -420,6 +598,30 @@ def _content_type(modifier: str | None, intent: str) -> tuple[str, str]:
     return "guide", "Comprehensive Guide"
 
 
+def _normalize_topic_text(kw: str) -> str:
+    """One spelling of a topic, so variants share a page.
+
+    "4ps of marketing" and "4 ps of marketing" are the same query. So are
+    British and American spellings of the same word. The first two content
+    words of this text are the grouping head.
+    """
+    text = _norm(kw)
+    for src, dst in (
+        ("optimisation", "optimization"),
+        ("optimise", "optimize"),
+        ("organisation", "organization"),
+        ("organise", "organize"),
+        ("behaviour", "behavior"),
+        ("colour", "color"),
+        ("favour", "favor"),
+        ("centre", "center"),
+    ):
+        text = text.replace(src, dst)
+    text = re.sub(r"(\d)([a-z])", r"\1 \2", text)
+    text = re.sub(r"([a-z])(\d)", r"\1 \2", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _head_topic(kw: str) -> str:
     drop = {
         "best",
@@ -442,41 +644,48 @@ def _head_topic(kw: str) -> str:
         "software",
         "guide",
     }
-    head_toks = [t for t in re.findall(r"[a-z0-9]+", _norm(kw)) if t not in drop and t not in _STOP][:3]
-    return " ".join(head_toks[:2]) or _norm(kw)
+    head_toks: list[str] = []
+    for token in re.findall(r"[a-z0-9]+", _normalize_topic_text(kw)):
+        if token in drop or token in _STOP:
+            continue
+        if not token.isdigit() and len(token) <= 1:
+            continue
+        head_toks.append(token if token.isdigit() else _singularize(token))
+        if len(head_toks) == 2:
+            break
+    return " ".join(head_toks) or _norm(kw)
 
 
 def _cluster_key(row: dict[str, Any], brand_tokens: set[str]) -> tuple[str, str]:
     """Return (group_key, display_name).
 
-    Level-1 groups by head topic (one page family). Comparisons / branded /
-    strong location queries stay separate to avoid cannibalization.
+    A cluster is the keyword, not its parent topic. Comparisons, branded
+    queries, and location queries stay separate so they do not cannibalize.
     """
     kw = _norm(str(row.get("keyword") or ""))
     toks = _tokens(kw)
     if brand_tokens and toks & brand_tokens:
         brand = next(iter(toks & brand_tokens))
-        return f"brand:{brand}", f"{brand.title()} (Branded)"
+        intent = _grouping_intent(kw, row)
+        funnel = _grouping_funnel(kw, row, intent)
+        return f"brand:{brand}|{intent}|{funnel}", f"{brand.title()} (Branded)"
 
     mod = _modifier_bucket(kw)
     head = _head_topic(kw)
-    intent = _detect_intent(kw, row.get("intent"))
+    intent = _grouping_intent(kw, row)
+    funnel = _grouping_funnel(kw, row, intent)
+    # Intent and funnel both stay in the key. A how-to and a pricing query
+    # do not share a page, and neither do a best-of list and a hire query
+    # that happen to share an intent label.
+    focus = f"{intent}|{funnel}"
 
     if mod == "comparison":
-        return f"cmp:{_stem_key(kw)}", f"{head.title()} Comparison"
+        return f"cmp:{_stem_key(kw)}|{focus}", f"{head.title()} Comparison"
     if mod and mod.startswith("location:"):
         loc = mod.split(":", 1)[1]
-        return f"loc:{head}|{loc}", f"{head.title()} - {loc.title()}"
-    parent = str(row.get("parent_topic") or "").strip()
-    if parent:
-        # Keep cross-platform expansions (google* under a Meta Ads parent_topic)
-        # out of the parent's topical cluster — shared "ads" is not affinity.
-        plat = _platform_family_key(kw)
-        if plat:
-            return f"topic:{_norm(parent)}|plat:{plat}", f"{head.title()}"
-        return f"topic:{_norm(parent)}", parent.title()
-    # Modifier informs the label later; key stays topical so how-to/listicle
-    # variants of the same head can share a page when SERP-overlap is likely.
+        return f"loc:{head}|{loc}|{focus}", f"{head.title()} - {loc.title()}"
+    # Same intent and funnel are only a candidate pool. The cluster itself is
+    # chosen later: one primary, plus the keywords that are its secondaries.
     label = head.title()
     if mod == "how-to":
         label = f"How to {head.title()}"
@@ -486,7 +695,7 @@ def _cluster_key(row: dict[str, Any], brand_tokens: set[str]) -> tuple[str, str]
         label = f"What Is {head.title()}?"
     elif mod == "tools":
         label = f"{head.title()} Tools"
-    return f"topic:{head}|{intent}", label
+    return f"topic:{focus}", label
 
 
 _GENERIC_BRAND_STOP = {
@@ -506,11 +715,39 @@ _GENERIC_BRAND_STOP = {
 }
 
 
+def _primary_with_secondaries(items: list[dict[str, Any]], ctx: RoleContext) -> list[list[dict[str, Any]]]:
+    """Split a candidate pool into clusters of one primary and its secondaries.
+
+    A supporting keyword is a different search, so it becomes its own cluster
+    and can pick up secondaries of its own from what remains.
+    """
+    remaining = [row for row in items if isinstance(row, dict) and row.get("keyword")]
+    peeled: list[list[dict[str, Any]]] = []
+    while remaining:
+        draft = finalize_cluster({"keywords": [_member_row(row) for row in remaining]}, ctx)
+        keep = {_norm(str(draft.get("primary_keyword") or ""))}
+        for member in draft.get("keywords") or []:
+            if isinstance(member, dict) and member.get("role") == "Secondary":
+                keep.add(_norm(str(member.get("keyword") or "")))
+        kept = [row for row in remaining if _norm(str(row.get("keyword") or "")) in keep]
+        if not kept:
+            kept = remaining[:1]
+        peeled.append(kept)
+        kept_ids = {id(row) for row in kept}
+        nxt = [row for row in remaining if id(row) not in kept_ids]
+        if len(nxt) == len(remaining):
+            peeled.append(nxt)
+            break
+        remaining = nxt
+    return peeled
+
+
 def build_clusters_deterministic(
     rows: list[dict[str, Any]],
     *,
     brand_name: str | None = None,
     domain: str | None = None,
+    role_context: RoleContext | None = None,
 ) -> dict[str, Any]:
     brand_tokens: set[str] = set()
     if brand_name:
@@ -521,6 +758,7 @@ def build_clusters_deterministic(
         root = domain.split(".")[0].lower()
         if root not in _GENERIC_BRAND_STOP and len(root) > 2:
             brand_tokens.add(root)
+    ctx = role_context or RoleContext.build(rows, brand_name=brand_name, domain=domain)
 
     groups: dict[str, list[dict[str, Any]]] = {}
     labels: dict[str, str] = {}
@@ -536,6 +774,7 @@ def build_clusters_deterministic(
     # Merge tiny topical clusters (<3) into nearest topical cluster by
     # distinctive head overlap. Shared generic heads like "ads" must not merge
     # Google Ads into Meta Ads.
+    merged_small = 0
     small = [k for k, v in groups.items() if len(v) < 3]
     large_keys = [k for k, v in groups.items() if len(v) >= 3]
     for sk in small:
@@ -552,32 +791,67 @@ def build_clusters_deterministic(
             # Refuse cross-platform merges (google* vs meta*/facebook*).
             s_plat = {f for f, aliases in _PLATFORM_TOKEN_ALIASES.items() if stoks & aliases}
             l_plat = {f for f, aliases in _PLATFORM_TOKEN_ALIASES.items() if ltoks & aliases}
+            if "|plat:" in sk or "|plat:" in lk:
+                s_key_plat = sk.split("|plat:")[-1] if "|plat:" in sk else ""
+                l_key_plat = lk.split("|plat:")[-1] if "|plat:" in lk else ""
+                if s_key_plat != l_key_plat:
+                    continue
             if s_plat and l_plat and s_plat.isdisjoint(l_plat):
                 continue
-            score = len(stoks & ltoks)
+            s_intent, s_funnel = _key_focus(sk)
+            l_intent, l_funnel = _key_focus(lk)
+            if s_intent and l_intent and s_intent != l_intent:
+                continue
+            if s_funnel and l_funnel and s_funnel != l_funnel:
+                continue
+            # Platform aliases expand one word ("google") into a whole family.
+            # Collapse that back to one token so a shared platform is not a merge.
+            score = len(_family_tokens(stoks) & _family_tokens(ltoks))
             if score > best_score:
                 best_score = score
                 best_k = lk
-        if best_k and best_score > 0:
+        # One shared word is not enough to merge two topics.
+        if best_k and best_score >= 2:
             groups[best_k].extend(groups.pop(sk))
             labels.pop(sk, None)
+            merged_small += 1
 
-    # Split oversized clusters (>15) by modifier
+    # The candidate pool is every keyword of one intent and funnel. The cluster
+    # is the primary plus the keywords that are secondaries of that primary.
+    peeled_groups: dict[str, list[dict[str, Any]]] = {}
+    peeled_labels: dict[str, str] = {}
+    for key, items in groups.items():
+        pieces = _primary_with_secondaries(items, ctx)
+        for index, piece in enumerate(pieces):
+            piece_key = key if index == 0 and len(pieces) == 1 else f"{key}|kw{index}"
+            peeled_groups[piece_key] = piece
+            peeled_labels[piece_key] = labels.get(key, "")
+    groups = peeled_groups
+    labels = peeled_labels
+
+    # Size discipline: a group over SPLIT_THRESHOLD keywords is several pages.
+    # Split it by modifier pattern, then intent, then funnel stage, and name the
+    # parts after the whole so the split is visible (keyword_cluster_structure).
+    split_info: dict[str, tuple[str, list[tuple[str, str]], int]] = {}
+    split_originals = 0
+    oversized_unsplit = 0
     for key in list(groups.keys()):
         items = groups[key]
-        if len(items) <= 15:
+        if len(items) <= SPLIT_THRESHOLD:
             continue
-        subgroups: dict[str, list[dict[str, Any]]] = {}
-        for row in items:
-            mod = _modifier_bucket(str(row.get("keyword") or "")) or "core"
-            subgroups.setdefault(mod, []).append(row)
-        if len(subgroups) > 1:
-            del groups[key]
-            base = labels.pop(key, key)
-            for mod, sub in subgroups.items():
-                nk = f"{key}|{mod}"
-                groups[nk] = sub
-                labels[nk] = f"{base} - {mod}"
+        parts = split_oversized(items, lambda r: _row_labels(r, ctx))
+        if len(parts) < 2:
+            oversized_unsplit += 1
+            continue
+        whole = finalize_cluster({"keywords": [_member_row(r) for r in items]}, ctx)
+        base = _det_name(key, str(whole["primary_keyword"] or ""), whole["intent"])
+        split_originals += 1
+        del groups[key]
+        labels.pop(key, None)
+        for i, (sub, path) in enumerate(parts):
+            nk = f"{key}|part{i}"
+            groups[nk] = sub
+            split_info[nk] = (base, path, len(items))
 
     clusters_out: list[dict[str, Any]] = []
     orphans: list[dict[str, Any]] = []
@@ -587,9 +861,14 @@ def build_clusters_deterministic(
         # or when opportunity is strong enough to warrant its own page.
         if len(items) == 1 and not key.startswith(("cmp:", "brand:", "loc:")):
             only = items[0]
-            if (only.get("opportunity_score") or 0) < 50 and (only.get("volume") or 0) < 200:
-                orphan_kw = str(only.get("keyword") or "")
-                orphan_intent = _detect_intent(orphan_kw, only.get("intent"))
+            measured = only.get("volume")
+            stands_alone = isinstance(measured, (int, float)) and int(measured) > 9
+            if (
+                not stands_alone
+                and (only.get("opportunity_score") or 0) < 50
+                and (measured or 0) < 200
+            ):
+                labels = label_keyword(only, brand_tokens=ctx.brand_tokens)
                 orphans.append(
                     {
                         "keyword": only.get("keyword"),
@@ -597,95 +876,33 @@ def build_clusters_deterministic(
                         "volume": only.get("volume"),
                         # An orphan is still a classified keyword — it was
                         # excluded from a cluster, not from the analysis.
-                        "intent": orphan_intent,
-                        "funnel": _detect_funnel(orphan_kw, orphan_intent),
+                        **{k: labels[k] for k in _ORPHAN_LABEL_FIELDS},
                         "exclusion_reason": "single_low_value_keyword",
                     }
                 )
                 continue
 
-        # Primary = opportunity + specificity; prefer long-tail over bare head terms
-        ranked = sorted(
-            items,
-            key=lambda r: (
-                float(r.get("opportunity_score") or 0),
-                float(r.get("specificity") or 0),
-                float(r.get("volume") or 0),
-                len(str(r.get("keyword") or "").split()),
-            ),
-            reverse=True,
-        )
-        primary = ranked[0]
-        if len(str(primary.get("keyword") or "").split()) == 1:
-            alt = next(
-                (
-                    r
-                    for r in ranked
-                    if len(str(r.get("keyword") or "").split()) >= 3
-                    and (r.get("opportunity_score") or 0)
-                    >= (primary.get("opportunity_score") or 0) * 0.7
-                ),
-                None,
-            )
-            if alt:
-                primary = alt
-        pkw = str(primary.get("keyword") or "")
-        intent = _detect_intent(pkw, primary.get("intent"))
-        funnel = _detect_funnel(pkw, intent)
+        # One decider for primary, roles and labels (keyword_cluster_roles). The
+        # display cap keeps the primary and the best-scored members; the
+        # cluster's true size stays in keyword_count.
+        ranked = list(items)
+        draft = finalize_cluster({"keywords": [_member_row(r) for r in ranked]}, ctx)
+        if len(draft["keywords"]) > _MAX_CLUSTER_KEYWORDS:
+            keep = {_norm(str(k.get("keyword") or "")) for k in draft["keywords"][:_MAX_CLUSTER_KEYWORDS]}
+            shown = [r for r in ranked if _norm(str(r.get("keyword") or "")) in keep]
+            draft = finalize_cluster({"keywords": [_member_row(r) for r in shown]}, ctx)
+        kw_rows = draft["keywords"]
+        pkw = str(draft["primary_keyword"] or "")
+        primary = next((r for r in ranked if _norm(str(r.get("keyword") or "")) == _norm(pkw)), ranked[0])
+        intent = draft["intent"]
+        funnel = draft["funnel"]
         mod = _modifier_bucket(pkw)
         ctype, rec_label = _content_type(mod, intent)
-        # Name from full primary keyword (not truncated generic head)
-        head = _head_topic(pkw)
-        if key.startswith("cmp:"):
-            cluster_name = specific_cluster_name(pkw, intent=intent, head=head, mod="comparison")
-        elif key.startswith("loc:"):
-            loc = key.split("|")[-1] if "|" in key else "local"
-            cluster_name = specific_cluster_name(
-                pkw, intent=intent, head=head, mod=f"location:{loc}"
-            )
-        elif key.startswith("brand:"):
-            cluster_name = specific_cluster_name(pkw, intent="navigational", head=head)
-        else:
-            cluster_name = specific_cluster_name(pkw, intent=intent, head=head, mod=mod)
-        kw_rows = []
-        for i, r in enumerate(ranked[:_MAX_CLUSTER_KEYWORDS]):
-            is_primary = _norm(str(r.get("keyword") or "")) == _norm(pkw)
-            if is_primary:
-                role = "Primary"
-            elif i < 4:
-                role = "Secondary"
-            else:
-                role = "Supporting"
-            row_kw = str(r.get("keyword") or "")
-            row_intent = _detect_intent(row_kw, r.get("intent"))
-            kw_rows.append(
-                {
-                    "keyword": r.get("keyword"),
-                    "volume": r.get("volume"),
-                    "difficulty": r.get("difficulty"),
-                    "cpc": r.get("cpc"),
-                    "intent": row_intent,
-                    # Per-keyword stage, not just the cluster's — a Secondary/
-                    # Supporting keyword can sit at a different funnel stage than
-                    # the Primary even inside one cluster (e.g. "what is seo"
-                    # (TOFU) supporting a "seo services" (BOFU) primary).
-                    "funnel": _detect_funnel(row_kw, row_intent),
-                    "role": role,
-                    "opportunity_score": r.get("opportunity_score"),
-                    "gap_flag": r.get("gap_flag"),
-                    "specificity": r.get("specificity"),
-                    # Carried from keyword_relevance.py's evaluate_keyword() so the
-                    # cluster contract keeps *why* each keyword survived cleaning,
-                    # not just that it did.
-                    "relevance_reason": r.get("relevance_reason"),
-                    "relevance_evidence": r.get("relevance_evidence") or None,
-                }
-            )
-        # Ensure exactly one Primary
-        if not any(k.get("role") == "Primary" for k in kw_rows) and kw_rows:
-            kw_rows[0]["role"] = "Primary"
-        # Move primary to front
-        kw_rows.sort(key=lambda k: 0 if k.get("role") == "Primary" else 1)
+        split = split_info.get(key)
+        cluster_name = split_name(split[0], split[1]) if split else _det_name(key, pkw, intent)
+        focus_label = " · ".join(part for part in (funnel, intent) if part)
+        if focus_label and focus_label.lower() not in cluster_name.lower():
+            cluster_name = f"{cluster_name} ({focus_label})"
         vols = [
             int(r.get("volume"))
             for r in ranked
@@ -745,6 +962,11 @@ def build_clusters_deterministic(
                     "reason": primary.get("relevance_reason") or "unscored",
                     "evidence": primary.get("relevance_evidence") or None,
                 },
+                **{k: draft[k] for k in _ROLE_FIELDS},
+                # Set when this cluster is one part of an oversized group.
+                "split_from": split[0] if split else None,
+                "split_by": [dimension for dimension, _v in split[1]] if split else None,
+                "split_from_size": split[2] if split else None,
                 "keywords": kw_rows,
             }
         )
@@ -768,11 +990,19 @@ def build_clusters_deterministic(
         "clusters_created": len(clusters_out),
         "orphan_count": len(orphans),
         "clusters": clusters_out,
-        "orphans": orphans[:30],
-        "orphans_truncated": max(0, len(orphans) - 30),
+        # Every orphan; _complete_report caps the displayed list.
+        "orphans": orphans,
+        "orphans_truncated": 0,
         "content_roadmap": roadmap,
         "source": "deterministic_rules",
         "keyword_accounting": build_keyword_accounting(clusters_out, orphans, input_count=len(rows)),
+        "size_discipline": {
+            "split_threshold": SPLIT_THRESHOLD,
+            "merged_small_clusters": merged_small,
+            "split_clusters": split_originals,
+            "clusters_from_splits": len(split_info),
+            "oversized_unsplit": oversized_unsplit,
+        },
     }
 
 
@@ -842,18 +1072,15 @@ def validate_clusters(clusters: list[dict[str, Any]]) -> dict[str, Any]:
         # transactional keywords. Flag rather than auto-split — one cluster may
         # still be the right call if the reviewer confirms a single page can
         # satisfy both, but it must not ship unflagged.
-        kw_intents = {
-            str(k.get("intent") or "").strip().lower()
-            for k in kws
-            if str(k.get("role") or "").lower() in ("primary", "secondary") and k.get("intent")
-        }
-        if {"informational", "transactional"} <= kw_intents:
+        conflict = conflicting_intents(cluster)
+        if conflict:
             issues.append(
                 {
                     "cluster": name,
                     "issue": "mixed_intent_cluster",
                     "severity": "warn",
-                    "intents": sorted(kw_intents),
+                    "intents": conflict,
+                    "intent_distribution": (cluster.get("intent_distribution") or {}).get("weighted_share"),
                 }
             )
         if len(kws) < 1:
@@ -874,6 +1101,180 @@ def validate_clusters(clusters: list[dict[str, Any]]) -> dict[str, Any]:
 def _attach_cluster_validation(report: dict[str, Any]) -> dict[str, Any]:
     report["cluster_validation"] = validate_clusters(report.get("clusters") or [])
     return report
+
+
+ORPHAN_DISPLAY_CAP = 100
+ROADMAP_SIZE = 20
+
+
+def _cluster_service(cluster: dict[str, Any], ctx: RoleContext) -> str | None:
+    """The service most of the cluster's keywords were seeded for."""
+    counts: dict[str, int] = {}
+    for m in cluster.get("keywords") or []:
+        if not isinstance(m, dict):
+            continue
+        service = (ctx.rows_by_kw.get(_norm(str(m.get("keyword") or ""))) or {}).get("service")
+        if service:
+            counts[str(service)] = counts.get(str(service), 0) + 1
+    return max(sorted(counts), key=lambda s: counts[s]) if counts else None
+
+
+def _roadmap(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(clusters, key=lambda c: c.get("best_score") or 0, reverse=True)
+    return [
+        {
+            "priority": i,
+            "cluster": c.get("name"),
+            "content_type": c.get("recommended_content") or c.get("content_type"),
+            "target_keyword": c.get("primary_keyword"),
+            "intent": c.get("intent"),
+            "funnel": c.get("funnel"),
+            "est_traffic": c.get("est_traffic"),
+            "modifier_label": c.get("modifier_label"),
+            "pillar_name": c.get("pillar_name"),
+        }
+        for i, c in enumerate(ranked[:ROADMAP_SIZE], start=1)
+    ]
+
+
+def _provenance(report: dict[str, Any]) -> dict[str, Any]:
+    """What was verified against real data and what was inferred."""
+    clusters = [c for c in report.get("clusters") or [] if isinstance(c, dict)]
+    members = [m for c in clusters for m in (c.get("keywords") or []) if isinstance(m, dict)]
+    serp = report.get("serp_clustering") or {}
+    model = report.get("model_clustering") or {}
+    naming = report.get("naming") or {}
+    serp_ran = bool(serp) and not serp.get("skipped")
+    checked = {_norm(k) for k in (serp.get("checked_keywords") or [])}
+    serp_checked = sum(
+        1 for c in clusters if any(_norm(str(m.get("keyword") or "")) in checked for m in c.get("keywords") or [])
+    )
+    serp_merged = sum(1 for c in clusters if c.get("serp_validated"))
+    measured = sum(1 for m in members if m.get("volume") is not None and not m.get("volume_estimated"))
+    grouping = "model" if report.get("source") == "keyword_clustering_skill" else "rules"
+    verified: list[str] = []
+    inferred: list[str] = []
+    if serp_ran:
+        verified.append(
+            f"{serp_checked} of {len(clusters)} clusters contain a head term whose live Google results "
+            f"were compared; {serp_merged} cluster(s) were merged because their head terms shared results."
+        )
+        if len(clusters) > serp_checked:
+            inferred.append(
+                f"{len(clusters) - serp_checked} clusters had no head term checked against Google results; "
+                f"their membership is inferred from {'the model' if grouping == 'model' else 'keyword wording rules'}."
+            )
+    else:
+        reason = _SERP_SKIP_TEXT.get(str(serp.get("reason") or ""), str(serp.get("reason") or "not run"))
+        inferred.append(
+            f"The shared-search-results check did not run ({reason}), so no cluster's membership was "
+            f"verified against Google results; all of it is inferred from "
+            f"{'the model' if grouping == 'model' else 'keyword wording rules'}."
+        )
+    if grouping == "model":
+        verified.append(
+            "Every keyword the model placed was checked against the cleaned keyword list; "
+            f"{report.get('llm_invented_dropped_count') or 0} keyword(s) it proposed that were not in the "
+            "list were rejected."
+        )
+    else:
+        inferred.append(
+            "Clusters were grouped by deterministic wording rules"
+            + (f"; model clustering did not run ({model.get('reason')})." if model.get("reason") else ".")
+        )
+    if members:
+        verified.append(
+            f"{measured} of {len(members)} clustered keywords shown carry a measured DataForSEO volume; "
+            "the rest are unmeasured or estimated and are labelled so."
+        )
+    accounting = report.get("keyword_accounting") or {}
+    if accounting:
+        (verified if accounting.get("balanced") else inferred).append(
+            "Every keyword that entered clustering is accounted for (clustered or orphaned with a reason)."
+            if accounting.get("balanced")
+            else f"{accounting.get('unaccounted_count')} keyword(s) left clustering with no recorded reason."
+        )
+    return {
+        "grouping": grouping,
+        "source_label": (
+            ("Model clustering" if grouping == "model" else "Rule-based clustering")
+            + (", SERP-checked" if serp_ran else ", SERP check skipped")
+        ),
+        "serp_check_ran": serp_ran,
+        "serp_check_reason": None if serp_ran else serp.get("reason") or "not_run",
+        "serp_head_terms_checked": serp.get("head_terms") if serp_ran else 0,
+        "serp_checked_clusters": serp_checked,
+        "serp_merged_clusters": serp_merged,
+        "model_clustering_ran": bool(model.get("ran")),
+        "model_clustering_model": model.get("model"),
+        "model_clustering_reason": model.get("reason"),
+        "naming_ran": bool(naming.get("ran")),
+        "naming_model": naming.get("model"),
+        "naming_reason": naming.get("reason"),
+        "invented_keywords_rejected": int(report.get("llm_invented_dropped_count") or 0),
+        "cleaning_excluded_count": report.get("pipeline_excluded_count"),
+        "cleaning_excluded_by_reason": report.get("pipeline_excluded_by_reason") or {},
+        "measured_volume_keywords": measured,
+        "clustered_keywords_shown": len(members),
+        "verified": verified,
+        "inferred": inferred,
+    }
+
+
+_SERP_SKIP_TEXT = {
+    "disabled": "turned off in settings",
+    "locale_unresolved": "no resolved market (location and language) for this client",
+    "no_measured_head_terms": "no keyword had a measured volume to check",
+    "not_run": "not run",
+    "rule_fallback": "the model clustering failed and the rule-based result was used without the check",
+}
+
+
+def _complete_report(
+    report: dict[str, Any],
+    ctx: RoleContext,
+    *,
+    orphans: list[dict[str, Any]],
+    model_clustering: dict[str, Any],
+    naming: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Final shape for every exit path: roles, page pattern, pillars, roadmap,
+    keyword accounting, provenance, validation."""
+    report = _finalize_roles(report, ctx)
+    clusters = sorted(
+        (c for c in report.get("clusters") or [] if isinstance(c, dict)),
+        key=lambda c: c.get("best_score") or 0,
+        reverse=True,
+    )
+    for c in clusters:
+        c.update(cluster_modifier_pattern(c))
+        # Stable across renames; later phases link clusters by this, not by name.
+        c.setdefault("cluster_id", stable_cluster_id(c))
+    report["clusters"] = clusters
+    report["pillars"] = assign_pillars(clusters, service_of=lambda c: _cluster_service(c, ctx))
+    report["content_roadmap"] = _roadmap(clusters)
+    report["clusters_created"] = len(clusters)
+    report["keyword_accounting"] = build_keyword_accounting(
+        clusters, orphans, input_count=int(report.get("total_keywords") or 0)
+    )
+    report["orphan_count"] = len(orphans)
+    report["orphans"] = orphans[:ORPHAN_DISPLAY_CAP]
+    report["orphans_truncated"] = max(0, len(orphans) - ORPHAN_DISPLAY_CAP)
+    report["model_clustering"] = model_clustering
+    report["naming"] = naming or {"ran": False, "model": None, "reason": "naming runs only after a SERP check"}
+    report["clustering_provenance"] = _provenance(report)
+    return _attach_cluster_validation(report)
+
+
+def _finalize_roles(report: dict[str, Any], ctx: RoleContext) -> dict[str, Any]:
+    """Last word on primary, roles and labels, after SERP merges and naming.
+
+    A SERP merge folds one cluster's rows (its Primary included) into another,
+    so the decider runs again on every cluster; it is idempotent, so clusters
+    nothing touched come out unchanged.
+    """
+    report["clusters"] = finalize_clusters(list(report.get("clusters") or []), ctx)
+    return sync_roadmap(report)
 
 
 def _cluster_is_unverified(cluster: dict[str, Any]) -> bool:
@@ -939,6 +1340,23 @@ def clusters_for_cdp(report: dict[str, Any]) -> list[dict[str, Any]]:
                 "url_status": c.get("url_status"),
                 "supporting_parent": c.get("supporting_parent"),
                 "cannibalization": c.get("cannibalization"),
+                "cluster_id": c.get("cluster_id") or stable_cluster_id(c),
+                # Page pattern, hub placement and size discipline.
+                "modifier_pattern": c.get("modifier_pattern"),
+                "modifier_location": c.get("modifier_location"),
+                "modifier_label": c.get("modifier_label"),
+                "cluster_tier": c.get("cluster_tier"),
+                "pillar_id": c.get("pillar_id"),
+                "pillar_name": c.get("pillar_name"),
+                "split_from": c.get("split_from"),
+                "split_by": c.get("split_by"),
+                # Why this primary, and the member label mix.
+                "primary_selection": c.get("primary_selection"),
+                "intent_distribution": c.get("intent_distribution"),
+                "funnel_distribution": c.get("funnel_distribution"),
+                "role_counts": c.get("role_counts"),
+                "label_confidence": c.get("label_confidence"),
+                "serp_validated": c.get("serp_validated"),
             }
         )
     return out
@@ -950,12 +1368,16 @@ async def _serp_name_and_attach(
     *,
     location_code: int | None,
     language_code: str | None,
+    role_context: RoleContext,
+    model_clustering: dict[str, Any],
 ) -> dict[str, Any]:
     """SERP-overlap the head terms, then let Claude name each cluster."""
     from app.services.keyword_cluster_naming import name_clusters
     from app.services.keyword_serp_clustering import refine_clusters_with_serp
 
     clusters = list(report.get("clusters") or [])
+    naming: dict[str, Any] = {"ran": False, "model": None, "reason": "naming runs only after a SERP check"}
+    report["serp_clustering"] = {"skipped": True, "reason": "fewer than 3 keywords"}
     if len(cleaned) >= 3:
         clusters, serp_meta = await refine_clusters_with_serp(
             clusters,
@@ -970,8 +1392,16 @@ async def _serp_name_and_attach(
             "serp_clustering": serp_meta,
         }
         if not serp_meta.get("skipped"):
-            report["clusters"] = await name_clusters(clusters)
-    return _attach_cluster_validation(report)
+            # Roles first, so the namer sees each cluster's final primary.
+            report = _finalize_roles(report, role_context)
+            report["clusters"] = await name_clusters(report["clusters"], audit=naming)
+    return _complete_report(
+        report,
+        role_context,
+        orphans=list(report.get("orphans") or []),
+        model_clustering=model_clustering,
+        naming=naming,
+    )
 
 
 async def run_keyword_clustering(
@@ -985,6 +1415,7 @@ async def run_keyword_clustering(
     relevance_context: Any | None = None,
     location_code: int | None = None,
     language_code: str | None = None,
+    site_strength: float | None = None,
 ) -> dict[str, Any]:
     pipeline_result = run_keyword_pipeline(
         [r for r in rows if isinstance(r, dict) and r.get("keyword")],
@@ -993,8 +1424,15 @@ async def run_keyword_clustering(
         source_label="clustering",
     )
     cleaned = pipeline_result["keywords"]
+    role_context = RoleContext.build(
+        cleaned,
+        brand_name=brand_name,
+        domain=domain,
+        relevance_context=relevance_context,
+        site_strength=site_strength,
+    )
     report = build_clusters_deterministic(
-        cleaned, brand_name=brand_name, domain=domain
+        cleaned, brand_name=brand_name, domain=domain, role_context=role_context
     )
     report["keyword_pipeline"] = pipeline_result["pipeline"]
     report["pipeline_excluded"] = pipeline_result["excluded"][:24]
@@ -1008,16 +1446,23 @@ async def run_keyword_clustering(
     }
     report["keyword_cleaning"] = pipeline_result.get("relevance_audit") or {}
 
-    if not use_llm or len(cleaned) < 3:
-        return await _serp_name_and_attach(
-            report, cleaned, location_code=location_code, language_code=language_code
-        )
-
     from app.config import get_settings
 
-    if not get_settings().keyword_cluster_use_llm:
+    skip_reason = None
+    if not use_llm:
+        skip_reason = "not requested for this run, to stay within the Phase 5 time budget"
+    elif len(cleaned) < 3:
+        skip_reason = "fewer than 3 keywords"
+    elif not get_settings().keyword_cluster_use_llm:
+        skip_reason = "turned off in settings"
+    if skip_reason:
         return await _serp_name_and_attach(
-            report, cleaned, location_code=location_code, language_code=language_code
+            report,
+            cleaned,
+            location_code=location_code,
+            language_code=language_code,
+            role_context=role_context,
+            model_clustering={"ran": False, "model": None, "reason": skip_reason},
         )
 
     from app.services.keyword_llm_clustering import llm_cluster_keywords
@@ -1029,10 +1474,30 @@ async def run_keyword_clustering(
         products=products,
         seeds=seeds,
         relevance_context=relevance_context,
+        role_context=role_context,
     )
 
     if llm_result.get("skipped") or not llm_result.get("clusters"):
-        return _attach_cluster_validation(report)
+        why = str(llm_result.get("skipped") or llm_result.get("error") or "empty")
+        log.warning(
+            "keyword_clustering_llm_unavailable",
+            reason=why,
+            kept_clusters=len(report.get("clusters") or []),
+        )
+        report["serp_clustering"] = {"skipped": True, "reason": "rule_fallback"}
+        return _complete_report(
+            report,
+            role_context,
+            orphans=list(report.get("orphans") or []),
+            model_clustering={
+                "ran": False,
+                "model": llm_result.get("model"),
+                "reason": {
+                    "mock_or_no_key": "no model key configured",
+                    "empty": "the model returned no clusters",
+                }.get(why, why),
+            },
+        )
 
     clusters = llm_result["clusters"]
     orphans = llm_result.get("orphans") or []
@@ -1051,27 +1516,38 @@ async def run_keyword_clustering(
     )
     from app.services.keyword_cluster_naming import name_clusters
 
-    clusters = await name_clusters(clusters)
+    # The decider runs before naming (so names fit the final primary) and again
+    # in _finalize_roles below; naming itself cannot change the primary.
+    clusters = finalize_clusters(clusters, role_context)
+    naming: dict[str, Any] = {}
+    clusters = await name_clusters(clusters, audit=naming)
 
     clusters.sort(key=lambda c: c.get("best_score") or 0, reverse=True)
-    return _attach_cluster_validation(
+    return _complete_report(
         {
             "total_keywords": len(cleaned),
             "clusters_created": len(clusters),
             "serp_clustering": serp_meta,
-            "orphan_count": len(orphans),
             "clusters": clusters,
-            "orphans": orphans[:30],
+            "orphans": orphans,
             "content_roadmap": roadmap[:20],
             "source": "keyword_clustering_skill",
+            "size_discipline": llm_result.get("size_discipline") or {},
+            "llm_cluster_audit": llm_result.get("llm_cluster_audit") or {},
+            "llm_invented_dropped_count": llm_result.get("llm_invented_dropped_count") or 0,
             "keyword_pipeline": report.get("keyword_pipeline"),
             "pipeline_excluded": report.get("pipeline_excluded"),
             "pipeline_excluded_count": report.get("pipeline_excluded_count"),
             "pipeline_excluded_by_reason": report.get("pipeline_excluded_by_reason"),
             "keyword_cleaning": report.get("keyword_cleaning"),
             "llm_invented_dropped": llm_result.get("llm_invented_dropped") or [],
-            "keyword_accounting": build_keyword_accounting(
-                clusters, orphans, input_count=len(cleaned)
-            ),
-        }
+        },
+        role_context,
+        orphans=orphans,
+        model_clustering={
+            "ran": True,
+            "model": (llm_result.get("llm_cluster_audit") or {}).get("model"),
+            "reason": None,
+        },
+        naming=naming,
     )

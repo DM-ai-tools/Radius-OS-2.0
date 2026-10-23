@@ -122,6 +122,21 @@ async def test_review_and_missing_verdict_quarantine():
     assert audit2["quarantined"] == 1
 
 
+async def test_silent_judge_keeps_the_clusters():
+    async def silent(_system: str, _user: str):
+        return None
+
+    kept, rejected, audit = await validate_clusters_coherence(
+        [_cluster("seo services", "seo company"), _cluster("google ads", "ppc management")],
+        caller=silent,
+        **CONTEXT,
+    )
+    assert len(kept) == 2
+    assert rejected == []
+    assert kept[0]["cluster_sense_reason"] == "coherence check skipped"
+    assert "judge_unavailable" in audit["errors"]
+
+
 async def test_no_provider_fails_closed(monkeypatch):
     monkeypatch.setattr(gate, "_provider_ready", lambda: False)
     kept, rejected, audit = await validate_clusters_coherence(

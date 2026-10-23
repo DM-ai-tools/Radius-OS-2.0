@@ -115,6 +115,135 @@ def test_proposed_url_prefix_follows_page_type_not_a_single_default():
         )
 
 
+def test_a_service_or_guide_query_is_not_filed_under_pricing():
+    """Company, city, and meaning phrasings are one category, not one page each.
+
+    The workbook titles the page with the offer ("Search Engine Optimisation")
+    and keeps "near me", "company", and "sydney" in the secondary column.
+    """
+    cases = [
+        "seo company near me",
+        "search engine optimisation business",
+        "seo meaning in business",
+    ]
+    for primary in cases:
+        cluster = {
+            "name": primary.title(),
+            "primary_keyword": primary,
+            "intent": "commercial",
+            "content_type": "landing",
+            "recommended_url": f"/pricing/{primary.replace(' ', '-')}/",
+            "keywords": [_kw(primary, "Primary", intent="commercial", volume=90)],
+        }
+        entry = map_cluster_to_url(
+            cluster,
+            crawled_pages=PAGES,
+            offer_index={
+                "seo": "search engine optimisation",
+                "search engine optimisation": "search engine optimisation",
+            },
+        )
+        assert entry["proposed_url"] == "/services/search-engine-optimisation/", entry["proposed_url"]
+        assert entry["l1_category"] == "Search Engine Optimisation"
+        assert entry["l2_subcategory"] is None
+        assert entry["page_type"] == "Hub Page"
+
+
+def test_same_service_line_publishes_one_page():
+    keywords = [
+        ("search engine optimisation business", 90),
+        ("search engine optimisation company australia", 1300),
+        ("seo company near me", 260),
+        ("seo marketing sydney", 2900),
+        ("seo meaning in business", 90),
+        ("seo", 500),
+        ("search engine optimization", 700),
+        ("search engine optimisation", 400),
+        ("technical seo", 800),
+    ]
+    clusters = [
+        {
+            "name": keyword.title(),
+            "primary_keyword": keyword,
+            "intent": "commercial",
+            "keywords": [_kw(keyword, "Primary", volume=volume)],
+        }
+        for keyword, volume in keywords
+    ]
+    report = build_final_url_map(
+        {"clusters": clusters},
+        website={"pages": PAGES},
+        offer_synonyms=[
+            {
+                "service": "Search Engine Optimisation",
+                "suggested": ["seo", "search engine optimization"],
+                "added": ["seo"],
+            }
+        ],
+    )
+    rows = report["final_url_map"]
+    by_url = {r.get("proposed_url"): r for r in rows}
+    hub = by_url["/services/search-engine-optimisation/"]
+    assert hub["l1_category"] == "Search Engine Optimisation"
+    assert hub["primary_keyword"] == "seo marketing sydney"
+    secondaries = " ".join(hub["secondary_keywords_sheet"]).lower()
+    assert "seo company near me" in secondaries
+    assert "seo meaning in business" in secondaries
+    assert "search engine optimisation business" in secondaries
+    assert "seo" in secondaries.split(", ") or " seo " in f" {secondaries} "
+    assert "search engine optimization" in secondaries
+    assert "search engine optimisation" in secondaries
+    assert all(r.get("primary_keyword") not in {"seo", "search engine optimization", "search engine optimisation"} for r in rows)
+    assert all(r.get("l1_category") != "Seo Company Near Me" for r in rows)
+    technical = [r for r in rows if r.get("primary_keyword") == "technical seo"]
+    assert len(technical) == 1
+    assert technical[0]["proposed_url"] != hub["proposed_url"]
+
+
+def test_the_same_rule_applies_to_every_service():
+    clusters = [
+        {
+            "name": "Email Marketing",
+            "primary_keyword": "email marketing",
+            "intent": "commercial",
+            "keywords": [_kw("email marketing", "Primary", volume=1000)],
+        },
+        {
+            "name": "Email Marketing Agency Sydney",
+            "primary_keyword": "email marketing agency sydney",
+            "intent": "commercial",
+            "keywords": [_kw("email marketing agency sydney", "Primary", volume=200)],
+        },
+        {
+            "name": "Pay Per Click",
+            "primary_keyword": "pay per click",
+            "intent": "commercial",
+            "keywords": [_kw("pay per click", "Primary", volume=800)],
+        },
+        {
+            "name": "PPC",
+            "primary_keyword": "ppc",
+            "intent": "commercial",
+            "keywords": [_kw("ppc", "Primary", volume=300)],
+        },
+    ]
+    report = build_final_url_map(
+        {"clusters": clusters},
+        website={"pages": PAGES},
+        offer_synonyms=[
+            {"service": "PPC Management", "suggested": ["ppc", "pay per click"], "added": ["pay per click"]}
+        ],
+    )
+    rows = report["final_url_map"]
+    email = [r for r in rows if "email" in str(r.get("primary_keyword") or "")]
+    ppc = [r for r in rows if r.get("offer_line") == "ppc management"]
+    assert len(email) == 1
+    assert email[0]["primary_keyword"] == "email marketing"
+    assert "email marketing agency sydney" in " ".join(email[0]["secondary_keywords_sheet"]).lower()
+    assert len(ppc) == 1
+    assert ppc[0]["primary_keyword"] in {"pay per click", "ppc"}
+
+
 def test_supporting_cluster_gets_no_dedicated_url_and_folds_into_its_parent():
     parent = {
         "name": "CRM Pricing",
@@ -140,11 +269,16 @@ def test_supporting_cluster_gets_no_dedicated_url_and_folds_into_its_parent():
     parent_row = rows["CRM Pricing"]
 
     assert child_row["dedicated_url"] is False
-    assert child_row["url_status"] == "no_dedicated_url"
     assert child_row["proposed_url"] is None
     # Repointed at whatever URL the parent actually owns.
     assert child_row["selected_url"] == (parent_row["selected_url"] or parent_row["proposed_url"])
-    assert report["summary"]["no_dedicated_url"] == 1
+    # The parent's page does not exist yet, so the child folds into that
+    # yet-to-be-created page (not "review/merge/redirect": nothing to merge).
+    assert parent_row["action"] == "CREATE"
+    assert child_row["action"] == "FOLD_INTO_NEW_PARENT"
+    assert child_row["url_status"] == "fold_into_new_parent"
+    assert child_row["parent_cluster_id"] == parent_row["cluster_id"]
+    assert report["summary"]["fold_into_new_parent"] == 1
 
 
 def test_uncertain_cluster_is_surfaced_for_review_but_still_mapped():

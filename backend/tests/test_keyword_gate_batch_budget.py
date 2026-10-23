@@ -130,7 +130,7 @@ async def test_a_raising_json_parser_does_not_bypass_salvage():
     async def fake_chat(**kwargs):
         return truncated
 
-    with patch.object(gate, "_skill_chat", fake_chat):
+    with patch.object(gate, "keyword_analysis_chat", fake_chat):
         payload = await gate._skill_judge("sys", "user", batch_size=3)
 
     assert payload is not None, "a truncated reply must still come back for salvage"

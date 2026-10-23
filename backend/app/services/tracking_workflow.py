@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
 from typing import Any
 
 # Platforms checked in T1 (connection verification)
@@ -92,14 +91,13 @@ def build_t1_platforms(
             if cdd_note:
                 detail = f"CDD: {cdd_note}. {detail}"
         else:
+            # A manual platform (CMS, hosting, CRM, call tracking) is listed only
+            # when Discovery recorded something about it; an empty checklist row
+            # told the reader nothing.
+            if not cdd_note:
+                continue
             status = "pending_setup"
-            detail = (
-                f"{p['label']} is on the access checklist. "
-                "Record credentials/access outside OAuth when available."
-            )
-            if cdd_note:
-                status = "pending_setup"
-                detail = f"CDD: {cdd_note}"
+            detail = f"CDD: {cdd_note}"
         rows.append(
             {
                 **p,
@@ -169,25 +167,9 @@ def build_t2_audit(checks: list[dict[str, Any]], snippets: dict[str, Any] | None
                 "fix": (c.get("detail") or {}).get("fix"),
             }
         )
-    # Extra heuristic rows (cookie consent / referral) — informational
-    items.append(
-        {
-            "check": "Cookie-consent configuration",
-            "element": "cookie_consent",
-            "result": "warning",
-            "message": "Consent mode / CMP wiring should be confirmed manually in GTM preview.",
-            "fix": "Verify tags fire only after consent where required.",
-        }
-    )
-    items.append(
-        {
-            "check": "Referral exclusions",
-            "element": "referral_exclusions",
-            "result": "warning",
-            "message": "Payment / auth referrers should be excluded in GA4 admin.",
-            "fix": "Add payment gateway domains to unwanted referrals list.",
-        }
-    )
+    # Only checks that actually ran are listed. Cookie consent and referral
+    # exclusions were shown as a "warning" for every client without being
+    # checked, which read as a finding about the site.
     return {
         "title": "T2 — Automated tracking audit",
         "subtitle": "GTM / GA4 tag inspection",
@@ -199,12 +181,10 @@ def build_t2_audit(checks: list[dict[str, Any]], snippets: dict[str, Any] | None
 
 def build_t3_conversions(checks: list[dict[str, Any]]) -> dict[str, Any]:
     conv = next((c for c in checks if c["element"] == "conversion_event"), None)
+    # Only the conversion the checks examined. Four "secondary" events were
+    # always listed as unverified placeholders without any check behind them.
     events = [
         {"name": "Primary conversion (e.g. purchase / lead)", "status": conv["check_result"] if conv else "unverified"},
-        {"name": "Secondary — form submit", "status": "unverified"},
-        {"name": "Secondary — phone / call click", "status": "unverified"},
-        {"name": "Secondary — email click", "status": "unverified"},
-        {"name": "Secondary — booking", "status": "unverified"},
     ]
     return {
         "title": "T3 — Conversion tracking validation",
@@ -224,46 +204,29 @@ def build_t4_baseline(
     has_gsc: bool,
     display_name: str,
 ) -> dict[str, Any]:
-    """6–12 month historical baseline shape (live API pull when wired; stub metrics otherwise)."""
-    end = date.today()
-    start = end - timedelta(days=365)
-    available = has_ga4 or has_gsc
-    metrics = {
-        "organic_users": None,
-        "sessions": None,
-        "conversions": None,
-        "revenue": None,
-        "impressions": None,
-        "clicks": None,
-        "ctr": None,
-        "avg_position": None,
-        "top_queries": [],
-        "top_landing_pages": [],
-        "indexed_url_count": None,
-        "branded_vs_nonbranded": None,
-    }
+    """Historical baseline status. No GA4 or Search Console history is pulled.
+
+    This used to return twelve metrics that were always empty, which approval
+    then wrote into the Client Digital Profile as "the historical baseline".
+    It now says plainly that nothing was collected and which accounts are
+    connected, so no later phase mistakes an empty shape for measured history.
+    """
+    connected = [name for name, ok in (("GA4", has_ga4), ("Search Console", has_gsc)) if ok]
     note = (
-        f"Window {start.isoformat()} → {end.isoformat()}. "
+        "No historical traffic data was collected: the GA4 and Search Console history "
+        "pulls are not built. "
         + (
-            "Credentials present — full GSC/GA4 history pull can be attached when Data API is configured; "
-            "structure is ready for the Client Digital Profile."
-            if available
-            else "GA4 / Search Console not connected — historical metrics stay empty. "
-            "Live HTML tag audit still ran. You can approve T6 without Google APIs."
+            f"Connected: {', '.join(connected)}."
+            if connected
+            else "GA4 and Search Console are not connected; the live tag checks still ran."
         )
     )
     return {
-        "title": "T4 — Historical baseline extraction",
-        "subtitle": "GSC API + GA4 API (optional)",
-        "mode": "AUTOMATED",
+        "title": "Historical baseline",
         "client": display_name,
-        "window_months": "6–12",
-        "date_start": start.isoformat(),
-        "date_end": end.isoformat(),
         "access": {"ga4": has_ga4, "search_console": has_gsc},
-        "metrics": metrics,
         "note": note,
-        "status": "ready_structure" if available else "skipped_no_api",
+        "status": "not_collected",
     }
 
 

@@ -51,6 +51,87 @@ def _selection_keys(*values: str) -> set[str]:
     return keys
 
 
+# Sub-services from these sources are suggestions, not something the client has
+# said it sells: never pre-selected, never pre-offered.
+NOT_OFFERED_SOURCES = frozenset({"competitor", "industry"})
+
+# Words that decorate a service name without changing what is sold.
+_IDENTITY_NOISE = frozenset(
+    {"service", "services", "agency", "agencies", "company", "companies", "solution", "solutions"}
+)
+
+
+def service_identity_key(name: str) -> str:
+    """Key under which two spellings of the same offering collide.
+
+    "Web Development" / "Website Development" and "SEO" / "SEO Services" are one
+    offering listed twice. Different offerings ("Web Design", "Local SEO",
+    "Google Ads/PPC Management" vs "Google Ads") keep different keys.
+    """
+    tokens: set[str] = set()
+    for tok in re.split(r"[^a-z0-9]+", _norm_key(name)):
+        if not tok or tok in _IDENTITY_NOISE:
+            continue
+        if tok in {"website", "websites"}:
+            tok = "web"
+        elif len(tok) > 3 and tok.endswith("s") and not tok.endswith("ss"):
+            tok = tok[:-1]
+        tokens.add(tok)
+    return " ".join(sorted(tokens)) or _norm_key(name)
+
+
+# Single-segment pages that are real pages but not something the client sells.
+_NON_SERVICE_PAGE_TOKENS = frozenset(
+    {
+        "about", "contact", "career", "careers", "award", "awards", "team", "news",
+        "faq", "faqs", "privacy", "policy", "terms", "conditions", "testimonial",
+        "testimonials", "review", "reviews", "case", "study", "studies", "portfolio",
+        "resource", "resources", "sitemap", "login", "logout", "thank", "calculator",
+        "calculators", "covid", "coronavirus", "crisis", "press", "media", "events",
+        "event", "gallery", "subscribe", "unsubscribe", "cart", "checkout", "account",
+        "disclaimer", "cookie", "cookies", "accessibility", "partners", "referral",
+    }
+)
+
+
+def website_page_candidates(website: dict[str, Any] | None) -> list[dict[str, str]]:
+    """Top-level pages the page classifier left as plain pages.
+
+    The classifier is deliberately conservative — it will not call ``/refinancing``
+    a service just because it sits at the root — so real offerings can be missed.
+    These are offered to the operator as opt-in candidates, never selected for them.
+    """
+    from app.services.keyword_relevance import website_resource_blobs
+
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for blob in website_resource_blobs(website):
+        for key in ("page_hierarchy", "pages"):
+            rows = blob.get(key)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("cluster") or "") != "other" or str(row.get("page_type") or "") != "page":
+                    continue
+                path = str(row.get("path") or row.get("url") or "")
+                segments = [s for s in urlparse(path).path.strip("/").split("/") if s]
+                if len(segments) != 1:
+                    continue
+                slug = _offering_slug(path, "")
+                if not slug:
+                    continue
+                if set(slug.split("-")) & _NON_SERVICE_PAGE_TOKENS:
+                    continue
+                label = _offering_label(slug)
+                if not label or _is_document_stamp(label) or slug in seen:
+                    continue
+                seen.add(slug)
+                out.append({"id": _offering_key(slug), "name": label, "path": f"/{segments[0]}"})
+    return sorted(out, key=lambda c: c["name"])
+
+
 # Tokens that appear on almost every agency offering — not enough alone to
 # attach a keyword/page seed to a selected service.
 _GENERIC_SERVICE_TOKENS = frozenset(
@@ -184,8 +265,8 @@ def compact_selected_services(
         if sid and sid not in seen_ids:
             seen_ids.add(sid)
             ordered_ids.append(sid)
-    sub_filter = {_norm_key(str(x)) for x in (prio.get("selected_subservice_ids") or [])}
-    sub_filter.discard("")
+    from app.services.service_scope import sub_allowed
+
     catalog = [
         row
         for row in (service_catalog or prio.get("service_catalog") or [])
@@ -201,7 +282,7 @@ def compact_selected_services(
             if not isinstance(sub, dict):
                 continue
             sub_id = _norm_key(str(sub.get("id") or sub.get("name") or ""))
-            if not sub_id or (sub_filter and sub_id not in sub_filter):
+            if not sub_id or not sub_allowed(prio, sid, sub_id, str(sub.get("name") or "")):
                 continue
             subs.append({"id": sub_id, "name": str(sub.get("name") or sub_id)})
         by_id[sid] = {
@@ -229,7 +310,7 @@ def compact_selected_services(
                 entry["url"] = url
             continue
         sub_id = _norm_key(str(node.get("subservice_id") or ""))
-        if not sub_id or (sub_filter and sub_id not in sub_filter):
+        if not sub_id or not sub_allowed(prio, sid, sub_id, str(node.get("title") or "")):
             continue
         matched = False
         for sub in entry["subservices"]:
@@ -396,7 +477,8 @@ def build_client_service_catalog(
     sub-services under that parent. ``services`` (CDD product names) is accepted
     so existing callers keep working and is not used as a row source.
     """
-    del services, website
+    del services
+    website_for_candidates = website
     catalog: dict[str, dict[str, Any]] = {}
     page_seeds = page_seeds or []
     service_seeds: list[dict[str, Any]] = []
@@ -482,6 +564,26 @@ def build_client_service_catalog(
     n_primary = max(1, len(rows) // 5) if rows else 0
     for idx, row in enumerate(rows):
         row["priority_tier"] = "primary" if idx < n_primary else "secondary"
+
+    # Plain top-level pages the classifier did not call services: offered, never
+    # pre-selected, and skipped when an equivalent service is already listed.
+    have = {service_identity_key(r["name"]) for r in rows}
+    for cand in website_page_candidates(website_for_candidates):
+        if service_identity_key(cand["name"]) in have:
+            continue
+        have.add(service_identity_key(cand["name"]))
+        rows.append(
+            {
+                "id": cand["id"],
+                "name": cand["name"],
+                "source": "website_page",
+                "selected": False,
+                "priority_tier": None,
+                "candidate_new_service": True,
+                "path": cand["path"],
+                "subservices": [],
+            }
+        )
     return rows
 
 
@@ -611,7 +713,7 @@ def merge_competitor_subservices(
     if not trees:
         return catalog
     adopt = {_norm_key(x) for x in (adopt_service_ids or [])}
-    by_name = {_norm_key(s["name"]): s for s in catalog}
+    by_name = {service_identity_key(s["name"]): s for s in catalog}
     unmatched: dict[str, dict[str, Any]] = {}
 
     def _service_is_adopted(service: dict[str, Any]) -> bool:
@@ -645,7 +747,7 @@ def merge_competitor_subservices(
             str(tree.get("competitor_id") or tree.get("domain") or competitor_name)
         )
         for comp_svc in tree.get("services") or []:
-            cid = _norm_key(comp_svc.get("name") or "")
+            cid = service_identity_key(comp_svc.get("name") or "")
             target = by_name.get(cid)
             if not target:
                 if not cid:
@@ -733,6 +835,63 @@ def merge_competitor_subservices(
     return catalog
 
 
+def merge_saved_catalog(
+    rebuilt: list[dict[str, Any]],
+    saved: list[dict[str, Any]] | None,
+    *,
+    selected_service_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Keep what the operator confirmed when the catalog is rebuilt from the website.
+
+    The post-confirmation rebuild only knows the website, so the services and
+    sub-services chosen from the industry suggestions would otherwise vanish before
+    keyword research. Selected (or manually added) saved services missing from the
+    rebuild are carried over, and saved sub-services are added to matching services.
+    """
+    if not saved:
+        return rebuilt
+    selected = {service_identity_key(str(x)) for x in (selected_service_ids or [])}
+    out = [
+        {**row, "subservices": [dict(s) for s in row.get("subservices") or [] if isinstance(s, dict)]}
+        for row in rebuilt
+        if isinstance(row, dict)
+    ]
+    by_key = {service_identity_key(str(r.get("name") or r.get("id") or "")): r for r in out}
+    for svc in saved:
+        if not isinstance(svc, dict):
+            continue
+        key = service_identity_key(str(svc.get("name") or svc.get("id") or ""))
+        if not key:
+            continue
+        row = by_key.get(key)
+        if row is None:
+            source = str(svc.get("source") or "").lower()
+            if key not in selected and source not in {"manual", "adopted"}:
+                continue
+            row = {
+                **svc,
+                "subservices": [dict(s) for s in svc.get("subservices") or [] if isinstance(s, dict)],
+            }
+            out.append(row)
+            by_key[key] = row
+            continue
+        # The confirmed row's taxonomy metadata (aliases, attributes, keyword
+        # qualifiers) outlives the website rebuild.
+        if isinstance(svc.get("taxonomy"), dict) and "taxonomy" not in row:
+            row["taxonomy"] = dict(svc["taxonomy"])
+        have = {
+            service_identity_key(str(s.get("name") or s.get("id") or "")) for s in row["subservices"]
+        }
+        for sub in svc.get("subservices") or []:
+            if not isinstance(sub, dict):
+                continue
+            sub_key = service_identity_key(str(sub.get("name") or sub.get("id") or ""))
+            if sub_key and sub_key not in have:
+                have.add(sub_key)
+                row["subservices"].append(dict(sub))
+    return out
+
+
 def append_saved_manual_services(
     catalog: list[dict[str, Any]],
     existing: dict[str, Any] | None,
@@ -803,13 +962,20 @@ def default_selection(catalog: list[dict[str, Any]]) -> dict[str, Any]:
             continue
         service_ids.append(svc["id"])
         for sub in svc.get("subservices") or []:
-            sub["selected"] = True
-            sub_ids.append(sub["id"])
+            # Sub-services seen only on competitor sites are not something the
+            # client offers; the operator opts them in, never the default.
+            offered = str(sub.get("source") or "").lower() not in NOT_OFFERED_SOURCES
+            sub["selected"] = offered
+            if offered:
+                sub_ids.append(sub["id"])
         active_index += 1
+    from app.services.service_scope import build_default_scope
+
     return {
         "selected_service_ids": service_ids,
         "selected_subservice_ids": sub_ids,
         "primary_service_ids": [s["id"] for s in active[:n_primary]],
+        "service_scope": build_default_scope(catalog, service_ids),
     }
 
 
@@ -822,34 +988,70 @@ def build_prioritization_pack(
     competitors: list[dict[str, Any]] | None = None,
     competitor_trees: list[dict[str, Any]] | None = None,
     existing: dict[str, Any] | None = None,
+    industry_taxonomy: list[dict[str, Any]] | None = None,
+    industry_status: str | None = None,
 ) -> dict[str, Any]:
     catalog = build_client_service_catalog(
         services=services,
         website=website,
         page_seeds=page_seeds,
     )
+    from app.services.service_taxonomy import refine_catalog, remap_saved_selection
+
     trees = list(competitor_trees or [])
     existing = dict(existing or {})
-    if trees:
-        # One competitor is enough. The industry list is every service those
-        # sites offer, not only the ones that show up twice.
-        catalog = merge_competitor_subservices(
-            catalog,
-            competitor_tree=None,
-            competitor_trees=trees,
-            adopt_service_ids=list(existing.get("adopt_competitor_service_ids") or []),
-            candidate_min_competitors=1,
+    unplaced: list[str] = []
+    taxonomy_report: dict[str, Any] = {}
+    if industry_taxonomy:
+        # The industry's primary services and their sub-services replace the pile of
+        # site pages, page candidates and competitor candidates. The client's own
+        # offerings are placed inside it; what the model could not place is reported.
+        from app.services.industry_services import (
+            build_catalog_from_taxonomy,
+            offering_names,
         )
+
+        catalog, unplaced = build_catalog_from_taxonomy(
+            industry_taxonomy, catalog, offering_names(catalog, services), report=taxonomy_report
+        )
+    else:
+        if trees:
+            # One competitor is enough. The industry list is every service those
+            # sites offer, not only the ones that show up twice.
+            catalog = merge_competitor_subservices(
+                catalog,
+                competitor_tree=None,
+                competitor_trees=trees,
+                adopt_service_ids=list(existing.get("adopt_competitor_service_ids") or []),
+                candidate_min_competitors=1,
+            )
+        # Without the model the rows come straight from URLs and page titles: blog
+        # posts, location copies, brand pages and duplicate spellings. Make them a
+        # canonical service tree; row ids are kept so saved selections still match.
+        catalog, taxonomy_report = refine_catalog(catalog, vocabulary=services)
     catalog = append_saved_manual_services(catalog, existing)
+    existing = remap_saved_selection(existing, catalog)
     defaults = default_selection(catalog)
     return {
         "title": f"Service prioritization: {client_name}",
         "client": client_name,
         "principle": (
-            "80/20 — choose among every service available in this industry, "
+            "The primary services of this industry and their sub-services. What the "
+            "client already offers is ticked; the rest are suggestions."
+            if industry_taxonomy
+            else "80/20 — choose among every service available in this industry, "
             "including ones not on the client's website yet."
         ),
         "service_catalog": catalog,
+        "industry_service_count": len(industry_taxonomy or []),
+        "industry_taxonomy_status": industry_status or ("ok" if industry_taxonomy else "none"),
+        "unplaced_offerings": unplaced,
+        # Names found for the client that are not services (articles, customer types,
+        # unrelated pages), so the card can say what was left off and why.
+        "excluded_offerings": [
+            dict(item) for item in taxonomy_report.get("excluded") or [] if isinstance(item, dict)
+        ],
+        "taxonomy_report": taxonomy_report,
         "competitor_trees": trees,
         "competitors": [
             {"name": c.get("name"), "domain": c.get("domain") or extract_domain(c.get("url") or "")}
@@ -861,6 +1063,7 @@ def build_prioritization_pack(
             for k in (
                 "selected_service_ids",
                 "selected_subservice_ids",
+                "service_scope",
                 "primary_service_ids",
                 "competitor_tree_id",
                 "adopt_competitor_service_ids",
@@ -961,7 +1164,15 @@ def apply_service_selection(
                     and term_matches_selected_services(parent_seg, filtered_services)
                 )
             )
-            if _selection_keys(target) & sel_subs or (not sel_subs and parent_match):
+            from app.services.service_scope import resolve_scope, sub_allowed
+
+            found = (resolve_scope(prioritization, parent_seg) if parent_seg else None) or (
+                resolve_scope(prioritization, target)
+            )
+            if found is not None:
+                if sub_allowed(prioritization, found[0], target, target):
+                    filtered_targets[key] = meta
+            elif _selection_keys(target) & sel_subs or (not sel_subs and parent_match):
                 filtered_targets[key] = meta
             continue
         if ttype in ("page", "keyword"):
@@ -985,8 +1196,9 @@ def expand_vertical_subservice_seeds(
     catalog = list(service_catalog or [])
     if not catalog or not prioritization.get("confirmed_at"):
         return seed_roots, seed_targets
+    from app.services.service_scope import sub_allowed
+
     sel_services = {_norm_key(x) for x in (prioritization.get("selected_service_ids") or [])}
-    sel_subs = {_norm_key(x) for x in (prioritization.get("selected_subservice_ids") or [])}
     if not sel_services:
         return seed_roots, seed_targets
 
@@ -998,7 +1210,7 @@ def expand_vertical_subservice_seeds(
             continue
         for sub in svc.get("subservices") or []:
             sub_id = _norm_key(str(sub.get("id") or sub.get("name") or ""))
-            if sel_subs and sub_id not in sel_subs:
+            if not sub_allowed(prioritization, sid, sub_id, str(sub.get("name") or "")):
                 continue
             term = str(sub.get("name") or sub.get("path") or sub.get("id") or "").strip()
             if not term or len(term) < 3:
@@ -1006,11 +1218,11 @@ def expand_vertical_subservice_seeds(
             key = term.lower()
             if key in targets:
                 continue
+            parent_name = str(svc.get("name") or "").strip() or term
             targets[key] = {
-                "target": term,
-                "target_type": "sub_service",
-                "parent_segment": svc.get("name"),
-                "page_path": sub.get("path"),
+                "target": parent_name,
+                "target_type": "seed",
+                "parent_segment": parent_name,
                 "source": sub.get("source") or "vertical_expansion",
             }
             roots.append(term)
@@ -1081,6 +1293,7 @@ def ia_nodes_from_competitor_tree(
     selected_service_ids: list[str] | None = None,
     selected_subservice_ids: list[str] | None = None,
     adopt_service_ids: list[str] | None = None,
+    service_scope: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build canonical service/sub-service IA nodes from a service catalog tree.
 
@@ -1090,8 +1303,13 @@ def ia_nodes_from_competitor_tree(
     """
     if not tree:
         return []
+    from app.services.service_scope import sub_allowed
+
     sel = {_norm_key(x) for x in (selected_service_ids or [])}
-    sel_subs = {_norm_key(x) for x in (selected_subservice_ids or [])}
+    scope_prio = {
+        "service_scope": service_scope,
+        "selected_subservice_ids": list(selected_subservice_ids or []),
+    }
     adopt = {_norm_key(x) for x in (adopt_service_ids or [])}
     base = f"https://{domain}".rstrip("/")
     nodes: list[dict[str, Any]] = []
@@ -1155,7 +1373,7 @@ def ia_nodes_from_competitor_tree(
         for sub in svc.get("subservices") or []:
             sub_name = str(sub.get("name") or "").strip()
             sub_id = _norm_key(str(sub.get("id") or sub_name))
-            if sel_subs and sub_id not in sel_subs:
+            if not sub_allowed(scope_prio, sid, sub_id, sub_name):
                 continue
             sub_slug = re.sub(r"[^a-z0-9]+", "-", sub_name.lower()).strip("-")
             if not sub_slug:
@@ -1286,6 +1504,9 @@ def confirm_prioritization(payload: dict[str, Any]) -> dict[str, Any]:
     out["selected_service_ids"] = list(out.get("selected_service_ids") or [])
     out["selected_subservice_ids"] = list(out.get("selected_subservice_ids") or [])
     out["primary_service_ids"] = list(out.get("primary_service_ids") or [])
+    from app.services.service_scope import finalize_scope
+
+    finalize_scope(out)
     selected = {_norm_key(x) for x in out["selected_service_ids"]}
     requested_adoptions = {
         _norm_key(x) for x in (out.get("adopt_competitor_service_ids") or [])
@@ -1311,9 +1532,13 @@ def confirm_prioritization(payload: dict[str, Any]) -> dict[str, Any]:
             )
         )
         if should_adopt:
+            came_from = str(service.get("source") or "").lower()
             service["source"] = "adopted"
             service["candidate_new_service"] = False
-            service["adopted_from"] = "competitor_consensus"
+            service["adopted_from"] = {
+                "website_page": "website_page",
+                "industry": "industry",
+            }.get(came_from, "competitor_consensus")
             service["selected"] = True
             service["priority_tier"] = (
                 "primary"

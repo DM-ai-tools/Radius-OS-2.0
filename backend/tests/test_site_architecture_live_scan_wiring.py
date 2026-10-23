@@ -111,3 +111,45 @@ async def test_falls_back_to_stale_website_when_no_live_scan_present(monkeypatch
         (p.get("path") == "/old-stale-page" or "old-stale-page" in str(p.get("url") or ""))
         for p in (captured["website"].get("pages") or [])
     )
+
+
+def test_url_mapping_uses_the_full_cluster_list_when_memory_is_short():
+    short = {"cluster_report": {"clusters": [{"name": "Only SEO", "primary_keyword": "seo"}]}}
+    full = [{"name": f"Cluster {i}", "primary_keyword": f"keyword {i}"} for i in range(4)]
+    merged = site_architecture.use_full_cluster_list(short, full)
+    assert len(merged["clusters"]) == 4
+    assert len(merged["cluster_report"]["clusters"]) == 4
+    assert site_architecture.use_full_cluster_list(short, full[:1]) is short
+    stored = {
+        "cluster_report": {
+            "clusters": [
+                {"name": "SEO", "primary_keyword": "seo"},
+                {"name": "Off topic", "primary_keyword": "paralympics", "cluster_sense_verdict": "drop"},
+            ]
+        }
+    }
+    card = [{"name": "SEO", "primary_keyword": "seo", "keywords": [{"keyword": "seo", "role": "Primary"}]}]
+    cleaned = site_architecture.use_full_cluster_list(stored, card)
+    assert [c["primary_keyword"] for c in cleaned["cluster_report"]["clusters"]] == ["seo"]
+
+
+def test_modifier_phrases_are_not_pages_beside_the_service():
+    tree = site_architecture._normalize_url_tree(
+        [
+            {"path": "/seo/", "type": "service", "title": "SEO", "parent": "/"},
+            {"path": "/seo/ai-seo/", "type": "subservice", "title": "AI SEO", "parent": "/seo/"},
+            {"path": "/seo/local-seo/", "type": "subservice", "title": "Local SEO", "parent": "/seo/"},
+            {"path": "/seo-company-near-me/", "type": "hub", "primary_keyword": "seo company near me", "parent": "/"},
+            {"path": "/seo/ai-seo/seo-sydney/", "type": "spoke", "primary_keyword": "seo sydney", "parent": "/seo/ai-seo"},
+            {"path": "/seo/ai-seo/seo-sydney-nsw/", "type": "spoke", "primary_keyword": "seo sydney nsw", "parent": "/seo/ai-seo"},
+            {"path": "/ppc-management/", "type": "service", "title": "PPC Management", "parent": "/"},
+        ]
+    )
+    paths = {n["path"] for n in tree}
+    assert "/seo/" in paths
+    assert "/seo/ai-seo/" in paths
+    assert "/seo/local-seo/" in paths
+    assert "/ppc-management/" in paths
+    assert "/seo-company-near-me/" not in paths
+    assert "/seo/ai-seo/seo-sydney/" not in paths
+    assert "/seo/ai-seo/seo-sydney-nsw/" not in paths

@@ -179,8 +179,8 @@ export default function TrackingCard({
     return (
       <CardShell payload={payload}>
         <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>
-          Analytics-layer scan: tag presence, duplicates, cross-domain, referral exclusions,
-          cookie consent.
+          Analytics-layer scan of the live site: GA4 tag, GTM container, cross-domain
+          linker, and the primary conversion.
         </p>
         <div className="table-wrap">
           <table className="data">
@@ -354,7 +354,7 @@ function TrackingReportCard({
     metrics?: Record<string, unknown>;
     access?: Record<string, boolean>;
     status?: string;
-    window_months?: number | string;
+    note?: string;
   };
   const knownFields = (payload.known_change_fields || []) as {
     key: string;
@@ -365,8 +365,8 @@ function TrackingReportCard({
   return (
     <CardShell payload={payload}>
       <p className="tracking-report-intro">
-        One consolidated view of access connections, analytics checks, conversion validation,
-        and historical performance. Submit known changes once to open the confirmation gate.
+        One consolidated view of access connections, analytics checks and conversion
+        validation. Submit known changes once to open the confirmation gate.
       </p>
 
       <div className="tracking-report-metrics">
@@ -482,7 +482,14 @@ function TrackingReportCard({
 
       <div className="report-section">
         <h4>Historical baseline</h4>
-        <FieldGrid data={baseline.metrics || {}} />
+        {baseline.metrics && Object.keys(baseline.metrics).length ? (
+          // Older reports carried an (empty) metric grid; keep showing it for them.
+          <FieldGrid data={baseline.metrics} />
+        ) : (
+          <p className="tracking-report-note">
+            {baseline.note || "No historical traffic data was collected."}
+          </p>
+        )}
       </div>
 
       <KnownChangesForm

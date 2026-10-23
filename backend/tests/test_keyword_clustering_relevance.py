@@ -117,9 +117,11 @@ async def test_llm_invented_relevant_paraphrase_is_kept_with_null_metrics():
             SEEDED_ROWS, relevance_context=_ctx(), use_llm=True
         )
 
-    cluster = report["clusters"][0]
     invented = next(
-        k for k in cluster["keywords"] if k["keyword"] == "seo audit service pricing"
+        k
+        for cluster in report["clusters"]
+        for k in cluster["keywords"]
+        if k["keyword"] == "seo audit service pricing"
     )
     assert invented["ungrounded"] is True
     assert invented["volume"] is None
@@ -192,6 +194,6 @@ async def test_without_relevance_context_ungrounded_keywords_keep_prior_behavior
     ):
         report = await run_keyword_clustering(SEEDED_ROWS, relevance_context=None, use_llm=True)
 
-    kws = {k["keyword"] for k in report["clusters"][0]["keywords"]}
+    kws = {k["keyword"] for cluster in report["clusters"] for k in cluster["keywords"]}
     assert "vegan recipes for beginners" in kws
     assert report.get("llm_invented_dropped") == []

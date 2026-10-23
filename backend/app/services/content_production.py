@@ -341,13 +341,6 @@ async def run_content_production_plan(
     planning = dict(content_planning or {})
     site = dict(website or {})
     demand = dict(search_demand or {})
-    topic_plan = (
-        demand.get("topic_plan")
-        if isinstance(demand.get("topic_plan"), dict)
-        else demand.get("create_topic")
-        if isinstance(demand.get("create_topic"), dict)
-        else {}
-    )
     if planning.get("locked") is False:
         return {
             "blocked": True,
@@ -608,21 +601,8 @@ async def run_content_production_plan(
                     comparison_pages=comparison_pages,
                 )
                 if written.get("ok"):
-                    from app.services.publish_preview import build_draft_site_preview
-
-                    try:
-                        written["site_preview"] = await build_draft_site_preview(
-                            client_name=client_name,
-                            primary_url=primary_url,
-                            draft=written,
-                            site_architecture=site_architecture,
-                            on_page_seo=on_page_seo,
-                            content_planning=planning,
-                            topic_plan=topic_plan if isinstance(topic_plan, dict) else {},
-                        )
-                    except Exception:  # noqa: BLE001
-                        # Preview is additive — never block the draft write.
-                        written["site_preview"] = {"preview_html": "", "error": "preview_failed"}
+                    # The client-site preview is built on demand from the draft card
+                    # (app.services.site_preview), not during the write.
                     drafts.append(written)
                     queued_ready = [
                         {
@@ -638,16 +618,11 @@ async def run_content_production_plan(
                     write_refusal = written
                     awaiting = True
 
-    site_preview = None
-    if drafts and isinstance(drafts[0].get("site_preview"), dict):
-        site_preview = drafts[0]["site_preview"]
-
     return {
         "client_name": client_name,
         "primary_url": primary_url,
         "briefs": briefs,
         "drafts": drafts,
-        "site_preview": site_preview,
         "held_briefs": held,
         "queued_for_next_write": queued_ready,
         "topic_choices": choices,

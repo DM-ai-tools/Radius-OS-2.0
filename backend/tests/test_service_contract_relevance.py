@@ -151,6 +151,102 @@ def test_other_click_trends_services_reject_generic_ai_products():
         assert judge_keyword("ai image generator", service=service).decision == "DROP"
 
 
+def test_seo_token_does_not_keep_personal_names_or_dictionary_lookups():
+    """'seo' inside a person's name, or a definition lookup, is not the service."""
+    for keyword in (
+        "park seo",
+        "park seo joon",
+        "seo guk",
+        "seo kang",
+        "seo kang joon",
+        "roh yoon seo",
+        "jeon jong seo",
+        "lee seo",
+        "define seo",
+        "seo def",
+        "seo meaning",
+    ):
+        verdict = judge_keyword(keyword, service="SEO", geography="Australia")
+        assert verdict.decision == "DROP", keyword
+        assert verdict.reason == "acronym_homonym"
+
+    ctx = build_relevance_context(
+        services=[SEO, PPC, CRO],
+        seeds=["SEO"],
+        geography="Australia",
+        industry="Digital Marketing Agency",
+    )
+    keep, reason, _note = evaluate_keyword("park seo joon", ctx, match_class="phrase", seed="SEO")
+    assert keep is False
+    assert reason == "acronym_homonym"
+
+
+def test_glosses_typos_other_languages_and_film_titles_do_not_pass():
+    ctx = build_relevance_context(
+        services=[SEO, PPC, CRO, "Social Media Marketing", "Web Design"],
+        seeds=[SEO, PPC, CRO, "search engine optimisation", "ppc advertising"],
+        geography="Australia",
+        industry="Digital Marketing Agency",
+    )
+    blocked = (
+        "search engine optimisation means",
+        "define advertising",
+        "what i s seo",
+        "consultant en seo",
+        "google definitions",
+        "how to get ahead in advertising movie",
+        "what cro means in pharma",
+        "define ppc in industrial management",
+        "social media management là gì",
+        "define search engine optimisation",
+    )
+    for keyword in blocked:
+        keep, reason, _note = evaluate_keyword(keyword, ctx, match_class="phrase", seed="SEO")
+        assert keep is False, keyword
+        assert reason in {"dictionary_lookup", "broken_query", "foreign_language", "entertainment", "acronym_homonym"}
+    from app.services.keyword_service_contract import off_topic_reason
+
+    for keyword in (
+        "what is seo",
+        "seo agency",
+        "a/b testing",
+        "social media marketing for movies",
+        "e-commerce email marketing",
+        "how can i improve my google ranking",
+        "what's email marketing",
+        "what's a marketing mix",
+        "4 ps of marketing",
+        "what are the four p s of marketing",
+        "google's seo starter guide",
+        "h&m social media marketing strategy",
+        "m&m advertising",
+    ):
+        assert off_topic_reason(keyword) is None, keyword
+    for keyword in ("what is seo", "seo agency"):
+        keep, _reason, _note = evaluate_keyword(keyword, ctx, match_class="phrase", seed="SEO")
+        assert keep is True, keyword
+
+
+def test_seo_token_still_keeps_real_service_queries():
+    for keyword in (
+        "seo",
+        "seo agency",
+        "seo company melbourne",
+        "local seo",
+        "technical seo audit",
+        "seo for dentists",
+        "seo dentist",
+        "what is seo",
+        "ai seo",
+        "seo services",
+        "seo auditing",
+        "consulting seo",
+        "localized seo",
+    ):
+        verdict = judge_keyword(keyword, service="SEO", geography="Australia")
+        assert verdict.decision == "KEEP", keyword
+
+
 def test_other_services_keep_their_own_queries():
     assert judge_keyword("technical seo audit", service=SEO).decision == "KEEP"
     assert judge_keyword("google ads management", service=PPC).decision == "KEEP"

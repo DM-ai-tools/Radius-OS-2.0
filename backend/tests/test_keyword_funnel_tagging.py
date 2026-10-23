@@ -1,8 +1,7 @@
-"""Phase 5 — every individual keyword carries its own funnel/stage tag, not just
-the cluster or topic it belongs to. A Secondary/Supporting keyword can sit at a
-different TOFU/MOFU/BOFU stage than its cluster's Primary keyword even inside
-the same cluster (e.g. "what is seo" (TOFU) supporting a "seo services" (BOFU)
-primary) — collapsing to one funnel value per cluster hid that."""
+"""Phase 5 — every keyword carries its own funnel stage. A cluster holds one
+stage and one intent, so "what is seo" (TOFU) does not stay inside a "seo
+services" (BOFU) cluster. Collapsing a cluster to one inherited stage hid the
+difference; mixing the stages on one page hid the page."""
 
 from __future__ import annotations
 
@@ -105,7 +104,13 @@ async def test_llm_clustering_path_stamps_funnel_per_keyword():
     ):
         report = await run_keyword_clustering(DETERMINISTIC_ROWS, use_llm=True)
 
-    kw_rows = report["clusters"][0]["keywords"]
+    kw_rows = [row for cluster in report["clusters"] for row in cluster["keywords"]]
     by_kw = {r["keyword"]: r["funnel"] for r in kw_rows}
     assert by_kw["seo services"] in ("TOFU", "MOFU", "BOFU")
     assert by_kw["what is seo"] == "TOFU"
+    homes = {
+        row["keyword"]: cluster
+        for cluster in report["clusters"]
+        for row in cluster["keywords"]
+    }
+    assert homes["seo services"] is not homes["what is seo"]

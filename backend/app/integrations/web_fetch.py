@@ -735,12 +735,22 @@ def is_indexable_html_url(url: str) -> bool:
 
 
 def extract_sitemap_locs(xml_text: str) -> list[str]:
-    """Pull <loc> URLs from a sitemap or sitemap index document."""
-    locs = re.findall(r"<loc[^>]*>\s*([^<\s]+)\s*</loc>", xml_text or "", flags=re.IGNORECASE)
+    """Pull page URLs from a sitemap or sitemap index document.
+
+    A captcha-blocked host is sometimes readable only as markdown, which drops
+    the ``<loc>`` tags and leaves the bare URLs. Those still count.
+    """
+    raw = xml_text or ""
+    locs = re.findall(r"<loc[^>]*>\s*([^<\s]+)\s*</loc>", raw, flags=re.IGNORECASE)
+    if not locs:
+        lowered = raw.lower()
+        if "sgcaptcha" in lowered or "robot challenge" in lowered:
+            return []
+        locs = re.findall(r"https?://[^\s<>\"']+", raw)
     out: list[str] = []
     seen: set[str] = set()
     for loc in locs:
-        clean = loc.strip()
+        clean = loc.strip().rstrip(").,]")
         if not clean or clean in seen:
             continue
         seen.add(clean)
@@ -753,7 +763,26 @@ def extract_sitemap_locs(xml_text: str) -> list[str]:
 _SERP_FALLBACK_BELOW = 8
 
 
-async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]:
+_POST_SITEMAP = re.compile(r"post[-_]sitemap", re.IGNORECASE)
+_PAGE_SITEMAP = re.compile(r"page[-_]sitemap", re.IGNORECASE)
+_FIRECRAWL_SITEMAP_CAP = 6
+
+
+def _sitemap_section(sm_url: str) -> str:
+    if _POST_SITEMAP.search(sm_url or ""):
+        return "post"
+    if _PAGE_SITEMAP.search(sm_url or ""):
+        return "page"
+    return ""
+
+
+async def discover_site_urls(
+    start_url: str,
+    *,
+    max_pages: int = 0,
+    sections_out: dict[str, str] | None = None,
+    sitemap_read: dict[str, int] | None = None,
+) -> list[str]:
     """Discover unique indexable HTML pages via homepage crawl + sitemap.
 
     Filters tag/author/feed/pagination/asset URLs so the count matches real pages,
@@ -773,7 +802,7 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
     prefer_netloc: str | None = None
     prefer_scheme: str | None = None
 
-    def _add(u: str) -> None:
+    def _add(u: str, section: str = "") -> None:
         nonlocal skipped
         if len(ordered) >= max_pages:
             return
@@ -796,6 +825,8 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
             return
         seen.add(nu)
         ordered.append(nu)
+        if section and sections_out is not None:
+            sections_out[nu] = section
 
     # Do NOT add start_url yet. prefer_netloc/prefer_scheme are still unknown,
     # so a typed alias (acme.com) would be normalized against itself and kept
@@ -830,12 +861,53 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
     except Exception:  # noqa: BLE001
         pass
 
+    firecrawl_sitemaps = 0
+
+    async def _sitemap_text(sm_url: str) -> str:
+        nonlocal firecrawl_sitemaps
+        res = await fetch_url(sm_url, timeout=15)
+        text = res.get("text") or ""
+        if res.get("status_code") == 200 and text and not res.get("error"):
+            return text
+        # SiteGround serves HTTP 202 captcha to this server and still serves
+        # the XML sitemap to other fetchers. One scrape per sitemap file.
+        if res.get("error") != "bot_challenge_blocked":
+            return ""
+        if firecrawl_sitemaps >= _FIRECRAWL_SITEMAP_CAP:
+            return ""
+        firecrawl_sitemaps += 1
+        text = ""
+        try:
+            from app.integrations.firecrawl import scrape_page
+
+            scrape = await scrape_page(sm_url, formats=["rawHtml", "html", "markdown"])
+            if scrape.get("available"):
+                text = str(scrape.get("raw_html") or scrape.get("html") or scrape.get("markdown") or "")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("discover_sitemap_firecrawl_failed", url=sm_url, error=str(exc))
+        lowered = text.lower()
+        if text and "sgcaptcha" not in lowered and "robot challenge" not in lowered:
+            return text
+        try:
+            from app.integrations.context_dev import scrape_markdown
+
+            scraped, err = await scrape_markdown(sm_url)
+            if err:
+                log.warning("discover_sitemap_context_failed", url=sm_url, error=err)
+                return ""
+            body = str((scraped or {}).get("markdown") or "")
+            if "sgcaptcha" in body.lower() or "robot challenge" in body.lower():
+                return ""
+            return body
+        except Exception as exc:  # noqa: BLE001
+            log.warning("discover_sitemap_context_failed", url=sm_url, error=str(exc))
+            return ""
+
     async def _pull_sitemap(sm_url: str, depth: int = 0) -> None:
         if depth > 2 or len(ordered) >= max_pages:
             return
-        res = await fetch_url(sm_url, timeout=15)
-        text = res.get("text") or ""
-        if res.get("status_code") != 200 or not text:
+        text = await _sitemap_text(sm_url)
+        if not text:
             return
         locs = extract_sitemap_locs(text)
         child_sitemaps = [
@@ -844,9 +916,12 @@ async def discover_site_urls(start_url: str, *, max_pages: int = 0) -> list[str]
             if u.lower().endswith(".xml")
             and not re.search(r"(?:tag|author|authors)-sitemap", u, re.IGNORECASE)
         ]
+        section = _sitemap_section(sm_url)
         page_locs = [u for u in locs if not u.lower().endswith(".xml")]
+        if page_locs and sitemap_read is not None:
+            sitemap_read["documents"] = int(sitemap_read.get("documents") or 0) + 1
         for u in page_locs:
-            _add(u)
+            _add(u, section)
             if len(ordered) >= max_pages:
                 return
         for child in child_sitemaps[:20]:

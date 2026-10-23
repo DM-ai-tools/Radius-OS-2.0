@@ -527,6 +527,10 @@ class RelevanceContext:
     distinctive_lemmas: set[str] = field(default_factory=set)
     industry: str | None = None
     geography: str | None = None
+    # Other names of the selected services ("search engine optimization" for "SEO").
+    service_synonyms: list[str] = field(default_factory=list)
+    # Model-suggested sub-service topics of the selected services ("seo audit" for "SEO").
+    service_subtopics: list[str] = field(default_factory=list)
 
     def seed_is_supported(self, seed: str) -> bool:
         return bool(self._phrase_hit(seed) or self._token_hit(seed))
@@ -535,12 +539,14 @@ class RelevanceContext:
         """True when the seed is one of the client's own services/sub-services.
 
         Seed lineage is only a relevance signal when the seed is something the
-        client actually sells — a CDD keyword or a website theme is too loose.
+        client actually sells — a CDD keyword or a website theme is too loose. A
+        service's synonym is that service under another name, and a sub-service topic
+        seeded for a service is part of it, so both count.
         """
         target = _norm(seed)
         if not target:
             return False
-        for service in self.services:
+        for service in (*self.services, *self.service_synonyms, *self.service_subtopics):
             svc = _norm(service)
             if not svc:
                 continue
@@ -583,7 +589,14 @@ def build_relevance_context(
     domain: str | None = None,
     industry: str | None = None,
     geography: str | None = None,
+    service_synonyms: Iterable[str] | None = None,
+    service_subtopics: Iterable[str] | None = None,
 ) -> RelevanceContext:
+    """``service_synonyms`` are other names of the selected services and
+    ``service_subtopics`` the sub-service topics seeded for them ("seo audit" for SEO).
+    Both count as whole phrases ("search engine optimization" is evidence of SEO) and
+    as service seeds for lineage, but their single words do not become evidence
+    tokens: one model-suggested word must not widen the gate for every keyword."""
     svc = _phrases(services or [])
     cdd = _phrases(cdd_keywords or [])
     pages = list(page_terms) if page_terms is not None else page_terms_from_website(website)
@@ -591,6 +604,8 @@ def build_relevance_context(
     theme_list = list(themes) if themes is not None else theme_terms_from_website(website)
     theme_list = _phrases(theme_list)
     seed_list = _phrases(seeds or [])
+    synonyms = _phrases(service_synonyms or [])
+    subtopics = _phrases(service_subtopics or [])
 
     evidence = _phrases([*svc, *cdd, *pages, *theme_list])
     evidence_tokens: set[str] = set()
@@ -603,7 +618,7 @@ def build_relevance_context(
     brand_full, brand_tokens = competitor_brand_blocklist(
         competitor_names or [],
         competitor_domains or [],
-        protected_phrases=evidence,
+        protected_phrases=[*evidence, *synonyms, *subtopics],
     )
     client_brand: set[str] = set()
     if brand_name:
@@ -621,7 +636,7 @@ def build_relevance_context(
         page_terms=pages,
         themes=theme_list,
         seeds=seed_list,
-        evidence_phrases=evidence,
+        evidence_phrases=_phrases([*evidence, *synonyms, *subtopics]),
         evidence_tokens=evidence_tokens,
         distinctive_tokens=distinctive,
         competitor_brand_full=brand_full,
@@ -631,6 +646,8 @@ def build_relevance_context(
         distinctive_lemmas={_lemma(t) for t in distinctive},
         industry=industry,
         geography=geography,
+        service_synonyms=synonyms,
+        service_subtopics=subtopics,
     )
 
 
@@ -644,7 +661,11 @@ def evaluate_keyword(
     provider_fallback: bool = False,
 ) -> tuple[bool, str, str]:
     """Return (keep, reason, evidence_note)."""
-    from app.services.keyword_exclusions import hard_reject_term, has_commercial_signal
+    from app.services.keyword_exclusions import (
+        buyer_fit_reject,
+        hard_reject_term,
+        has_commercial_signal,
+    )
 
     kw = str(keyword or "").strip()
     if not kw or len(_norm(kw)) < 2:
@@ -658,6 +679,22 @@ def evaluate_keyword(
     excluded = hard_reject_term(kw, industry=ctx.industry)
     if excluded:
         return False, f"excluded_{excluded.replace(' ', '_')}", excluded
+    # Buyer fit: the query names the service, but the searcher wants a tool, a
+    # course, the platform itself, or a page in another language.
+    unfit = buyer_fit_reject(
+        kw,
+        industry=ctx.industry,
+        services=ctx.services,
+        geography=getattr(ctx, "geography", None),
+    )
+    if unfit:
+        return False, unfit[0], unfit[1]
+    # The agency's own category is the business, even when the service list
+    # only names SEO, PPC, email, CRO and social. "digital marketing melbourne"
+    # is a buyer. "google lens" never reaches here.
+    industry_text = _norm(getattr(ctx, "industry", "") or "")
+    if "digital marketing" in industry_text and "digital marketing" in _norm(kw):
+        return True, "service_overlap", "digital marketing"
     if is_competitor_brand_term(
         kw,
         brand_full=ctx.competitor_brand_full,
@@ -694,7 +731,11 @@ def evaluate_keyword(
     if is_noisy_keyword(kw):
         return False, "noisy", ""
 
-    from app.services.keyword_service_contract import judge_keyword
+    from app.services.keyword_service_contract import judge_keyword, off_topic_reason
+
+    unrelated = off_topic_reason(kw)
+    if unrelated:
+        return False, unrelated, ""
 
     service_for_contract = seed_text if seed_text and ctx.seed_is_service(seed_text) else seed_text
     contract = judge_keyword(
@@ -799,7 +840,9 @@ def evaluate_keyword(
 
     if phrase_hit:
         source = "cdd_phrase"
-        if _norm(phrase_hit) in {_norm(p) for p in ctx.services}:
+        if _norm(phrase_hit) in {
+            _norm(p) for p in (*ctx.services, *ctx.service_synonyms, *ctx.service_subtopics)
+        }:
             source = "service_overlap"
         elif _norm(phrase_hit) in {_norm(p) for p in ctx.page_terms}:
             source = "page_overlap"

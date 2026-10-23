@@ -73,7 +73,9 @@ async def test_content_strategy_llm_polish_failure_is_logged(monkeypatch):
     assert "content_strategy_summary_fallback_failed" in logged
 
 
-async def test_create_content_llm_draft_failure_is_logged_and_falls_back(monkeypatch):
+async def test_create_content_llm_draft_failure_is_logged_and_refused(monkeypatch):
+    """A failed model call is logged and refused: no template text is saved as a draft
+    (2026-10-16: such a "draft" reached a client preview full of placeholders)."""
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(
         create_content.log, "warning", lambda event, **kw: events.append((event, kw))
@@ -87,5 +89,7 @@ async def test_create_content_llm_draft_failure_is_logged_and_falls_back(monkeyp
     out = await create_content.write_one_page(
         brief=_ready_brief(), client_name="Acme", use_llm=True
     )
-    assert out.get("ok") is True
+    assert out.get("ok") is False and out.get("refused") is True
+    assert "did not return a draft" in out.get("reason", "")
+    assert "markdown" not in out
     assert any(e == "create_content_draft_generation_failed" for e, _ in events)

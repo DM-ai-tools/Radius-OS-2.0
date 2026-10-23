@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import get_settings
-from app.integrations.llm import _parse_json_content, _skill_chat
+from app.integrations.llm import _parse_json_content, keyword_analysis_chat, keyword_analysis_ready
 from app.logging_config import get_logger
 from app.services.cache import cache_get_many, cache_set_many
 
@@ -82,10 +82,7 @@ def _sanitize(text: Any, *, limit: int = 80) -> str:
 
 
 def _provider_ready() -> bool:
-    settings = get_settings()
-    if settings.use_mock_llm:
-        return False
-    return bool(settings.anthropic_api_key)
+    return keyword_analysis_ready()
 
 
 async def _skill_judge(system: str, user: str) -> dict[str, Any] | None:
@@ -93,15 +90,18 @@ async def _skill_judge(system: str, user: str) -> dict[str, Any] | None:
     settings = get_settings()
     last_raw: str | None = None
     for attempt in range(2):
-        raw = await _skill_chat(
+        raw = await keyword_analysis_chat(
             system=system,
             user=user,
             model=settings.skill_model,
             max_tokens=settings.keyword_relevance_max_tokens,
         )
         last_raw = raw
-        if raw:
-            parsed = _parse_json_content(raw)
+        if raw and str(raw).strip():
+            try:
+                parsed = _parse_json_content(raw)
+            except json.JSONDecodeError:
+                parsed = None
             if isinstance(parsed, dict):
                 return parsed
         if attempt == 0:
@@ -306,6 +306,7 @@ async def validate_clusters_coherence(
     batch_size: int | None = None,
     threshold: float | None = None,
     max_calls: int | None = None,
+    deadline: float | None = None,
     concurrency: int | None = None,
     call_timeout: float | None = None,
     cache_ttl_seconds: int | None = None,
@@ -429,6 +430,13 @@ async def validate_clusters_coherence(
                         ClusterVerdict(cid, "review", 0.5, "max_calls"),
                     )
                 return
+            if deadline is not None and time.monotonic() >= deadline:
+                for cid, _cluster in batch:
+                    decided[cid] = (
+                        "review",
+                        ClusterVerdict(cid, "review", 0.5, "time_budget"),
+                    )
+                return
             calls_made += 1
             audit["api_calls"] = calls_made
             audit["batches"] += 1
@@ -441,10 +449,16 @@ async def validate_clusters_coherence(
                 payload = await asyncio.wait_for(judge(_SYSTEM, user), timeout=call_timeout)
         except Exception as exc:  # noqa: BLE001
             audit["errors"].append(str(exc)[:200])
+            payload = None
+
+        # A missing reply is a budget block or an empty model body. The keywords
+        # are already collected, so the batch stays. A real verdict still decides.
+        if payload is None:
+            audit["errors"].append("judge_unavailable")
             for cid, _cluster in batch:
                 decided[cid] = (
-                    "review",
-                    ClusterVerdict(cid, "review", 0.5, "judge_error"),
+                    "keep",
+                    ClusterVerdict(cid, "keep", 1.0, "coherence check skipped"),
                 )
             return
 

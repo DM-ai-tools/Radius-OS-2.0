@@ -1,10 +1,11 @@
 import asyncio
 import re
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
-from pydantic import BaseModel
-from sqlalchemy import delete, select
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,6 +20,7 @@ from app.models import (
     ApiUsageLog,
     AuditTrail,
     BacklinkSnapshot,
+    CddVersion,
     ChatMessage,
     ChatSession,
     Client,
@@ -26,6 +28,8 @@ from app.models import (
     CompetitorProfile,
     DiscoveryResponse,
     FindingsLedger,
+    KeywordRejection,
+    PhaseState,
     PhaseValidation,
     ReadinessScore,
     TrackingAudit,
@@ -46,6 +50,34 @@ from app.services.audit import log_event
 log = get_logger("clients_api")
 
 router = APIRouter(prefix="/clients", tags=["clients"])
+
+
+async def _delete_legacy_rankings(
+    db: AsyncSession, *, client_id: UUID | None = None, competitor_id: str | None = None
+) -> None:
+    """competitor_rankings has no model, but production Postgres still FKs it.
+
+    SQLite test databases never created the table, so the statement is skipped
+    there. On Postgres it has to go before the competitor profile delete.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    if client_id is not None:
+        await db.execute(
+            text(
+                "DELETE FROM competitor_rankings WHERE competitor_profile_id IN "
+                "(SELECT id FROM competitor_profiles WHERE client_id = :client_id)"
+            ),
+            {"client_id": client_id},
+        )
+    elif competitor_id is not None:
+        await db.execute(
+            text(
+                "DELETE FROM competitor_rankings "
+                "WHERE competitor_profile_id = :competitor_id"
+            ),
+            {"competitor_id": competitor_id},
+        )
 
 
 def _can_manage_clients(user: User) -> bool:
@@ -75,64 +107,122 @@ class AiFillRequest(BaseModel):
     url: str
 
 
-class DraftSitePreviewRequest(BaseModel):
+class SitePreviewDraft(BaseModel):
     title: str | None = None
     url: str | None = None
     meta_description: str | None = None
     keyword: str | None = None
+    page_type: str | None = None
+    # "create" or "refresh"; a refresh copies the design of its own live page.
+    action: str | None = None
+    existing_page_url: str | None = None
     markdown: str = ""
     images: list[dict] | None = None
-    media_base: str | None = None
-    # When True, inline images as data URIs so a downloaded HTML file works offline.
-    embed_images: bool = False
+
+
+class SitePreviewAction(BaseModel):
+    action: Literal["status", "build", "edit", "stop", "undo"]
+    draft: SitePreviewDraft
+    instructions: str = Field("", max_length=4000)
+    # data:image/...;base64,... — at most 4, checked again by the run.
+    screenshots: list[str] | None = Field(None, max_length=4)
+
+
+_PAGE_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+async def _preview_context(db: AsyncSession, client_id: UUID):
+    from app.services.site_preview.run import PreviewContext
+
+    result = await db.execute(
+        select(Client).options(selectinload(Client.profile)).where(Client.id == client_id)
+    )
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(404, "Client not found")
+    profile = client.profile
+
+    def _dict(value: object) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    demand = _dict(profile.search_demand_summary if profile else None)
+    topic_plan = _dict(demand.get("topic_plan")) or _dict(demand.get("create_topic"))
+    situation = _dict(profile.website_situation_summary if profile else None)
+    live_pages = list(_dict(situation.get("site_sitemap")).get("pages") or []) or list(
+        _dict(demand.get("live_site_scan")).get("pages") or []
+    )
+    return PreviewContext(
+        client_id=client.id,
+        client_name=client.display_name,
+        primary_url=client.primary_url,
+        site_architecture=_dict(profile.site_architecture_summary if profile else None),
+        on_page_seo=_dict(profile.on_page_seo_summary if profile else None),
+        content_planning=_dict(profile.content_planning_summary if profile else None),
+        topic_plan=topic_plan,
+        live_pages=[p for p in live_pages if isinstance(p, dict)],
+    )
 
 
 @router.post("/{client_id}/content-production/site-preview")
 async def content_production_site_preview(
     client_id: UUID,
-    body: DraftSitePreviewRequest,
+    body: SitePreviewAction,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Build a fresh client-branded site preview from a draft (not cached in chat history)."""
+    """Client-site preview of a draft, built by a Manus agent in the background.
+
+    ``build`` and ``edit`` return at once; poll the GET endpoint with ``pageKey``.
+    The preview is for review only; publishing still sends the clean draft.
+    """
+    from app.services.site_preview import run, store
+
+    draft = body.draft.model_dump()
+    key = store.page_key(draft)
+    if body.action == "status":
+        await require_permission(user, db, "publishing")
+        return {"pageKey": key, **await run.get_state(client_id, key)}
     await require_permission(user, db, "publishing", need_trigger=True)
-    from app.services.publish_preview import build_draft_site_preview
+    try:
+        if body.action in ("build", "edit"):
+            ctx = await _preview_context(db, client_id)
+            if body.action == "build":
+                state = await run.start_build(
+                    ctx, draft, instructions=body.instructions, screenshots=body.screenshots
+                )
+            else:
+                state = await run.start_edit(
+                    ctx, draft, instructions=body.instructions, screenshots=body.screenshots
+                )
+        elif body.action == "stop":
+            state = await run.stop(str(client_id), key)
+        else:
+            state = await run.undo(str(client_id), key)
+    except run.PreviewError as exc:
+        status = 503 if exc.code in ("not_configured", "manus_error") else 409 if exc.code == "busy" else 400
+        raise HTTPException(status, exc.message) from exc
+    return {"pageKey": key, **state}
 
-    result = await db.execute(
-        select(Client)
-        .options(selectinload(Client.profile))
-        .where(Client.id == client_id)
-    )
-    client = result.scalar_one_or_none()
-    if not client:
-        raise HTTPException(404, "Client not found")
-    if not body.markdown.strip():
-        raise HTTPException(400, "Draft markdown is required")
 
-    profile = client.profile
-    site_architecture = (
-        profile.site_architecture_summary if profile and profile.site_architecture_summary else {}
-    )
-    on_page = profile.on_page_seo_summary if profile and profile.on_page_seo_summary else {}
-    planning = (
-        profile.content_planning_summary if profile and profile.content_planning_summary else {}
-    )
-    demand = profile.search_demand_summary if profile and profile.search_demand_summary else {}
-    topic_plan = {}
-    if isinstance(demand, dict):
-        topic_plan = demand.get("topic_plan") if isinstance(demand.get("topic_plan"), dict) else {}
-        if not topic_plan and isinstance(demand.get("create_topic"), dict):
-            topic_plan = demand.get("create_topic") or {}
-    return await build_draft_site_preview(
-        client_name=client.display_name,
-        primary_url=client.primary_url,
-        draft=body.model_dump(exclude={"embed_images"}),
-        site_architecture=site_architecture if isinstance(site_architecture, dict) else {},
-        on_page_seo=on_page if isinstance(on_page, dict) else {},
-        content_planning=planning if isinstance(planning, dict) else {},
-        topic_plan=topic_plan if isinstance(topic_plan, dict) else {},
-        embed_images=bool(body.embed_images),
-    )
+@router.get("/{client_id}/content-production/site-preview")
+async def content_production_site_preview_state(
+    client_id: UUID,
+    key: str = Query(..., min_length=16, max_length=16),
+    include_html: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Progress of a preview run; with ``include_html`` the finished page as well."""
+    await require_permission(user, db, "publishing")
+    from app.services.site_preview import run
+
+    if not _PAGE_KEY_RE.match(key):
+        raise HTTPException(400, "Invalid page key")
+    state = await run.get_state(client_id, key)
+    out = {"pageKey": key, **state}
+    if include_html:
+        out["html"] = await run.get_html(str(client_id), key)
+    return out
 
 
 @router.post("/ai-fill")
@@ -318,9 +408,16 @@ async def delete_client(
             )
         )
     await db.execute(delete(BacklinkSnapshot).where(BacklinkSnapshot.client_id == client_id))
+    await _delete_legacy_rankings(db, client_id=client_id)
     await db.execute(delete(CompetitorProfile).where(CompetitorProfile.client_id == client_id))
 
     await db.execute(delete(PhaseValidation).where(PhaseValidation.client_id == client_id))
+    # These three were added after the original cleanup. On Postgres each one
+    # is a hard FK to clients.id, so leaving them behind turns Delete into a
+    # 500 and the client stays on the list.
+    await db.execute(delete(KeywordRejection).where(KeywordRejection.client_id == client_id))
+    await db.execute(delete(PhaseState).where(PhaseState.client_id == client_id))
+    await db.execute(delete(CddVersion).where(CddVersion.client_id == client_id))
     await db.execute(delete(DiscoveryResponse).where(DiscoveryResponse.client_id == client_id))
     await db.execute(delete(TrackingAudit).where(TrackingAudit.client_id == client_id))
     await db.execute(delete(FindingsLedger).where(FindingsLedger.client_id == client_id))
@@ -685,6 +782,7 @@ class ServicePrioritizationUpdate(BaseModel):
     selected_subservice_ids: list[str] = []
     primary_service_ids: list[str] = []
     service_catalog: list[dict] = []
+    service_scope: dict = {}
     competitor_tree_id: str | None = None
     adopt_competitor_service_ids: list[str] = []
     competitor_trees: list[dict] | None = None
@@ -733,15 +831,43 @@ async def get_service_prioritization(
         limit=8,
         prefer_confirmed=True,
     )
-    trees = await discover_competitor_service_trees(competitors, client_id=str(client.id))
+    from app.services.api_meter import api_meter_context
+    from app.services.industry_services import taxonomy_for_pack
+
+    page_seeds = _page_target_seeds(website)
+    # Spend here belongs to this client's keyword phase, like the chat turn's spend,
+    # so the cost tracker can total it per client.
+    async with api_meter_context(
+        client_id=client.id,
+        agent_key="search_demand",
+        phase_budget_usd=float(get_settings().search_demand_budget_usd or 0) or None,
+    ):
+        trees = await discover_competitor_service_trees(competitors, client_id=str(client.id))
+        # The industry's major services and their sub-services, from the model — opt-in
+        # suggestions beside what the site and competitors revealed.
+        industry_taxonomy, industry_status = await taxonomy_for_pack(
+            industry=client.industry or intake.get("industry") or marketing.get("industry"),
+            services=services,
+            website=website,
+            page_seeds=page_seeds,
+            geography=str(
+                intake.get("geographic_focus")
+                or marketing.get("geographic_focus")
+                or commercial.get("geographic_focus")
+                or ""
+            )
+            or None,
+        )
     pack = build_prioritization_pack(
         client_name=client.display_name,
         services=services,
         website=website,
-        page_seeds=_page_target_seeds(website),
+        page_seeds=page_seeds,
         competitors=competitors,
         competitor_trees=trees,
         existing=dict(commercial.get("service_prioritization") or {}),
+        industry_taxonomy=industry_taxonomy,
+        industry_status=industry_status,
     )
     return pack
 
@@ -777,6 +903,7 @@ async def save_service_prioritization(
             "selected_subservice_ids": body.selected_subservice_ids,
             "primary_service_ids": body.primary_service_ids,
             "service_catalog": body.service_catalog,
+            "service_scope": body.service_scope,
             "competitor_tree_id": body.competitor_tree_id,
             "adopt_competitor_service_ids": body.adopt_competitor_service_ids,
             "competitor_trees": body.competitor_trees,
@@ -793,7 +920,16 @@ async def save_service_prioritization(
     profile.commercial_scope = commercial
     if body.confirmed:
         profile.search_demand_status = "not_started"
-    await db.flush()
+    try:
+        await db.flush()
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Keyword research is still writing this client. "
+                "Wait for that run to finish, then confirm again."
+            ),
+        ) from exc
     return {"ok": True, "service_prioritization": payload}
 
 
@@ -1364,6 +1500,12 @@ async def detach_service_competitor(
     if delete_everywhere:
         await require_permission(user, db, "competitor_market_agent", need_trigger=True)
         commercial = detach_competitor_everywhere(commercial, competitor_id)
+        await _delete_legacy_rankings(db, competitor_id=competitor_id)
+        await db.execute(
+            delete(BacklinkSnapshot).where(
+                BacklinkSnapshot.competitor_profile_id == competitor_id
+            )
+        )
         await db.execute(
             delete(CompetitorProfile).where(
                 CompetitorProfile.client_id == client_id,
@@ -1518,6 +1660,8 @@ REPORT_EXPORT_FORMATS = {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "docx",
     ),
+    # Keyword research only (report_csv.CSV_CARD_TYPES); a CSV holds one table.
+    "csv": ("text/csv; charset=utf-8", "csv"),
 }
 
 
@@ -1539,7 +1683,8 @@ async def export_single_client_report(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Download one structured phase report as a PDF or Word document."""
+    """Download one structured phase report as PDF or Word, or keyword research as CSV."""
+    from app.services.report_csv import CSV_CARD_TYPES, build_keyword_research_csv
     from app.services.report_export import (
         build_report_export,
         find_report,
@@ -1548,7 +1693,9 @@ async def export_single_client_report(
 
     fmt = format.lower()
     if fmt not in REPORT_EXPORT_FORMATS:
-        raise HTTPException(400, f"Unsupported format '{format}'. Use pdf or docx.")
+        raise HTTPException(400, f"Unsupported format '{format}'. Use pdf, docx or csv.")
+    if fmt == "csv" and card_type not in CSV_CARD_TYPES:
+        raise HTTPException(400, "CSV download is available for keyword research only.")
 
     try:
         bundle = await build_report_export(db, client_id)
@@ -1563,7 +1710,11 @@ async def export_single_client_report(
     stamp = str(bundle.get("exported_at") or "")[:10].replace("-", "") or "export"
     single_bundle = {**bundle, "reports": [report]}
     media_type, ext = REPORT_EXPORT_FORMATS[fmt]
-    body = _build_export_body(single_bundle, fmt=fmt, single=True)
+    if fmt == "csv":
+        payload = report.get("payload") if isinstance(report.get("payload"), dict) else {}
+        body = build_keyword_research_csv(payload)
+    else:
+        body = _build_export_body(single_bundle, fmt=fmt, single=True)
     title_slug = report_filename_slug(report, bundle.get("client"))
     filename = f"{slug}-{title_slug}-{stamp}.{ext}"
     return Response(
@@ -1584,7 +1735,7 @@ async def export_client_reports(
     from app.services.report_export import build_report_export
 
     fmt = format.lower()
-    if fmt not in REPORT_EXPORT_FORMATS:
+    if fmt not in REPORT_EXPORT_FORMATS or fmt == "csv":
         raise HTTPException(400, f"Unsupported format '{format}'. Use pdf or docx.")
 
     try:

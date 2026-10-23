@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { httpStatusLabel, httpStatusTone } from "../../lib/httpStatusLabel";
 import { FieldGrid, MetricGrid, PresentableValue, humanLabel } from "./PresentableValue";
+import SiteMindTree, { type TreeRow } from "./SiteMindTree";
 
 type Props = {
   payload: Record<string, unknown>;
@@ -15,6 +16,7 @@ type SitemapPage = {
   status?: number | string;
   cluster?: string;
   cluster_label?: string;
+  page_type?: string;
   depth?: number;
   cdd_focus?: boolean;
 };
@@ -29,6 +31,7 @@ type SitemapSection = {
 type SiteSitemap = {
   url_count?: number;
   shown_count?: number;
+  primary_url?: string;
   truncated?: boolean;
   sources?: string[];
   sections?: SitemapSection[];
@@ -63,6 +66,7 @@ function ClientSiteSitemap({
   sampleUrls?: string[];
 }) {
   const [open, setOpen] = useState(true);
+  const [view, setView] = useState<"map" | "table">("map");
   const sections = useMemo((): SitemapSection[] => {
     if (sitemap && Array.isArray(sitemap.sections) && sitemap.sections.length) {
       return sitemap.sections;
@@ -88,6 +92,34 @@ function ClientSiteSitemap({
     return [];
   }, [sitemap, sampleUrls]);
 
+  const treeRows = useMemo(
+    (): TreeRow[] =>
+      sections.flatMap((section) =>
+        (section.pages || []).map((page) => ({
+          path: String(page.path || page.url || "/"),
+          title: page.title,
+          kind: page.page_type || page.cluster || section.cluster,
+          status: page.status,
+          flag: page.cdd_focus ? "CDD" : null,
+          group: section.label || section.cluster,
+        })),
+      ),
+    [sections],
+  );
+  const rootLabel = useMemo(() => {
+    const raw =
+      sitemap?.primary_url ||
+      (sections.flatMap((x) => x.pages || []).find((pg) => /^https?:\/\//i.test(String(pg.url || "")))?.url as
+        | string
+        | undefined) ||
+      "";
+    try {
+      return raw ? new URL(raw).host.replace(/^www\./, "") : "Home";
+    } catch {
+      return "Home";
+    }
+  }, [sitemap, sections]);
+
   if (!sections.length) return null;
 
   const total = Number(sitemap?.url_count || sitemap?.shown_count || sampleUrls?.length || 0);
@@ -97,9 +129,21 @@ function ClientSiteSitemap({
     <div className="report-section">
       <div className="cs-pillar-head" style={{ marginBottom: 8 }}>
         <h4 style={{ margin: 0 }}>Client website sitemap</h4>
-        <button type="button" className="btn btn-ghost" onClick={() => setOpen((v) => !v)}>
-          {open ? "Hide" : "Show"}
-        </button>
+        <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+          {open ? (
+            <span className="dp-seg" role="group" aria-label="Sitemap view">
+              <button type="button" aria-pressed={view === "map"} onClick={() => setView("map")}>
+                Map
+              </button>
+              <button type="button" aria-pressed={view === "table"} onClick={() => setView("table")}>
+                Table
+              </button>
+            </span>
+          ) : null}
+          <button type="button" className="btn btn-ghost" onClick={() => setOpen((v) => !v)}>
+            {open ? "Hide" : "Show"}
+          </button>
+        </span>
       </div>
       <p className="field-hint" style={{ marginTop: 0 }}>
         Current live-site URL inventory (crawl / XML sitemap / SEO audit / Perplexity
@@ -107,6 +151,9 @@ function ClientSiteSitemap({
         {total ? ` · ${total} URL${total === 1 ? "" : "s"}` : ""}
         {sources.length ? ` · source: ${sources.join(", ")}` : ""}
         {sitemap?.truncated ? " · list truncated for display" : ""}.
+        {sources.length === 1 && sources[0] === "seo_audit"
+          ? " The XML sitemap could not be read, so this list is only the pages the audit could name."
+          : ""}
       </p>
       {sitemap?.page_inventory_method ? (
         <p className="field-hint" style={{ marginTop: 0 }}>
@@ -114,7 +161,8 @@ function ClientSiteSitemap({
           {String(sitemap.page_inventory_method).length > 280 ? "…" : ""}
         </p>
       ) : null}
-      {open ? (
+      {open && view === "map" ? <SiteMindTree rows={treeRows} rootLabel={rootLabel} /> : null}
+      {open && view === "table" ? (
         <div className="site-sitemap">
           {sections.map((section) => (
             <div key={String(section.cluster || section.label)} className="site-sitemap-section">

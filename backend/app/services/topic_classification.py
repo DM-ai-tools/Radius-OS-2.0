@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.content_pipeline import identify_primary_keyword
+from app.services.keyword_cluster_structure import stable_cluster_id
 from app.services.url_mapping import (
     _MEDIUM_THRESHOLD,
     _norm_kw,
@@ -140,15 +141,9 @@ def mixed_intent_keywords(cluster: dict[str, Any]) -> list[str]:
     count — a Supporting long-tail at a different stage is normal and does not
     make the cluster ambiguous.
     """
-    intents = {
-        str(k.get("intent") or "").strip().lower()
-        for k in (cluster.get("keywords") or [])
-        if isinstance(k, dict) and str(k.get("role") or "Secondary").lower() in ("primary", "secondary")
-    }
-    intents.discard("")
-    if {"informational", "transactional"} <= intents:
-        return ["informational", "transactional"]
-    return []
+    from app.services.keyword_cluster_roles import conflicting_intents
+
+    return conflicting_intents(cluster)
 
 
 def _priority_key(cluster: dict[str, Any], match: dict[str, Any]) -> tuple:
@@ -232,6 +227,8 @@ def detect_supporting_topics(
             out[i] = {
                 "parent_index": j,
                 "parent_cluster": parent.get("name"),
+                # Names get rewritten later; the id is what URL mapping links on.
+                "parent_cluster_id": parent.get("cluster_id") or stable_cluster_id(parent),
                 "parent_primary_keyword": identify_primary_keyword(parent),
                 "overlap": round(score, 2),
             }
@@ -318,7 +315,11 @@ def _classify_from_match(
     score = float(match.get("match_score") or 0)
     band = str(match.get("match_band") or band_from_score(score)).upper()
     breakdown = dict(match.get("score_breakdown") or {})
-    coverage = float(breakdown.get("keyword_topic_match") or 0)
+    # Keyword coverage is None when there was nothing independent to measure
+    # (no declared page keyword, no secondaries): missing evidence, not thin.
+    coverage_raw = breakdown.get("keyword_topic_match")
+    coverage_measured = coverage_raw is not None
+    coverage = float(coverage_raw or 0)
     intent_fit = float(breakdown.get("intent_match") or 0)
     url = match.get("matched_url")
 
@@ -381,16 +382,20 @@ def _classify_from_match(
 
     thin = str(page.get("content_quality") or "") in ("thin", "broken")
 
-    if band == "HIGH" and coverage >= _STRONG_COVERAGE and intent_fit >= _STRONG_INTENT_FIT and not thin:
+    coverage_ok = coverage >= _STRONG_COVERAGE or not coverage_measured
+    if band == "HIGH" and coverage_ok and intent_fit >= _STRONG_INTENT_FIT and not thin:
+        coverage_text = (
+            f"topical coverage {coverage:g}/25" if coverage_measured else "keyword coverage not measurable"
+        )
         return (
             EXISTING_TOPIC,
             f"{url} directly satisfies the dominant search intent and semantic topic "
-            f"(score {score:g}/100, topical coverage {coverage:g}/25, intent fit {intent_fit:g}/15).",
+            f"(score {score:g}/100, {coverage_text}, intent fit {intent_fit:g}/15).",
             confidence,
         )
     if band == "HIGH":
         weak = []
-        if coverage < _STRONG_COVERAGE:
+        if coverage_measured and coverage < _STRONG_COVERAGE:
             weak.append(f"its topical coverage is thin ({coverage:g}/25)")
         if intent_fit < _STRONG_INTENT_FIT:
             weak.append(

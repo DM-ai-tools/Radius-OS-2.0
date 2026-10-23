@@ -66,14 +66,11 @@ def test_calendar_does_not_recycle_topics_to_fill_empty_weeks():
         }
     ]
     months = build_calendar(queue, weeks=12)
-    scheduled = [
-        w
-        for m in months
-        for w in (m.get("weeks") or [])
-        if w.get("keyword")
-    ]
+    scheduled = [row for row in queue if row.get("week")]
     assert len(scheduled) == 1
     assert scheduled[0]["keyword"] == "one topic"
+    assert months[0]["pieces"] == 1
+    assert "title" not in months[0]
 
 
 def test_selected_services_lead_the_queue_and_calendar():
@@ -82,7 +79,26 @@ def test_selected_services_lead_the_queue_and_calendar():
         evergreen=[],
         trends=[],
         avoid=[],
-        report_clusters=[],
+        report_clusters=[
+            {
+                "name": "Email marketing software",
+                "primary_keyword": "best email marketing software",
+                "intent": "commercial",
+                "funnel": "MOFU",
+            },
+            {
+                "name": "Email marketing cost",
+                "primary_keyword": "email marketing pricing",
+                "intent": "transactional",
+                "funnel": "BOFU",
+            },
+            {
+                "name": "PPC explained",
+                "primary_keyword": "what is ppc",
+                "intent": "informational",
+                "funnel": "TOFU",
+            },
+        ],
         domain="example.com",
         topic_plan={
             "topic_ideas": [
@@ -95,21 +111,29 @@ def test_selected_services_lead_the_queue_and_calendar():
         ],
     )
     labels = [row.get("work_label") for row in q]
+    keywords = {str(row.get("keyword")).lower() for row in q}
     assert labels[0] == "Optimize service page"
     assert labels.count("Optimize service page") == 2
-    creates = [row for row in q if row.get("action") == "create"]
-    kinds = {row.get("page_type") for row in creates}
-    assert {"guide", "blog", "comparison", "faq", "listicle", "landing", "tool"} <= kinds
-    assert labels.count("Create blog page") == 2
-    assert "Create guide page" in labels
-    assert "Create faq page" in labels
-    assert "meta ads" in {str(row.get("keyword")).lower() for row in q}
-    assert "extra keyword" not in {str(row.get("keyword")).lower() for row in q}
+    assert "best email marketing software" in keywords
+    assert "email marketing pricing" in keywords
+    assert "what is ppc" in keywords
+    assert "email marketing guide" not in keywords
+    assert "email marketing faq" not in keywords
+    assert "ppc pricing" not in keywords
+    assert "ppc tool" not in keywords
+    by_keyword = {str(row.get("keyword")).lower(): row for row in q}
+    assert by_keyword["best email marketing software"]["page_type"] == "listicle"
+    assert by_keyword["email marketing pricing"]["page_type"] == "landing"
+    assert by_keyword["what is ppc"]["page_type"] == "guide"
+    assert by_keyword["what is ppc"]["supports_service_id"] == "ppc"
+    assert "meta ads" in keywords
+    assert "extra keyword" not in keywords
     months = build_calendar(q, weeks=12)
-    scheduled = [w for m in months for w in (m.get("weeks") or []) if w.get("keyword")]
+    scheduled = [row for row in q if row.get("week")]
     assert scheduled[0]["work_label"] == "Optimize service page"
-    scheduled_kinds = {w.get("work_label") for w in scheduled}
-    assert "Create blog page" in scheduled_kinds
-    assert "Create guide page" in scheduled_kinds
-    assert "Create comparison page" in scheduled_kinds
+    scheduled_keywords = {str(w.get("keyword")).lower() for w in scheduled}
+    assert "best email marketing software" in scheduled_keywords
+    assert "email marketing pricing" in scheduled_keywords
+    assert "what is ppc" in scheduled_keywords
     assert any(w.get("keyword") == "meta ads" for w in scheduled)
+    assert sum(m["pieces"] for m in months) == len(scheduled)

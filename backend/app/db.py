@@ -3,21 +3,26 @@ from collections.abc import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from app.config import get_settings
+from app.config import asyncpg_engine_settings, get_settings
 
 settings = get_settings()
+database_url, _ssl_connect_args = asyncpg_engine_settings(settings.database_url)
 
 engine_kwargs: dict = {"echo": False}
 if settings.is_sqlite:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
-elif "postgresql" in settings.database_url or "postgres" in settings.database_url:
+elif "postgresql" in database_url or "postgres" in database_url:
     # Fail faster when Postgres is wedged or unreachable (avoids endless "Please wait…")
-    engine_kwargs["connect_args"] = {"timeout": 10, "command_timeout": 15}
+    engine_kwargs["connect_args"] = {
+        "timeout": 10,
+        "command_timeout": 15,
+        **_ssl_connect_args,
+    }
     engine_kwargs["pool_pre_ping"] = True
     engine_kwargs["pool_timeout"] = 10
     engine_kwargs["pool_recycle"] = 300
 
-engine = create_async_engine(settings.database_url, **engine_kwargs)
+engine = create_async_engine(database_url, **engine_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

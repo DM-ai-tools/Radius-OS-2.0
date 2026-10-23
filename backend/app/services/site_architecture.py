@@ -69,7 +69,43 @@ def _normalize_url_tree(tree: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not row.get("parent"):
             row["parent"] = _parent_of(loc)
         out.append(row)
-    return out
+    return _drop_modifier_pages(out)
+
+
+def _drop_modifier_pages(tree: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A city or "near me" phrasing is not a page when the service page is already in the tree.
+
+    SEO at /seo stays, with AI SEO and Local SEO under it. "seo company near me"
+    and "seo sydney" do not get their own boxes.
+    """
+    from app.services.url_mapping import _publishable_head
+
+    def label(node: dict[str, Any]) -> str:
+        return str(node.get("title") or node.get("primary_keyword") or node.get("keyword") or "")
+
+    def line(text: str) -> str:
+        head = _publishable_head(text)
+        if head:
+            return head
+        raw = " ".join(text.lower().split())
+        if raw in ("seo", "search engine optimisation", "search engine optimization"):
+            return "search engine optimisation"
+        return ""
+
+    def is_service(node: dict[str, Any]) -> bool:
+        kind = str(node.get("page_type") or node.get("type") or "").lower()
+        return kind in ("service", "subservice", "sub_service")
+
+    homes = {line(label(node)) for node in tree if is_service(node)}
+    homes.discard("")
+    kept: list[dict[str, Any]] = []
+    for node in tree:
+        text = label(node)
+        head = _publishable_head(text)
+        if head and head in homes and not is_service(node):
+            continue
+        kept.append(node)
+    return kept
 
 
 def _money_keywords(commercial: dict[str, Any], demand: dict[str, Any]) -> list[str]:
@@ -258,8 +294,9 @@ async def measure_click_depth(
 def strategy_queue_nodes(seo_strategy: dict[str, Any]) -> list[dict[str, Any]]:
     """Target tree rows from Phase 6 priority_queue â€” join key for Phase 9."""
     queue = (
-        seo_strategy.get("combined_priority_queue")
+        seo_strategy.get("content_plan")
         or seo_strategy.get("priority_queue")
+        or seo_strategy.get("combined_priority_queue")
         or seo_strategy.get("priority_pages")
         or []
     )
@@ -607,6 +644,7 @@ def build_blueprint(
         selected_subservice_ids=list(
             prioritization.get("selected_subservice_ids") or []
         ),
+        service_scope=prioritization.get("service_scope"),
         adopt_service_ids=list(
             prioritization.get("adopt_competitor_service_ids") or []
         ),
@@ -784,6 +822,35 @@ def build_blueprint(
     }
 
 
+def use_full_cluster_list(demand: dict[str, Any], clusters: list[Any] | None) -> dict[str, Any]:
+    """URL mapping needs every page-ready cluster, not the 10-row memory slim.
+
+    Shared memory keeps a short cluster list for later prompts. The search
+    demand card still has the full set. When that set is longer, the category
+    sheet is built from it. Rejected clusters stay out of the sheet even when
+    the stored report is longer only because it still holds them for audit.
+    """
+    from app.services.url_mapping import cluster_is_page_ready
+
+    incoming = [c for c in (clusters or []) if cluster_is_page_ready(c)]
+    report = demand.get("cluster_report") if isinstance(demand.get("cluster_report"), dict) else {}
+    stored = [
+        c
+        for c in (report.get("clusters") or demand.get("clusters") or [])
+        if isinstance(c, dict)
+    ]
+    stored_ready = [c for c in stored if cluster_is_page_ready(c)]
+    if len(incoming) <= len(stored_ready) and len(stored_ready) == len(stored):
+        return demand
+    chosen = incoming if len(incoming) > len(stored_ready) else stored_ready
+    out = dict(demand)
+    new_report = dict(report)
+    new_report["clusters"] = chosen
+    out["cluster_report"] = new_report
+    out["clusters"] = chosen
+    return out
+
+
 async def run_site_architecture_plan(
     *,
     client_name: str,
@@ -909,6 +976,7 @@ async def run_site_architecture_plan(
         commercial=commercial,
         client_domain=domain,
         pillar_structure=None,
+        offer_synonyms=((demand.get("keyword_seeding") or {}).get("seed_synonyms") or []),
     )
     blueprint = apply_url_map_to_architecture(blueprint, url_map_report)
     blueprint["url_map_report"] = url_map_report
@@ -964,6 +1032,7 @@ async def run_site_architecture_plan(
             selected_subservice_ids=list(
                 prioritization.get("selected_subservice_ids") or []
             ),
+            service_scope=prioritization.get("service_scope"),
             adopt_service_ids=list(
                 prioritization.get("adopt_competitor_service_ids") or []
             ),

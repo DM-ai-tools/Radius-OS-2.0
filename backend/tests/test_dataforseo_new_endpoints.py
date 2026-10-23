@@ -286,3 +286,22 @@ async def test_locale_is_dropped_only_once_across_batches():
     with_locale = [c for c in calls if "location_code" in c]
     assert len(with_locale) == 1
     assert len(rows) == 1500
+
+
+async def test_serp_advanced_stops_when_the_live_call_times_out(monkeypatch):
+    overview_calls = {"n": 0}
+
+    async def no_body(*_args, **_kwargs):
+        return None
+
+    async def overview(*_args, **_kwargs):
+        overview_calls["n"] += 1
+        return [], []
+
+    monkeypatch.setattr(dataforseo, "_auth_header", lambda: "Basic x")
+    monkeypatch.setattr(dataforseo, "_post", no_body)
+    monkeypatch.setattr(dataforseo, "serp_overview", overview)
+    result, errs = await dataforseo.serp_advanced("local seo services", location_code=2036)
+    assert overview_calls["n"] == 0
+    assert errs == ["dataforseo_serp_failed"]
+    assert result["organic"] == []

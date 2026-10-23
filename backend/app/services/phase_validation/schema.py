@@ -64,6 +64,7 @@ class CheckResult:
     evidence: str | None = None
     recommended_correction: str | None = None
     source: str = "deterministic"  # deterministic | semantic
+    layer: str = ""  # contract | honesty | scope | judgement
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,7 +119,13 @@ class ValidationResult:
             "output_fingerprint": self.output_fingerprint,
             "passed": self.passed,
             "blocks_pipeline": self.blocks_pipeline,
+            "layers": self.layer_report(),
         }
+
+    def layer_report(self) -> list[dict[str, Any]]:
+        from app.services.phase_validation.layers import build_layer_report
+
+        return build_layer_report(self.checks)
 
 
 def decide_from_checks(

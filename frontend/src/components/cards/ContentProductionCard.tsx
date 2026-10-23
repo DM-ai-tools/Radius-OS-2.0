@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, downloadHtmlFile } from "../../api";
+import type { SitePreviewDraft } from "../../api";
 import { useAuth } from "../../auth";
 import DraftDocument, { type DraftImage } from "./DraftDocument";
+import SitePreviewModal from "./SitePreviewModal";
 
 function designedPreviewFilename(article: Record<string, unknown> | null): string {
   const raw = String(article?.title || article?.keyword || "draft-site-preview");
@@ -20,6 +21,19 @@ type Props = {
   onAction: (action: string, edits?: Record<string, unknown>) => void;
   onDraftTopic?: (prompt: string) => void;
 };
+
+/** Sentences only the template fallback wrote when the writing model failed: such a
+ * "draft" is filler, so it can be drafted again and is not previewed. */
+const TEMPLATE_FILLER = [
+  "Priorities under this heading include",
+  "keeps this section on",
+  "explains the practical detail a buyer needs before they enquire",
+];
+
+function isTemplateDraft(markdown: unknown): boolean {
+  const text = String(markdown || "");
+  return TEMPLATE_FILLER.some((phrase) => text.includes(phrase));
+}
 
 function asRows(raw: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(raw)) return [];
@@ -203,10 +217,6 @@ export default function ContentProductionCard({
 }: Props) {
   const { token } = useAuth();
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewHtml, setPreviewHtml] = useState("");
-  const [previewMeta, setPreviewMeta] = useState<Record<string, unknown> | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
 
   const briefs = asRows(payload.briefs);
   const drafts = asRows(payload.drafts);
@@ -224,6 +234,7 @@ export default function ContentProductionCard({
           images: payload.draft_images,
         }
       : null);
+  const articleIsFiller = Boolean(article && isTemplateDraft(article.markdown));
   const awaiting = Boolean(payload.awaiting_topic_selection) || (!article && choices.length > 0);
   const pickList = choices.length ? choices : briefs.filter((b) => b.writer_ready);
 
@@ -238,6 +249,7 @@ export default function ContentProductionCard({
         );
         const drafted = Boolean(
           article &&
+            !articleIsFiller &&
             (sameTopic(article.url, url) ||
               String(article.keyword || "") === kw ||
               String(article.title || "") === kw),
@@ -259,7 +271,7 @@ export default function ContentProductionCard({
           row: c,
         };
       }),
-    [pickList, article],
+    [pickList, article, articleIsFiller],
   );
 
   const firstOpenKey = draftableOptions.find((o) => !o.drafted)?.key || "";
@@ -289,70 +301,34 @@ export default function ContentProductionCard({
   }, [selectedOption, briefs]);
   const outline = selectedBrief ? outlineTitles(selectedBrief) : [];
 
-  async function buildSitePreview(opts?: { embedImages?: boolean }): Promise<string | null> {
-    if (!article?.markdown || !token) return null;
-    setPreviewLoading(true);
-    setPreviewError(null);
-    try {
-      const res = await api.contentProductionSitePreview(token, clientId, {
-        title: article.title ? String(article.title) : undefined,
-        url: article.url ? String(article.url) : undefined,
-        meta_description: article.meta_description ? String(article.meta_description) : undefined,
-        keyword: article.keyword ? String(article.keyword) : undefined,
-        markdown: String(article.markdown),
-        images: Array.isArray(article.images)
-          ? (article.images as Array<Record<string, unknown>>)
-          : undefined,
-        media_base: window.location.origin,
-        embed_images: Boolean(opts?.embedImages),
-      });
-      const html = res.preview_html || "";
-      setPreviewHtml(html);
-      setPreviewMeta(res as unknown as Record<string, unknown>);
-      return html || null;
-    } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : "Could not build site preview");
-      return null;
-    } finally {
-      setPreviewLoading(false);
-    }
-  }
+  const previewDraft = useMemo<SitePreviewDraft | null>(() => {
+    if (!article?.markdown) return null;
+    const str = (v: unknown) => (v ? String(v) : undefined);
+    return {
+      title: str(article.title),
+      url: str(article.url),
+      meta_description: str(article.meta_description),
+      keyword: str(article.keyword),
+      page_type: str(article.page_type),
+      action: str(article.action),
+      existing_page_url: str(article.existing_page_url),
+      markdown: String(article.markdown),
+      images: Array.isArray(article.images)
+        ? (article.images as Array<Record<string, unknown>>)
+        : undefined,
+    };
+  }, [article]);
 
-  async function openSitePreview() {
-    if (!article?.markdown || !token) return;
-    setPreviewOpen(true);
-    setPreviewHtml("");
-    await buildSitePreview();
-  }
-
-  async function downloadDesignedHtml() {
-    if (!article?.markdown || !token) return;
-    setPreviewOpen(true);
-    setPreviewHtml("");
-    const built = await buildSitePreview({ embedImages: true });
-    if (built) downloadHtmlFile(built, designedPreviewFilename(article));
-  }
-
-  const previewActions = article?.markdown ? (
-    <>
-      <button
-        type="button"
-        className="btn btn-secondary"
-        disabled={previewLoading || !token}
-        onClick={() => void openSitePreview()}
-      >
-        {previewLoading ? "Building preview…" : "Preview on client site"}
-      </button>
-      <button
-        type="button"
-        className="btn btn-ghost"
-        disabled={previewLoading || !token}
-        onClick={() => void downloadDesignedHtml()}
-        title="Download the self-contained HTML with client design applied"
-      >
-        {previewLoading ? "Preparing HTML…" : "Download designed HTML"}
-      </button>
-    </>
+  const previewActions = previewDraft && !articleIsFiller ? (
+    <button
+      type="button"
+      className="btn btn-secondary"
+      disabled={!token}
+      onClick={() => setPreviewOpen(true)}
+      title="A Manus agent lays out this draft in the client's own site design"
+    >
+      Preview on client site
+    </button>
   ) : null;
 
   return (
@@ -380,15 +356,22 @@ export default function ContentProductionCard({
         <p style={{ fontSize: 13, color: "var(--muted)" }}>{String(payload.note)}</p>
       ) : null}
       {refusal && typeof refusal === "object" && refusal.reason ? (
-        <p style={{ fontSize: 13, color: "var(--coral, #b42318)" }}>
-          Write refused: {String(refusal.reason)}
-          {refusal.route_to ? ` → ${String(refusal.route_to)}` : ""}
+        <p className="dp-notice dp-notice--error" role="alert">
+          <strong>Write refused.</strong> {String(refusal.reason)}
+          {refusal.route_to ? ` Next step: ${String(refusal.route_to)}.` : ""}
         </p>
       ) : null}
 
       {article ? (
         <>
           <h4 style={{ marginBottom: 8 }}>Full draft</h4>
+          {articleIsFiller ? (
+            <p className="dp-notice dp-notice--error" role="alert">
+              <strong>This draft is template filler, not written copy.</strong> The writing model
+              was unavailable when it was drafted, so its sections repeat placeholder text. Draft
+              this page again below; it can't be previewed or published as it is.
+            </p>
+          ) : null}
           <div className="cs-pillar-block draft-panel">
             {article.markdown ? (
               <DraftDocument
@@ -411,7 +394,7 @@ export default function ContentProductionCard({
                 }
               />
             ) : (
-              <p style={{ fontSize: 13, color: "var(--coral, #b42318)" }}>
+              <p className="dp-notice dp-notice--error" role="alert">
                 Draft ran but the article body did not attach. Select the same page again to rewrite.
               </p>
             )}
@@ -431,68 +414,15 @@ export default function ContentProductionCard({
               {previewActions}
             </div>
           ) : null}
-          {previewOpen ? (
-            <div className="site-preview-backdrop" role="presentation" onClick={() => setPreviewOpen(false)}>
-              <div
-                className="site-preview-modal"
-                role="dialog"
-                aria-modal="true"
-                aria-label="Client site preview"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="site-preview-toolbar">
-                  <div>
-                    <strong>Client site preview</strong>
-                    <span className="site-preview-sub">
-                      {previewLoading
-                        ? " · measuring the live page, then Brandfetch only if that fails…"
-                        : previewMeta?.previous_page_url
-                          ? " · design copied from previous plan page"
-                          : previewMeta?.design_source === "measured"
-                            ? " · measured from the live page"
-                            : previewMeta?.design_source === "wordpress" && previewMeta?.design_fallback === "brandfetch"
-                            ? " · WordPress site, Brandfetch filled the gaps"
-                            : previewMeta?.design_source === "wordpress"
-                              ? " · styled from the live WordPress site"
-                              : previewMeta?.design_source === "brandfetch" || previewMeta?.brand_applied
-                                ? " · Brandfetch fallback"
-                                : " · neutral styling — site design unavailable"}
-                      {previewMeta?.layout_mirrored_by_claude ? " · Claude mirrored layout" : ""}
-                      {previewMeta?.previous_page_url
-                        ? ` · from ${String(previewMeta.previous_page_url)}`
-                        : previewMeta?.reference_url
-                          ? ` · ref ${String(previewMeta.reference_url)}`
-                          : ""}
-                    </span>
-                  </div>
-                  <div className="site-preview-toolbar-actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      disabled={previewLoading || !previewHtml}
-                      onClick={() => void downloadDesignedHtml()}
-                    >
-                      Download HTML
-                    </button>
-                    <button type="button" className="btn btn-ghost" onClick={() => setPreviewOpen(false)}>
-                      Close
-                    </button>
-                  </div>
-                </div>
-                {previewError ? (
-                  <p style={{ padding: 16, color: "var(--coral, #b42318)" }}>{previewError}</p>
-                ) : previewLoading ? (
-                  <p style={{ padding: 16, color: "var(--muted)" }}>Building preview…</p>
-                ) : previewHtml ? (
-                  <iframe
-                    className="site-preview-frame"
-                    title="Client site preview"
-                    sandbox="allow-same-origin"
-                    srcDoc={previewHtml}
-                  />
-                ) : null}
-              </div>
-            </div>
+          {previewOpen && previewDraft && token ? (
+            <SitePreviewModal
+              token={token}
+              clientId={clientId}
+              draft={previewDraft}
+              filename={designedPreviewFilename(article)}
+              canBuild
+              onClose={() => setPreviewOpen(false)}
+            />
           ) : null}
         </>
       ) : null}

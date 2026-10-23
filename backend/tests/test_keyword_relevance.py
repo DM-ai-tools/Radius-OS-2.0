@@ -81,7 +81,7 @@ def test_related_keyword_must_name_the_seed_when_no_service_contract_exists():
         "netflix movies", ctx, match_class="related", seed="Drain Cleaning"
     )
     assert not keep
-    assert reason == "no_business_evidence"
+    assert reason in {"no_business_evidence", "entertainment"}
 
 
 def test_service_contract_keep_survives_a_weak_lexical_overlap():
@@ -109,7 +109,7 @@ def test_keeps_related_of_supported_seed_and_drops_unrelated_broad():
     keep, reason, _ = evaluate_keyword(
         "salesforce crm software", ctx, match_class="broad", seed="SEO Services"
     )
-    assert not keep and reason in {"no_business_evidence", "service_mismatch"}
+    assert not keep and reason in {"no_business_evidence", "service_mismatch", "tool_seeker"}
 
 
 def test_keeps_page_terms_and_nested_website_pages():

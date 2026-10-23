@@ -66,6 +66,16 @@ def run_deterministic_checks(
                 prior=prior,
             )
         )
+    checks.extend(
+        _check_qa_metric_honesty(
+            criteria=criteria, output=output, company_ctx=company_ctx, prior=prior
+        )
+    )
+    checks.extend(
+        _check_qa_service_scope(
+            criteria=criteria, output=output, company_ctx=company_ctx, prior=prior
+        )
+    )
     return checks
 
 
@@ -183,6 +193,9 @@ def _check_required_keys(
         # content_planning uses pages or roadmap
         if key == "pages" and not val:
             val = output.get("roadmap")
+        # Content strategy stores the queue as content_plan and drops priority_queue.
+        if key == "priority_queue" and not val:
+            val = output.get("content_plan")
         if val in (None, "", [], {}):
             results.append(
                 _fail(
@@ -603,13 +616,13 @@ def _check_strategy_phase5_carry(
                 if title:
                     titles.add(title)
 
-    queue = output.get("priority_queue") or []
+    queue = output.get("content_plan") or output.get("priority_queue") or []
     if not isinstance(queue, list) or not queue:
         return [
             _fail(
                 "strategy_queue",
                 "completeness",
-                "Content strategy priority_queue is missing or empty.",
+                "Content strategy content plan is missing or empty.",
                 severity=CheckSeverity.MAJOR.value,
             )
         ]
@@ -1010,6 +1023,49 @@ def _check_production_action_fit(
     ]
 
 
+def _check_production_sub_service_scope(
+    *,
+    criteria: PhaseCriteria | None,
+    output: dict[str, Any],
+    company_ctx: dict[str, Any],
+    prior: dict[str, Any],
+) -> list[CheckResult]:
+    """A draft that names a sub-service the client does not offer must be revised."""
+    _ = criteria, company_ctx, prior
+    drafts = output.get("drafts")
+    offenders: list[str] = []
+    if isinstance(drafts, list):
+        for draft in drafts:
+            if not isinstance(draft, dict):
+                continue
+            validation = draft.get("business_validation")
+            failures = (validation or {}).get("failures") if isinstance(validation, dict) else None
+            for failure in failures or []:
+                if isinstance(failure, dict) and failure.get("name") == "sub_service_scope":
+                    offenders.append(str(failure.get("detail") or "sub-service not offered"))
+    if offenders:
+        return [
+            _fail(
+                "production_sub_service_scope",
+                "phase_objective_compliance",
+                "Draft names a sub-service the client does not offer.",
+                severity=CheckSeverity.CRITICAL.value,
+                evidence="; ".join(offenders[:3]),
+                correction=(
+                    "Rewrite the draft using only the offered sub-services listed in the "
+                    "service scope; remove every mention of the excluded ones."
+                ),
+            )
+        ]
+    return [
+        _pass(
+            "production_sub_service_scope",
+            "phase_objective_compliance",
+            "Draft stays within the offered sub-services.",
+        )
+    ]
+
+
 def _check_on_page_one_page(
     *,
     criteria: PhaseCriteria,
@@ -1091,6 +1147,139 @@ def _check_publishing_mode(
     ]
 
 
+_FABRICATED_BASIS = {
+    "invented",
+    "fabricated",
+    "placeholder",
+    "guessed",
+    "llm_estimate",
+    "model_estimate",
+}
+_BASIS_KEYS = {"volume_basis", "metric_source", "volume_source", "metric_basis"}
+
+
+def _fabricated_markers(node: Any, found: list[str], *, depth: int = 0) -> None:
+    if depth > 6 or len(found) >= 5:
+        return
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if str(key) in _BASIS_KEYS and str(value or "").strip().lower() in _FABRICATED_BASIS:
+                found.append(f"{key}={value}")
+            else:
+                _fabricated_markers(value, found, depth=depth + 1)
+    elif isinstance(node, list):
+        for item in node[:30]:
+            _fabricated_markers(item, found, depth=depth + 1)
+
+
+def _check_qa_metric_honesty(
+    *,
+    criteria: PhaseCriteria,
+    output: dict[str, Any],
+    company_ctx: dict[str, Any],
+    prior: dict[str, Any],
+) -> list[CheckResult]:
+    """Every agent: reject a metric that the payload itself marks as invented."""
+    _ = criteria, company_ctx, prior
+    found: list[str] = []
+    _fabricated_markers(output, found)
+    if found:
+        return [
+            _fail(
+                "qa_metric_honesty",
+                "honesty_anti_hallucination",
+                "A metric is marked as invented rather than measured.",
+                severity=CheckSeverity.MAJOR.value,
+                evidence="; ".join(found),
+                correction="Drop the invented figure or replace it with a provider measurement.",
+            )
+        ]
+    return [
+        _pass(
+            "qa_metric_honesty",
+            "honesty_anti_hallucination",
+            "No metric in this deliverable is marked as invented.",
+        )
+    ]
+
+
+def _service_group_names(output: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for key in ("services", "seed_clusters", "service_groups"):
+        rows = output.get(key)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, str) and row.strip():
+                names.append(row.strip())
+            elif isinstance(row, dict):
+                label = row.get("service") or row.get("name")
+                if isinstance(label, str) and label.strip():
+                    names.append(label.strip())
+    return names
+
+
+def _product_names(company_ctx: dict[str, Any]) -> list[str]:
+    raw = company_ctx.get("products_services")
+    names: list[str] = []
+    if isinstance(raw, str) and raw.strip():
+        names.append(raw.strip())
+    elif isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                names.append(item.strip())
+            elif isinstance(item, dict):
+                label = item.get("name") or item.get("service")
+                if isinstance(label, str) and label.strip():
+                    names.append(label.strip())
+    return names
+
+
+def _shares_token(left: str, right: str) -> bool:
+    stop = {"and", "the", "for", "with", "services", "service"}
+    tokens = {w for w in left.lower().split() if len(w) >= 4 and w not in stop}
+    other = right.lower()
+    return any(token in other for token in tokens)
+
+
+def _check_qa_service_scope(
+    *,
+    criteria: PhaseCriteria,
+    output: dict[str, Any],
+    company_ctx: dict[str, Any],
+    prior: dict[str, Any],
+) -> list[CheckResult]:
+    """Every agent: when the deliverable names services, they must overlap the client's."""
+    _ = criteria, prior
+    groups = _service_group_names(output)
+    products = _product_names(company_ctx)
+    if not groups or not products:
+        return [
+            _pass(
+                "qa_service_scope",
+                "service_product_alignment",
+                "No service list on this deliverable to compare with the client's services.",
+            )
+        ]
+    off = [name for name in groups if not any(_shares_token(name, product) or _shares_token(product, name) for product in products)]
+    if off and len(off) == len(groups):
+        return [
+            _warn(
+                "qa_service_scope",
+                "service_product_alignment",
+                "None of the services on this deliverable overlap the client's services.",
+                evidence=", ".join(off[:6]),
+            )
+        ]
+    return [
+        _pass(
+            "qa_service_scope",
+            "service_product_alignment",
+            "Service groups overlap the client's services.",
+        )
+    ]
+
+
 _CHECK_FNS = {
     "output_present": _check_output_present,
     "required_keys": _check_required_keys,
@@ -1107,6 +1296,7 @@ _CHECK_FNS = {
     "planning_action_fit": _check_planning_action_fit,
     "production_one_page": _check_production_one_page,
     "production_action_fit": _check_production_action_fit,
+    "production_sub_service_scope": _check_production_sub_service_scope,
     "on_page_one_page": _check_on_page_one_page,
     "publishing_mode": _check_publishing_mode,
 }

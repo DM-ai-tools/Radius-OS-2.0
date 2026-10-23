@@ -164,6 +164,124 @@ async def test_index_fallback_is_skipped_when_direct_discovery_worked(fake_site,
 
 
 @pytest.mark.asyncio
+async def test_captcha_blocked_sitemap_is_read_and_typed(monkeypatch):
+    """A 202 captcha hides sitemap.xml from httpx. Firecrawl still returns it,
+    and post vs page sitemaps stay distinct so cluster counts can use them."""
+
+    async def blocked(url, *, timeout=20.0, follow=True, enforce_registrable_domain=False):
+        return {
+            "url": url,
+            "status_code": 202,
+            "text": "",
+            "headers": {},
+            "history": [],
+            "error": "bot_challenge_blocked",
+        }
+
+    async def fake_scrape(url, **kwargs):
+        if url.endswith("/sitemap.xml"):
+            return {"available": False}
+        if url.endswith("/sitemap_index.xml"):
+            body = (
+                "<sitemapindex>"
+                "<loc>https://acme.com/page-sitemap.xml</loc>"
+                "<loc>https://acme.com/post-sitemap.xml</loc>"
+                "</sitemapindex>"
+            )
+            return {"available": True, "raw_html": body, "html": "", "markdown": ""}
+        if url.endswith("/page-sitemap.xml"):
+            locs = "".join(
+                f"<loc>https://acme.com{path}</loc>"
+                for path in (
+                    "/seo/",
+                    "/email-marketing/",
+                    "/ppc-management-services/",
+                    "/web-development/",
+                    "/about-us/",
+                    "/contact-us/",
+                    "/local-seo-services/",
+                    "/meta-ads/",
+                )
+            )
+            return {"available": True, "raw_html": f"<urlset>{locs}</urlset>"}
+        if url.endswith("/post-sitemap.xml"):
+            locs = "".join(
+                f"<loc>https://acme.com{path}</loc>"
+                for path in (
+                    "/blogs/",
+                    "/why-hire-a-wordpress-website-design-company-in-melbourne/",
+                    "/make-best-h1-tags-perfect-seo/",
+                )
+            )
+            return {"available": True, "raw_html": f"<urlset>{locs}</urlset>"}
+        return {"available": False}
+
+    import app.integrations.context_dev as context_dev
+    import app.integrations.firecrawl as fc
+
+    async def no_context(url):
+        return None, "not_used"
+
+    monkeypatch.setattr(web_fetch, "fetch_url", blocked)
+    monkeypatch.setattr(fc, "scrape_page", fake_scrape)
+    monkeypatch.setattr(context_dev, "scrape_markdown", no_context)
+    sections: dict[str, str] = {}
+    urls = await web_fetch.discover_site_urls("acme.com", max_pages=50, sections_out=sections)
+
+    paths = set(_paths(urls))
+    assert "/seo" in paths
+    assert "/email-marketing" in paths
+    assert "/blogs" in paths
+    assert "/why-hire-a-wordpress-website-design-company-in-melbourne" in paths
+    by_path = {urlparse(u).path: sections.get(u) for u in urls}
+    assert by_path["/seo"] == "page"
+    assert by_path["/about-us"] == "page"
+    assert by_path["/blogs"] == "post"
+    assert by_path["/make-best-h1-tags-perfect-seo"] == "post"
+
+
+@pytest.mark.asyncio
+async def test_captcha_sitemap_falls_back_to_context_markdown(monkeypatch):
+    async def blocked(url, *, timeout=20.0, follow=True, enforce_registrable_domain=False):
+        return {
+            "url": url,
+            "status_code": 202,
+            "text": "",
+            "headers": {},
+            "history": [],
+            "error": "bot_challenge_blocked",
+        }
+
+    async def no_firecrawl(url, **kwargs):
+        return {"available": False, "error": "firecrawl_not_configured"}
+
+    async def fake_md(url):
+        if url.endswith("/sitemap_index.xml"):
+            return {"markdown": "https://acme.com/page-sitemap.xml\nhttps://acme.com/post-sitemap.xml"}, None
+        if url.endswith("/page-sitemap.xml"):
+            return {"markdown": "https://acme.com/seo/\nhttps://acme.com/email-marketing/"}, None
+        if url.endswith("/post-sitemap.xml"):
+            return {"markdown": "https://acme.com/blogs/\nhttps://acme.com/make-best-h1-tags-perfect-seo/"}, None
+        return None, "empty"
+
+    import app.integrations.context_dev as context_dev
+    import app.integrations.firecrawl as fc
+
+    monkeypatch.setattr(web_fetch, "fetch_url", blocked)
+    monkeypatch.setattr(fc, "scrape_page", no_firecrawl)
+    monkeypatch.setattr(context_dev, "scrape_markdown", fake_md)
+    sections: dict[str, str] = {}
+    urls = await web_fetch.discover_site_urls("acme.com", max_pages=50, sections_out=sections)
+    paths = set(_paths(urls))
+    assert "/seo" in paths
+    assert "/email-marketing" in paths
+    assert "/make-best-h1-tags-perfect-seo" in paths
+    by_path = {urlparse(u).path: sections.get(u) for u in urls}
+    assert by_path["/seo"] == "page"
+    assert by_path["/make-best-h1-tags-perfect-seo"] == "post"
+
+
+@pytest.mark.asyncio
 async def test_index_fallback_runs_when_the_site_blocks_discovery(monkeypatch):
     """A WAF-blocked site is exactly what the fallback exists for."""
     async def blocked(url, *, timeout=20.0, follow=True):

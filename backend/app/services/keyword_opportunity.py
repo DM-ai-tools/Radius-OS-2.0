@@ -70,96 +70,210 @@ def prefer_present_year(text: str, *, now: int | None = None) -> str:
     return re.sub(r"\s+", " ", cleaned).strip(" -–—|,")
 
 
-def detect_intent(keyword: str, existing: str | None = None) -> str:
-    """Heuristic search intent when providers omit it.
+VALID_INTENTS = ("informational", "commercial", "transactional", "navigational")
+VALID_FUNNELS = ("TOFU", "MOFU", "BOFU")
 
-    Prefers provider intents (Ahrefs) when present, normalized to:
-    informational | commercial | transactional | navigational.
+_PROVIDER_INTENT_ALIASES = {
+    "info": "informational",
+    "informational": "informational",
+    "commercial": "commercial",
+    "investigation": "commercial",
+    "transactional": "transactional",
+    "transaction": "transactional",
+    "navigational": "navigational",
+    "navigation": "navigational",
+    "branded": "navigational",
+    "brand": "navigational",
+    "local": "commercial",
+}
+
+
+def normalize_provider_intent(raw: Any) -> str | None:
+    """A provider's intent label mapped onto the four valid values, else None.
+
+    An unexpected label is never passed through as an intent: None lets the
+    keyword-text heuristic decide instead.
     """
-    raw = str(existing or "").strip().lower()
-    if raw and raw not in ("", "mixed", "none", "—", "-", "unknown"):
-        # Ahrefs may return branded/local or multi-label strings
-        aliases = {
-            "info": "informational",
-            "informational": "informational",
-            "commercial": "commercial",
-            "transactional": "transactional",
-            "navigational": "navigational",
-            "branded": "navigational",
-            "brand": "navigational",
-            "local": "commercial",
-        }
-        for token in re.split(r"[,;/|\s]+", raw):
-            mapped = aliases.get(token)
-            if mapped:
-                return mapped
-        if raw in aliases:
-            return aliases[raw]
-        return raw
-    k = _norm(keyword)
-    _GEO = (
-        "melbourne",
-        "sydney",
-        "brisbane",
-        "perth",
-        "adelaide",
-        "gold coast",
-        "near me",
-        "australia",
-        "auckland",
-        "wellington",
-    )
-    _SERVICE = (
-        "seo",
-        "sem",
-        "ppc",
-        "ads",
-        "adwords",
-        "marketing",
-        "agency",
-        "web design",
-        "web development",
-        "website",
-        "aeo",
-        "geo",
-    )
-    if any(g in k for g in _GEO) and any(s in k for s in _SERVICE):
-        # Local service queries are commercial unless clearly educational.
-        if any(x in k for x in ("what is", "what are", "how to", "guide", "meaning", "definition")):
-            return "informational"
-        if any(x in k for x in ("buy", "pricing", "price", "cost", "hire", "quote")):
-            return "transactional"
-        return "commercial"
-    if any(
-        x in k
-        for x in (
-            "buy",
-            "pricing",
-            "price",
-            "cost",
-            "hire",
-            "quote",
-            "near me",
-            "agency",
-            "services",
-            "company",
-            "consultant",
-        )
-    ):
-        if any(x in k for x in ("what is", "what are", "guide", "how to", "meaning")):
-            return "informational"
-        if any(x in k for x in ("buy", "pricing", "price", "cost", "hire", "quote")):
-            return "transactional"
-        return "commercial"
-    if any(x in k for x in ("best", "top", "vs", "versus", "alternative", "review", "compare")):
-        return "commercial"
-    if any(x in k for x in ("how to", "what is", "what are", "guide", "tips", "examples")):
-        return "informational"
-    if re.search(r"\b(login|sign in|signin|portal|dashboard|my account|customer portal)\b", k):
-        return "navigational"
-    if re.search(r"\b(official site|official website|contact number|phone number)\b", k):
-        return "navigational"
-    return "informational"
+    text = str(raw or "").strip().lower()
+    if not text or text in ("mixed", "none", "unknown", "n/a", "—", "-"):
+        return None
+    if text in _PROVIDER_INTENT_ALIASES:
+        return _PROVIDER_INTENT_ALIASES[text]
+    for token in re.split(r"[,;/|\s]+", text):
+        mapped = _PROVIDER_INTENT_ALIASES.get(token)
+        if mapped:
+            return mapped
+    return None
+
+
+def _phrases(*phrases: str) -> re.Pattern[str]:
+    """Whole-word match for any phrase: "cost" must not match "costume"."""
+    body = "|".join(re.escape(p) for p in sorted(phrases, key=len, reverse=True))
+    return re.compile(rf"(?<![a-z0-9])(?:{body})(?![a-z0-9])")
+
+
+_NAVIGATIONAL_RE = _phrases(
+    "login", "log in", "sign in", "signin", "portal", "dashboard", "my account",
+    "customer portal", "official site", "official website", "contact number", "phone number",
+)
+# A price question is research (consideration), not a purchase.
+_PRICE_RESEARCH_RE = re.compile(
+    r"(?<![a-z0-9])(?:how much"
+    r"|(?:average|typical|estimated|approximate) (?:cost|costs|price|prices|pricing)"
+    r"|(?:cost|costs|price|prices) (?:of|for|to)"
+    r"|what (?:does|do|will|would|should)\b.*\b(?:cost|charge)"
+    r"|what (?:is|are) the (?:cost|costs|price|prices)"
+    r"|worth it|worth the (?:money|cost|price)"
+    r"|(?:is|are)\b.*\bworth)(?![a-z0-9])"
+)
+_CHOOSING_RE = _phrases(
+    "how to choose", "how to pick", "how to find", "how to hire", "how to select", "choosing",
+    "which is better", "what to look for", "questions to ask", "should i", "is it better",
+    "better than", "pros and cons", "do i need", "red flags",
+)
+_COMPARISON_RE = _phrases(
+    "vs", "versus", "compare", "comparison", "compared", "alternative", "alternatives",
+    "difference between", "review", "reviews", "rating", "ratings", "rated", "testimonials",
+)
+_BEST_RE = _phrases("best", "top")
+_EDUCATIONAL_RE = _phrases(
+    "what is", "what are", "what does", "how to", "how do", "how does", "how can", "why",
+    "guide", "tutorial", "tutorials", "meaning", "definition", "define", "explained",
+    "example", "examples", "tips", "ideas", "learn", "learning", "beginner", "beginners",
+    "basics", "course", "courses", "checklist", "template", "templates", "best practice",
+    "best practices", "history", "statistics", "stats",
+)
+# After "best"/"top", these make the query educational ("best way to learn seo").
+_BEST_EDUCATIONAL_RE = _phrases(
+    "way", "ways", "time", "practice", "practices", "tips", "examples", "ideas", "books",
+    "blogs", "podcasts", "courses", "course", "guide", "guides", "tutorial", "tutorials",
+    "free", "to learn", "for beginners",
+)
+_BUYING_RE = _phrases(
+    "buy", "hire", "quote", "get a quote", "free quote", "pricing", "price", "prices",
+    "package", "packages", "book a", "book an", "booking", "for sale", "demo", "free trial",
+    "consultation", "sign up", "signup", "subscribe", "cheap", "affordable", "fees",
+    "discount", "coupon",
+)
+_COST_RE = _phrases("cost", "costs")
+_NEAR_ME_RE = _phrases("near me", "nearby")
+_GEO_RE = _phrases(
+    "melbourne", "sydney", "brisbane", "perth", "adelaide", "gold coast", "sunshine coast",
+    "canberra", "hobart", "darwin", "geelong", "newcastle", "wollongong", "australia",
+    "auckland", "wellington", "new zealand",
+)
+_SERVICE_TERM_RE = _phrases(
+    "seo", "sem", "ppc", "ads", "adwords", "marketing", "web design", "web development",
+    "website", "aeo", "geo",
+    # Full service names: "search engine optimisation perth" is the same local
+    # buyer search as "seo perth" and must not fall back to the provider's label.
+    "search engine optimisation", "search engine optimization", "pay per click",
+    "paid search", "google ads", "website design", "website development",
+    "web designer", "web developer",
+)
+# "<service> management" is asking for the managed service ("ppc management",
+# "google ads management"), not about managing it yourself.
+_MANAGED_SERVICE_RE = re.compile(
+    r"(?<![a-z0-9])(?:seo|sem|ppc|adwords|google ads|pay per click|paid search|social media"
+    r"|email marketing|search engine marketing|facebook ads|meta ads)"
+    r"\s+(?:campaign\s+|account\s+|ads?\s+|advertising\s+)?management(?![a-z0-9])"
+)
+_PROVIDER_RE = _phrases(
+    "agency", "agencies", "services", "service", "company", "companies", "consultant",
+    "consultants", "consultancy", "specialist", "specialists", "expert", "experts", "firm",
+    "firms", "provider", "providers", "freelancer", "freelancers",
+)
+
+# signal -> (intent, funnel). One table, so intent and funnel never disagree
+# about what the same words mean.
+_SIGNALS: dict[str, tuple[str, str]] = {
+    "client_brand": ("navigational", "BOFU"),
+    "navigational_term": ("navigational", "BOFU"),
+    "price_or_value_research": ("commercial", "MOFU"),
+    "choosing_between_options": ("commercial", "MOFU"),
+    "best_educational": ("informational", "TOFU"),
+    "best_of_list": ("commercial", "MOFU"),
+    "comparison_or_review": ("commercial", "MOFU"),
+    "educational": ("informational", "TOFU"),
+    "buying_term": ("transactional", "BOFU"),
+    "local_near_me": ("commercial", "BOFU"),
+    "cost_mention": ("commercial", "MOFU"),
+    "local_service_search": ("commercial", "BOFU"),
+    "provider_search": ("commercial", "BOFU"),
+    "default": ("informational", "TOFU"),
+}
+
+
+def keyword_signal(keyword: str, brand_tokens: set[str] | frozenset[str] | None = None) -> str:
+    """The strongest intent/funnel signal in the keyword text ("default" when none).
+
+    Signal words count only in a whole-word, buying or research sense: "cost" is
+    not "costume", a price question is research, and "best way to learn seo" is
+    educational rather than a best-of list.
+    """
+    k = _norm(str(keyword or ""))
+    if brand_tokens and set(re.findall(r"[a-z0-9]+", k)) & {t.lower() for t in brand_tokens}:
+        return "client_brand"
+    if _NAVIGATIONAL_RE.search(k):
+        return "navigational_term"
+    if _PRICE_RESEARCH_RE.search(k):
+        return "price_or_value_research"
+    if _CHOOSING_RE.search(k):
+        return "choosing_between_options"
+    best = _BEST_RE.search(k)
+    if best:
+        if _BEST_EDUCATIONAL_RE.search(k[best.end():]) or _EDUCATIONAL_RE.search(k):
+            return "best_educational"
+        return "best_of_list"
+    if _COMPARISON_RE.search(k):
+        return "comparison_or_review"
+    if _EDUCATIONAL_RE.search(k):
+        return "educational"
+    if _BUYING_RE.search(k):
+        return "buying_term"
+    if _NEAR_ME_RE.search(k):
+        return "local_near_me"
+    if _COST_RE.search(k):
+        return "cost_mention"
+    if _GEO_RE.search(k) and (_SERVICE_TERM_RE.search(k) or _PROVIDER_RE.search(k)):
+        return "local_service_search"
+    if _PROVIDER_RE.search(k) or _MANAGED_SERVICE_RE.search(k):
+        return "provider_search"
+    return "default"
+
+
+def intent_with_evidence(
+    keyword: str,
+    existing: str | None = None,
+    *,
+    brand_tokens: set[str] | frozenset[str] | None = None,
+) -> tuple[str, str, str]:
+    """(intent, source, evidence). source is "provider" or "heuristic".
+
+    The client's own brand in the query makes it navigational whatever a
+    provider said; otherwise a valid provider label wins, and an unmappable one
+    is ignored rather than passed through.
+    """
+    signal = keyword_signal(keyword, brand_tokens)
+    if signal == "client_brand":
+        return "navigational", "heuristic", signal
+    provider = normalize_provider_intent(existing)
+    if provider:
+        return provider, "provider", "provider_label"
+    return _SIGNALS[signal][0], "heuristic", signal
+
+
+def detect_intent(
+    keyword: str,
+    existing: str | None = None,
+    *,
+    brand_tokens: set[str] | frozenset[str] | None = None,
+) -> str:
+    """Search intent: one of informational | commercial | transactional | navigational.
+
+    The single intent detector for every keyword row (see ``intent_with_evidence``).
+    """
+    return intent_with_evidence(keyword, existing, brand_tokens=brand_tokens)[0]
 
 
 INTENT_LABELS = {
@@ -220,24 +334,44 @@ def stamp_keyword_intent(row: dict[str, Any]) -> dict[str, Any]:
     return {**row, "intent": intent}
 
 
+_FUNNEL_FROM_INTENT = {
+    "transactional": "BOFU",
+    "navigational": "BOFU",
+    "commercial": "MOFU",
+    "informational": "TOFU",
+}
+
+
+def funnel_with_evidence(
+    keyword: str,
+    intent: str | None = None,
+    *,
+    brand_tokens: set[str] | frozenset[str] | None = None,
+) -> tuple[str, str]:
+    """(stage, basis). basis is the text signal, "from_intent", or "default".
+
+    Text evidence decides first, including middle-of-funnel signals in their own
+    right (comparisons, alternatives, reviews, "worth it", choosing between
+    options, what to look for, price questions). Only without text evidence does
+    the intent decide, and an informational query with no evidence at all is
+    TOFU by default, which the basis records as "default".
+    """
+    signal = keyword_signal(keyword, brand_tokens)
+    if signal != "default":
+        return _SIGNALS[signal][1], signal
+    i = str(intent or "").strip().lower()
+    if i in ("transactional", "navigational", "commercial"):
+        return _FUNNEL_FROM_INTENT[i], "from_intent"
+    return "TOFU", "default"
+
+
 def detect_funnel(keyword: str, intent: str | None = None) -> str:
     """Per-keyword TOFU/MOFU/BOFU stage — the canonical heuristic shared by every
     place a keyword row is built (seeding, opportunity ranking, clustering), so a
     keyword doesn't get a different funnel label depending on which stage of the
-    pipeline last touched it. Text patterns take priority over the coarser
-    intent-only fallback: e.g. "beginner" is TOFU even under commercial intent.
+    pipeline last touched it. See ``funnel_with_evidence``.
     """
-    k = _norm(str(keyword or ""))
-    i = str(intent or "").strip().lower()
-    if any(x in k for x in ("what is", "what are", "guide to", "beginner", "basics")):
-        return "TOFU"
-    if any(x in k for x in ("pricing", "price", "buy", "hire", "demo", "cost")):
-        return "BOFU"
-    if i == "transactional":
-        return "BOFU"
-    if i == "commercial":
-        return "MOFU"
-    return "TOFU"
+    return funnel_with_evidence(keyword, intent)[0]
 
 
 def is_broad_head_term(keyword: str, products: list[str] | None = None) -> bool:
@@ -527,6 +661,8 @@ def merge_keyword_metrics(
                 "serp_titles": [],
                 "match_class": None,
                 "seed": None,
+                "service": None,
+                "service_id": None,
             },
         )
         if provider not in cur["sources"]:
@@ -540,6 +676,9 @@ def merge_keyword_metrics(
                 cur["match_class"] = incoming_class
         if row.get("seed") and not cur.get("seed"):
             cur["seed"] = row.get("seed")
+        if row.get("service") and not cur.get("service"):
+            cur["service"] = row.get("service")
+            cur["service_id"] = row.get("service_id")
         vol = row.get("volume")
         kd = row.get("difficulty")
         if provider == "ahrefs":
@@ -560,6 +699,10 @@ def merge_keyword_metrics(
                 cur["difficulty_dataforseo"] = kd
             if row.get("trend"):
                 cur["trend"] = row.get("trend")
+            # DataForSEO labels intent too. Dropping it here meant Labs rows
+            # reached scoring unlabelled even though the provider had answered.
+            if row.get("intent") and not cur.get("intent"):
+                cur["intent"] = row.get("intent")
         if row.get("cpc") is not None:
             cur["cpc"] = row.get("cpc")
         if row.get("gap_flag"):

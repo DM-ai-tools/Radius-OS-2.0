@@ -606,8 +606,17 @@ async def crawl_site(url: str, *, max_pages: int | None = None) -> dict[str, Any
     home_blocked = (home_probe.get("error") or "") == "bot_challenge_blocked"
 
     if home_blocked:
-        page_urls = await discover_site_urls(url, max_pages=max_pages)
+        sections: dict[str, str] = {}
+        page_urls = await discover_site_urls(
+            url, max_pages=max_pages, sections_out=sections
+        )
         if len(page_urls) >= 2:
+            from_sitemap = any(sections.values())
+            origin = (
+                "the XML sitemap"
+                if from_sitemap
+                else "Google's index (site: search) plus any open robots/sitemap URLs"
+            )
             return {
                 "pages_found": len(page_urls),
                 "indexable": len(page_urls),
@@ -621,7 +630,7 @@ async def crawl_site(url: str, *, max_pages: int | None = None) -> dict[str, Any
                 "note": (
                     f"Live HTML is blocked by a SiteGround / captcha challenge, so tags "
                     f"could not be fetched. Counted {len(page_urls)} unique pages from "
-                    f"Google's index (site: search) plus any open robots/sitemap URLs."
+                    f"{origin}."
                 ),
                 "status_samples": [{"url": u, "status": 202} for u in page_urls[:20]],
                 "discovered_urls": page_urls[:80],
@@ -1316,15 +1325,22 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
     robots_text = str(robots.get("text") or "")
     if r_status == 200 and robots_text:
         findings_crawl.append("robots.txt reachable")
-        if re.search(r"disallow:\s*/\s*$", robots_text, re.IGNORECASE | re.MULTILINE):
-            findings_crawl.append("WARNING: robots.txt contains Disallow: / for a user-agent")
+        blocked_agents = robots_full_disallow_agents(robots_text)
+        if {"*", "googlebot"} & set(blocked_agents):
+            findings_crawl.append(
+                "WARNING: robots.txt disallows the whole site for "
+                + ", ".join(a for a in blocked_agents if a in ("*", "googlebot"))
+            )
             priority_fixes.append(
                 {
                     "priority": "Critical",
-                    "issue": "robots.txt may block entire site",
-                    "fix": "Remove blanket Disallow: / unless intentionally staging",
+                    "issue": "robots.txt blocks the entire site for search engines",
+                    "fix": "Remove the blanket Disallow: / for User-agent: * / Googlebot unless this is staging",
                 }
             )
+        elif blocked_agents:
+            # Blocking named bots (scrapers, AI crawlers) is a choice, not a fault.
+            findings_crawl.append(f"robots.txt fully blocks {len(blocked_agents)} named bot(s): {', '.join(blocked_agents[:6])}")
         sitemap_refs = re.findall(r"(?im)^sitemap:\s*(\S+)", robots_text)
         if sitemap_refs:
             findings_crawl.append(f"Sitemap referenced in robots.txt ({len(sitemap_refs)})")
@@ -1363,6 +1379,11 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
     html, home_meta = await fetch_page_html(seed)
     home_status = int(home_meta.get("status_code") or 0)
     final_url = str(home_meta.get("final_url") or seed)
+    if html and home_status not in (0, 200) and home_meta.get("source") != "firecrawl":
+        # A bot-challenge or error page (often itself noindex) is not the homepage;
+        # reading it produced false "homepage is noindex / no canonical" findings.
+        html = ""
+        home_meta["error"] = home_meta.get("error") or f"homepage answered {home_status} (blocked or challenge)"
     if html:
         homepage_fetched = True
         findings_index.append(f"Homepage status {home_status} ({home_meta.get('source')})")
@@ -1467,6 +1488,7 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
     # all (performance) get score=None, never a guessed number — per this
     # skill's own rule: a confident score on an unmeasured category is worse
     # than an admitted gap.
+    sitemap_ok = sitemap_audit.get("status") == "available"
     crawl_score = 70 if sitemap_ok and "robots.txt reachable" in findings_crawl else 45
     if any("WARNING" in f for f in findings_crawl):
         crawl_score = min(crawl_score, 50)
@@ -1527,6 +1549,36 @@ async def run_technical_seo_audit(url: str, *, display_name: str) -> dict[str, A
     }
 
 
+def robots_full_disallow_agents(robots_text: str) -> list[str]:
+    """User-agents (lowercase) whose group disallows "/" with no "Allow: /" back.
+
+    robots.txt groups are consecutive User-agent lines followed by their rules; a
+    "Disallow: /" under a named scraper does not affect Google.
+    """
+    agents: list[str] = []
+    blocked: list[str] = []
+    rules: dict[str, list[tuple[str, str]]] = {}
+    in_rules = False
+    for raw in (robots_text or "").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if ":" not in line:
+            continue
+        key, value = (part.strip() for part in line.split(":", 1))
+        key = key.lower()
+        if key == "user-agent":
+            if in_rules:
+                agents, in_rules = [], False
+            agents.append(value.lower())
+        elif key in ("allow", "disallow"):
+            in_rules = True
+            for agent in agents:
+                rules.setdefault(agent, []).append((key, value))
+    for agent, items in rules.items():
+        if ("disallow", "/") in items and not any(k == "allow" and v in ("/", "/*") for k, v in items):
+            blocked.append(agent)
+    return blocked
+
+
 def find_duplicate_field(pages: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     """Screaming-Frog-style duplicate report: group pages sharing the same
     normalized value for `key` (title / meta_description), flag any group with
@@ -1572,6 +1624,8 @@ def parse_pagespeed_response(data: dict[str, Any]) -> dict[str, Any]:
         inp_ms, inp_cat = _psi_metric(metrics, "INTERACTION_TO_NEXT_PAINT")
         if inp_ms is None:
             inp_ms, inp_cat = _psi_metric(metrics, "FIRST_INPUT_DELAY_MS")
+        fcp_ms, fcp_cat = _psi_metric(metrics, "FIRST_CONTENTFUL_PAINT_MS")
+        ttfb_ms, ttfb_cat = _psi_metric(metrics, "EXPERIMENTAL_TIME_TO_FIRST_BYTE")
         field = {
             "lcp_ms": lcp_ms,
             "lcp_category": lcp_cat,
@@ -1579,6 +1633,11 @@ def parse_pagespeed_response(data: dict[str, Any]) -> dict[str, Any]:
             "inp_category": inp_cat,
             "cls": (cls_x100 / 100) if cls_x100 is not None else None,
             "cls_category": cls_cat,
+            # FCP and TTFB are diagnostic field metrics (not part of the CWV pass/fail).
+            "fcp_ms": fcp_ms,
+            "fcp_category": fcp_cat,
+            "ttfb_ms": ttfb_ms,
+            "ttfb_category": ttfb_cat,
             "overall_category": loading_exp.get("overall_category"),
         }
 
@@ -1587,11 +1646,38 @@ def parse_pagespeed_response(data: dict[str, Any]) -> dict[str, Any]:
     perf = (lh.get("categories") or {}).get("performance") or {}
     audits = lh.get("audits") or {}
     if perf.get("score") is not None:
+
+        def _num(key: str) -> float | None:
+            return (audits.get(key) or {}).get("numericValue")
+
+        def _items(key: str) -> list[dict[str, Any]]:
+            details = (audits.get(key) or {}).get("details") or {}
+            return [i for i in (details.get("items") or []) if isinstance(i, dict)]
+
+        def _saving_bytes(key: str) -> float:
+            details = (audits.get(key) or {}).get("details") or {}
+            return float(details.get("overallSavingsBytes") or 0)
+
         lab = {
             "performance_score": round(float(perf["score"]) * 100),
-            "lcp_ms": (audits.get("largest-contentful-paint") or {}).get("numericValue"),
-            "cls": (audits.get("cumulative-layout-shift") or {}).get("numericValue"),
-            "tbt_ms": (audits.get("total-blocking-time") or {}).get("numericValue"),
+            "lcp_ms": _num("largest-contentful-paint"),
+            "cls": _num("cumulative-layout-shift"),
+            "tbt_ms": _num("total-blocking-time"),
+            # Lab-only diagnostics: what makes the page slow in a controlled run.
+            "fcp_ms": _num("first-contentful-paint"),
+            "ttfb_ms": _num("server-response-time"),
+            "speed_index_ms": _num("speed-index"),
+            "total_bytes": _num("total-byte-weight"),
+            "render_blocking": [str(i.get("url")) for i in _items("render-blocking-resources") if i.get("url")][:15],
+            "render_blocking_savings_ms": (
+                ((audits.get("render-blocking-resources") or {}).get("details") or {}).get("overallSavingsMs")
+            ),
+            "image_savings_bytes": sum(
+                _saving_bytes(k) for k in ("uses-optimized-images", "modern-image-formats", "uses-responsive-images")
+            ),
+            "third_party_count": len(_items("third-party-summary")),
+            "unused_js_bytes": _saving_bytes("unused-javascript"),
+            "unused_css_bytes": _saving_bytes("unused-css-rules"),
         }
 
     passes: bool | None = None
@@ -1603,7 +1689,7 @@ def parse_pagespeed_response(data: dict[str, Any]) -> dict[str, Any]:
     return {"field": field, "lab": lab, "passes_core_web_vitals": passes}
 
 
-async def run_cwv_measurement(url: str, *, display_name: str) -> dict[str, Any]:
+async def run_cwv_measurement(url: str, *, display_name: str, strategy: str = "mobile") -> dict[str, Any]:
     """Core Web Vitals field/lab data per the cwv-measurement skill (mock-safe).
 
     Division of labour vs. technical-seo: this measures and diagnoses; the
@@ -1622,7 +1708,7 @@ async def run_cwv_measurement(url: str, *, display_name: str) -> dict[str, Any]:
         return {
             "site": domain,
             "display_name": display_name,
-            "strategy": "mobile",
+            "strategy": strategy,
             "field_data_available": True,
             "field": {
                 "lcp_ms": 2350,
@@ -1641,13 +1727,13 @@ async def run_cwv_measurement(url: str, *, display_name: str) -> dict[str, Any]:
 
     import httpx
 
-    params: dict[str, str] = {"url": target, "strategy": "mobile", "category": "performance"}
+    params: dict[str, str] = {"url": target, "strategy": strategy, "category": "performance"}
     if settings.pagespeed_api_key:
         params["key"] = settings.pagespeed_api_key
     base_result = {
         "site": domain,
         "display_name": display_name,
-        "strategy": "mobile",
+        "strategy": strategy,
         "field_data_available": False,
         "field": None,
         "lab": None,
@@ -1655,10 +1741,15 @@ async def run_cwv_measurement(url: str, *, display_name: str) -> dict[str, Any]:
         "source": "pagespeed_insights",
     }
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(
-                "https://www.googleapis.com/pagespeedonline/v5/runPagespeed", params=params
-            )
+        async with httpx.AsyncClient(timeout=60) as client:
+            for attempt in range(2):
+                resp = await client.get(
+                    "https://www.googleapis.com/pagespeedonline/v5/runPagespeed", params=params
+                )
+                # Without an API key PageSpeed's shared quota answers 429; one pause and retry.
+                if resp.status_code != 429 or attempt:
+                    break
+                await asyncio.sleep(8)
         if resp.status_code != 200:
             return {**base_result, "error": f"PageSpeed Insights returned {resp.status_code}"}
         data = resp.json()
@@ -1689,6 +1780,7 @@ async def run_seo_audit(
     commercial_scope: dict[str, Any] | None = None,
     max_pages: int | None = None,
     time_budget_seconds: float | None = None,
+    known_pages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Comprehensive SEO audit across discovered site pages (sitemap + crawl).
 
@@ -2228,17 +2320,32 @@ async def run_seo_audit(
     if home_blocked:
         from app.integrations.site_research import research_ready, research_site_crawl
 
+        sections: dict[str, str] = {}
+        sitemap_read: dict[str, int] = {}
         indexed = await discover_site_urls(
             url if url.startswith("http") else f"https://{domain}",
             max_pages=max(max_pages * 3, max_pages),
+            sections_out=sections,
+            sitemap_read=sitemap_read,
         )
-        if len(indexed) >= 2:
-            from app.services.page_clusters import prioritize_urls_for_audit
+        live_sitemap = int(sitemap_read.get("documents") or 0) > 0
+        if len(indexed) >= 2 or known_pages:
+            from app.services.page_clusters import merge_known_sitemap_urls, prioritize_urls_for_audit
 
+            indexed = merge_known_sitemap_urls(
+                indexed,
+                sections,
+                known_pages,
+                max_pages=2000,
+                live_sitemap=live_sitemap,
+            )
+        if len(indexed) >= 2:
+            # This branch does not fetch HTML, so the live-audit page cap must
+            # not drop sitemap URLs the cluster chips are counting.
             indexed = prioritize_urls_for_audit(
                 indexed,
                 commercial=commercial,
-                max_pages=max_pages,
+                max_pages=max(max_pages, min(len(indexed), 2000)),
                 home_url=url if url.startswith("http") else f"https://{domain}",
             )
             pages_list = [
@@ -2247,7 +2354,11 @@ async def run_seo_audit(
                     "path": _path_label(u),
                     "title": _path_label(u),
                     "status": 202,
-                    "status_label": "WAF blocked — URL from Google index",
+                    "status_label": (
+                        "WAF blocked — URL from XML sitemap"
+                        if sections.get(u)
+                        else "WAF blocked — URL from Google index"
+                    ),
                     "overall_score": 0,
                     "score_band": "Not measured",
                     "critical": [],
@@ -2259,9 +2370,16 @@ async def run_seo_audit(
                     ],
                     "opportunities": [],
                     "passing": [],
+                    "sitemap_section": sections.get(u) or "",
                 }
                 for u in indexed
             ]
+            if live_sitemap:
+                listed_from = "the XML sitemap"
+            elif any(sections.values()):
+                listed_from = "the saved XML sitemap"
+            else:
+                listed_from = "Google's index"
             return _done({
                 "site": domain,
                 "display_name": display_name,
@@ -2274,7 +2392,7 @@ async def run_seo_audit(
                     {
                         "issue": (
                             f"SiteGround/captcha blocked live HTML. "
-                            f"{len(pages_list)} pages listed from Google's index."
+                            f"{len(pages_list)} pages listed from {listed_from}."
                         ),
                         "ref": domain,
                     }
@@ -2635,7 +2753,7 @@ async def discover_competitors(
             {"name": f"{vertical} Category Leader", "url": f"https://leader-{slug}.example", "source": "skill"},
         ]
 
-    from app.integrations.llm import _skill_chat
+    from app.integrations.llm import _openrouter_chat
     from app.integrations.web_fetch import (
         fetch_url,
         is_non_business_host,
@@ -2696,57 +2814,93 @@ async def discover_competitors(
         '{"competitors":[{"name":"Company","url":"https://company.com"}]}'
     )
 
-    passes = [
-        (
-            f"Company: {display_name}\nDomain: {client_host}\nResolved URL: {resolved}\n"
-            f"Industry / vertical focus: {industry_focus}\n"
-            f"{hint_line}"
-            f"Page title: {parser.title}\n"
-            f"Meta: {parser.meta.get('description', '') if getattr(parser, 'meta', None) else ''}\n"
-            f"Fetch error: {fetched.get('error')}\n"
-            f"Site excerpt:\n{excerpt or '(empty — use company name + industry knowledge)'}\n\n"
-            "Identify 8–10 SAME-INDUSTRY competitors across local, direct, and aspirational tiers. "
-            "Peers means businesses competing for the same customers in this vertical "
-            "(stores, clinics, manufacturers, SaaS products, hotels, agencies, etc. — "
-            "whatever THIS client is). "
-            'Return JSON only: {"competitors":[{"name":"...","url":"https://...","rationale":"why competing"}]}'
-        ),
-        (
-            f"Expand the set for {display_name} ({client_host}), industry: {industry_focus}.\n"
-            f"Already have ({len(comps)}): {[c['url'] for c in comps]}\n"
-            "Add MORE real competitors using these angles (adapt wording to the vertical):\n"
-            f'- "{industry_focus}" peers / providers in the same country/region\n'
-            f'- "{display_name} alternatives" / "vs" style peers\n'
-            f"- Category leaders in {industry_focus} (the businesses themselves, not Clutch/G2/review directories)\n"
-            f"- Larger aspirational leaders one level above in {industry_focus}\n"
-            "Do NOT return unrelated marketing agencies unless the client is an agency. "
-            "Return at least 8 ADDITIONAL competitors not in the already-have list. "
-            'JSON: {"competitors":[{"name":"...","url":"https://..."}]}'
-        ),
-        (
+    # Built inside the loop. These used to be formatted once, up front, while
+    # the set was still empty — every follow-up then said "already have 0" and
+    # the model repeated the same handful. Deduping that reply left the scan
+    # stuck at however many the first pass happened to return.
+    def _pass_prompt(index: int, have: list[dict[str, str]]) -> str:
+        known = [c["url"] for c in have]
+        if index == 0:
+            return (
+                f"Company: {display_name}\nDomain: {client_host}\nResolved URL: {resolved}\n"
+                f"Industry / vertical focus: {industry_focus}\n"
+                f"{hint_line}"
+                f"Page title: {parser.title}\n"
+                f"Meta: {parser.meta.get('description', '') if getattr(parser, 'meta', None) else ''}\n"
+                f"Fetch error: {fetched.get('error')}\n"
+                f"Site excerpt:\n{excerpt or '(empty — use company name + industry knowledge)'}\n\n"
+                "Identify 8–10 SAME-INDUSTRY competitors across local, direct, and aspirational tiers. "
+                "Peers means businesses competing for the same customers in this vertical "
+                "(stores, clinics, manufacturers, SaaS products, hotels, agencies, etc. — "
+                "whatever THIS client is). "
+                'Return JSON only: {"competitors":[{"name":"...","url":"https://...","rationale":"why competing"}]}'
+            )
+        if index == 1:
+            return (
+                f"Expand the set for {display_name} ({client_host}), industry: {industry_focus}.\n"
+                f"Already have ({len(known)}): {known}\n"
+                "Add MORE real competitors using these angles (adapt wording to the vertical):\n"
+                f'- "{industry_focus}" peers / providers in the same country/region\n'
+                f'- "{display_name} alternatives" / "vs" style peers\n'
+                f"- Category leaders in {industry_focus} (the businesses themselves, not Clutch/G2/review directories)\n"
+                f"- Larger aspirational leaders one level above in {industry_focus}\n"
+                "Do NOT return unrelated marketing agencies unless the client is an agency. "
+                "Return at least 8 ADDITIONAL competitors not in the already-have list. "
+                'JSON: {"competitors":[{"name":"...","url":"https://..."}]}'
+            )
+        return (
             f"Still need more competitors for {display_name} ({client_host}). "
-            f"Have only {len(comps)} so far: {[c['name'] for c in comps]}.\n"
+            f"Have only {len(have)} so far: {[c['name'] for c in have]}.\n"
             f"Industry/services vertical: {industry_focus}.\n"
             "List 8 well-known real businesses that compete for the same customers in this "
-            "exact vertical. Include homepage URLs. No duplicates. "
+            "exact vertical. Include homepage URLs. Do not repeat any name or domain already listed. "
             'JSON: {"competitors":[{"name":"...","url":"https://..."}]}'
-        ),
-    ]
+        )
 
+    async def _reachable(batch: list[dict[str, str]]) -> list[dict[str, str]]:
+        if not batch:
+            return []
+
+        async def _alive(comp: dict[str, str]) -> bool:
+            try:
+                page = await fetch_url(comp["url"], timeout=8)
+            except Exception as exc:  # noqa: BLE001
+                log.info(
+                    "discover_competitors_reachability_failed",
+                    url=comp["url"],
+                    error=str(exc)[:160],
+                )
+                return True
+            if site_is_dead(page):
+                log.info(
+                    "discover_competitors_dropped_dead_site",
+                    url=comp["url"],
+                    error=page.get("error"),
+                    status=page.get("status_code"),
+                )
+                return False
+            return True
+
+        flags = await asyncio.gather(*[_alive(c) for c in batch])
+        return [c for c, ok in zip(batch, flags) if ok]
+
+    live: list[dict[str, str]] = []
     last_error = ""
     last_text = ""
-    for i, user_prompt in enumerate(passes):
-        if len(comps) >= 8 and i > 0:
+    # Floor is the same 6 the phase promises. Later passes run while we are
+    # under it, counted on sites that actually respond — not on names the
+    # model repeated.
+    for i in range(3):
+        if i > 0 and len(live) >= 6:
             break
-        # Always run pass 0; later passes only if thin
-        if i > 0 and len(comps) >= 6:
+        if len(live) >= 8:
             break
         text = None
         try:
-            text = await _skill_chat(
+            text = await _openrouter_chat(
                 system=system,
-                user=user_prompt,
-                model=settings.skill_model,
+                user=_pass_prompt(i, live),
+                model=settings.competitor_model,
                 max_tokens=4096,
             )
         except Exception as exc:  # noqa: BLE001
@@ -2754,52 +2908,37 @@ async def discover_competitors(
             log.warning(
                 "discover_competitors_skill_failed",
                 pass_n=i,
-                model=settings.skill_model,
+                model=settings.competitor_model,
                 error=last_error,
                 domain=client_host,
             )
         if not text:
             if not last_error:
-                last_error = "LLM returned empty content (check ANTHROPIC_API_KEY and SKILL_MODEL)"
+                last_error = (
+                    "LLM returned empty content "
+                    "(check OPENROUTER_API_KEY and COMPETITOR_MODEL)"
+                )
             continue
         last_text = text
         last_error = ""
         before = len(comps)
         for row in extract_competitor_rows(text):
             _add(row["name"], row["url"])
+        fresh = await _reachable(comps[before:])
+        live.extend(fresh)
         log.info(
             "discover_competitors_skill_pass",
             pass_n=i,
             added=len(comps) - before,
-            total=len(comps),
+            live=len(live),
             domain=client_host,
         )
 
-    if comps:
-        async def _alive(comp: dict[str, str]) -> bool:
-            try:
-                fetched = await fetch_url(comp["url"], timeout=8)
-            except Exception as exc:  # noqa: BLE001
-                log.info("discover_competitors_reachability_failed", url=comp["url"], error=str(exc)[:160])
-                return True
-            if site_is_dead(fetched):
-                log.info(
-                    "discover_competitors_dropped_dead_site",
-                    url=comp["url"],
-                    error=fetched.get("error"),
-                    status=fetched.get("status_code"),
-                )
-                return False
-            return True
-
-        alive = await asyncio.gather(*[_alive(c) for c in comps])
-        comps = [c for c, ok in zip(comps, alive) if ok]
-
-    log.info("discover_competitors_skill", count=len(comps), domain=client_host, error=last_error or None)
-    if not comps:
+    log.info("discover_competitors_skill", count=len(live), domain=client_host, error=last_error or None)
+    if not live:
         snippet = " ".join((last_text or "").split())[:180]
         detail = last_error or (
             f"model reply was not a competitor list ({snippet})" if snippet else "model reply was empty"
         )
         raise RuntimeError(detail)
-    return comps[:10]
+    return live[:10]

@@ -27,6 +27,23 @@ def test_sitemap_skill_file_is_what_the_loader_returns():
     assert phase7_skill_contracts()["seo-sitemap"] == len(text)
 
 
+DATAFORSEO_URL = (
+    "https://github.com/AgriciDaniel/claude-seo/blob/main/skills/seo-dataforseo/SKILL.md"
+)
+
+
+def test_dataforseo_skill_loads_and_points_at_the_api_client():
+    path = PROMPTS_ROOT / "seo-dataforseo" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith(f"<!-- Source: {DATAFORSEO_URL} — MIT -->")
+    assert "name: seo-dataforseo" in text
+    assert "does not connect to the DataForSEO MCP server" in text
+    assert "backend/app/integrations/dataforseo.py" in text
+    assert load_skill_file("seo-dataforseo") == text
+    assert load_skill("seo_dataforseo") == text
+    assert len(text) > 1000
+
+
 def test_comparison_page_type_loads_downloaded_skill_beside_house_contract():
     skill_path = PROMPTS_ROOT / "content_skills" / "competitor-pages.md"
     assert skill_path.is_file()

@@ -29,6 +29,7 @@ from app.services.keyword_relevance import (
     is_url_like,
 )
 from app.services.keyword_seeding import clean_provider_seed
+from app.services.keyword_variants import collapse_close_variants
 
 _STOP = {"the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with"}
 _HEAD_DROP = {
@@ -75,7 +76,7 @@ def _singularize(word: str) -> str:
     return word
 
 
-def _stem_key(kw: str) -> str:
+def _stem_key(kw: str) -> str:  # kept for callers; dedupe uses keyword_variants
     toks = sorted(_singularize(t) for t in _tokens(kw))
     return " ".join(toks)
 
@@ -148,6 +149,7 @@ def _drop(stage: str, row: dict[str, Any], reason: str, excluded: list[dict[str,
             "stage": stage,
             "keyword": row.get("keyword"),
             "reason": reason,
+            "variant_of": row.get("variant_of"),
             "match_class": row.get("match_class"),
             "seed": row.get("seed"),
             "source": row.get("source"),
@@ -188,23 +190,18 @@ def run_keyword_pipeline(
 
     normalize_count = len(working)
 
-    # 3. Remove duplicates (stem; prefer higher volume)
-    by_stem: dict[str, dict[str, Any]] = {}
-    for row in working:
-        kw = str(row.get("keyword") or "")
-        stem = _stem_key(kw) or kw
-        prev = by_stem.get(stem)
-        if not prev:
-            by_stem[stem] = row
-            continue
-        pv = prev.get("volume")
-        cv = row.get("volume")
-        if cv is not None and (pv is None or cv > pv):
-            _drop("dedupe", prev, "lower_volume_duplicate", excluded)
-            by_stem[stem] = row
-        else:
-            _drop("dedupe", row, "lower_volume_duplicate", excluded)
-    working = list(by_stem.values())
+    # 3. Remove duplicates: the same keyword twice, or close variants (one search
+    # worded differently: order, plural, filler words, UK/US spelling, "seo
+    # optimization"). The clearest wording is kept and lists the others.
+    working, folded = collapse_close_variants(working)
+    for row, kept in folded:
+        same_text = _norm(str(row.get("keyword") or "")) == _norm(str(kept.get("keyword") or ""))
+        _drop(
+            "dedupe",
+            {**row, "variant_of": kept.get("keyword")},
+            "lower_volume_duplicate" if same_text else "close_variant",
+            excluded,
+        )
     dedupe_count = len(working)
 
     # 4. Remove noise

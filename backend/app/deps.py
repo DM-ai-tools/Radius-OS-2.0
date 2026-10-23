@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import get_db
 from app.models import RolePermission, User
-from app.security import decode_access_token, parse_uuid
+from app.security import TokenExpired, decode_access_token, parse_uuid
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -42,6 +42,8 @@ async def get_current_user(
     try:
         payload = decode_access_token(creds.credentials)
         user_id = parse_uuid(payload["sub"])
+    except TokenExpired:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
     except (ValueError, KeyError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 

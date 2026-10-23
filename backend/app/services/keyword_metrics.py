@@ -19,6 +19,7 @@ from typing import Any
 from app.config import get_settings
 from app.integrations import dataforseo
 from app.logging_config import get_logger
+from app.services.keyword_opportunity import normalize_provider_intent
 
 log = get_logger("keyword_metrics")
 
@@ -203,8 +204,15 @@ def merge_metrics_into_rows(
         merged["volume_basis"] = "measured" if merged.get("volume") is not None else "unmeasured"
         # Intent is a provider metric under the same rule as volume. Downstream
         # heuristics still fill a blank intent from keyword text; this keeps a
-        # guess distinguishable from a measured label.
-        merged["intent_basis"] = "measured" if merged.get("intent") else "unmeasured"
+        # guess distinguishable from a measured label. Only this response's label
+        # makes a row "measured": an intent the row already held may be a guess.
+        provider_intent = normalize_provider_intent(measured.get("intent"))
+        if provider_intent:
+            merged["intent_basis"] = "measured"
+            merged["provider_intent"] = provider_intent
+        else:
+            merged["intent_basis"] = row.get("intent_basis") or "unmeasured"
+            merged.setdefault("provider_intent", None)
         out.append(merged)
     return out
 
@@ -244,7 +252,8 @@ async def measured_rows_for_pool(
                     "intent_probability": measured.get("intent_probability"),
                     "secondary_intents": measured.get("secondary_intents") or [],
                     "volume_basis": "measured",
-                    "intent_basis": "measured" if measured.get("intent") else "unmeasured",
+                    "intent_basis": "measured" if normalize_provider_intent(measured.get("intent")) else "unmeasured",
+                    "provider_intent": normalize_provider_intent(measured.get("intent")),
                     "source": "dataforseo",
                 }
             )

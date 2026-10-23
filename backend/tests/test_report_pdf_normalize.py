@@ -166,9 +166,15 @@ def test_normalize_content_calendar_nested_months():
         "handoffs": [{"concern": "URL tree", "route_to": "site-architecture"}],
     }
     out = normalize_report_payload("content_strategy_report", payload)
-    assert len(out["content_calendar"]) == 3
-    assert out["content_calendar"][0]["title"] == "Best CRM for startups"
-    assert out["content_calendar"][0]["month"] == "Foundation"
+    assert "executive_summary" not in out
+    assert "summary" not in out
+    titles = [row["title"] for row in out["content_plan"]]
+    assert titles == ["Best CRM for startups", "CRM pricing guide", "CRM integrations"]
+    assert [row["row"] for row in out["content_plan"]] == [1, 2, 3]
+    assert out["content_calendar"][0]["theme"] == "Foundation"
+    assert out["content_calendar"][0]["pieces"] == 2
+    assert "title" not in out["content_calendar"][0]
+    assert "priority_queue" not in out
     assert out["handoffs"][0]["item"] == "URL tree"
     assert out["handoffs"][0]["receiving"] == "site-architecture"
 

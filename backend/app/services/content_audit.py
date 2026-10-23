@@ -71,7 +71,7 @@ async def _competitor_rankings(search_demand: dict[str, Any]) -> list[dict[str, 
 
     sites = [s for s in (search_demand.get("competitor_sites") or []) if isinstance(s, dict)]
     out: list[dict[str, Any]] = []
-    for snap in sites[:3]:
+    for snap in sites[:8]:
         domain = str(snap.get("domain") or snap.get("url") or "")
         if not dataforseo.normalize_target(domain):
             continue
@@ -378,7 +378,12 @@ async def run_content_audit_plan(
         ia_paths[p] = node
 
     priority_kw: dict[str, dict[str, Any]] = {}
-    for row in strategy.get("priority_queue") or strategy.get("priority_pages") or []:
+    for row in (
+        strategy.get("content_plan")
+        or strategy.get("priority_queue")
+        or strategy.get("priority_pages")
+        or []
+    ):
         if not isinstance(row, dict):
             continue
         kw = str(row.get("keyword") or row.get("title") or "").lower().strip()
@@ -608,7 +613,7 @@ async def run_content_audit_plan(
             "striking_distance": "8–20",
             "cannibal_impressions": 50,
         },
-        "skills_used": [PHASE8_SKILL_DIR],
+        "skills_used": [PHASE8_SKILL_DIR, "seo-dataforseo"],
         "skills_loaded": {
             PHASE8_SKILL_DIR: len(load_skill_file(PHASE8_SKILL_DIR) or ""),
             "content_audit": len(load_skill("content_audit") or ""),

@@ -186,6 +186,7 @@ async def run_competitor(
     message: str,
 ) -> list[dict]:
     _ = load_skill("competitor_market_agent")
+    _ = load_skill("seo_dataforseo")
     events: list[dict] = []
     profile = await get_profile(db, client.id)
 

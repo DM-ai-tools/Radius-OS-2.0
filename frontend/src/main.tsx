@@ -6,6 +6,11 @@ import { AuthProvider } from "./auth";
 import "./styles.css";
 import "./theme-classy.css";
 import "./command-center.css";
+import "./deliverables-premium.css";
+import "./cost-tracker.css";
+import "./engine-room.css";
+import "./phase-browser.css";
+import "./client-overview.css";
 
 document.documentElement.classList.add("theme-classy");
 try {

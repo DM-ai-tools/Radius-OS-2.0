@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any
 
@@ -24,7 +24,13 @@ from reportlab.platypus import (
 from app.services.report_export import resolve_report_title
 from app.services.report_pdf_document import render_document_report
 from app.services.report_pdf_site_architecture import render_site_architecture_blueprint
-from app.services.report_pdf_theme import cover_page
+from app.services.report_pdf_theme import (
+    NumberedCanvas,
+    collect_contents,
+    draw_cover,
+    draw_page_frame,
+    stop_collecting,
+)
 
 SPECIAL_RENDERERS = {
     "site_architecture_blueprint": render_site_architecture_blueprint,
@@ -42,10 +48,10 @@ SKIP_KEYS = frozenset(
     }
 )
 
-MAX_CELL_CHARS = 180
-MAX_TABLE_CELL_CHARS = 90
-MAX_LIST_ITEMS = 40
-MAX_TABLE_ROWS = 20
+MAX_CELL_CHARS = 300
+MAX_TABLE_CELL_CHARS = 200
+MAX_LIST_ITEMS = 60
+MAX_TABLE_ROWS = 40
 MAX_DICT_FIELDS = 8
 PREFERRED_LIST_KEYS = (
     "title",
@@ -110,8 +116,12 @@ def _scalar_text(value: Any) -> str:
         return "—"
     if isinstance(value, bool):
         return "Yes" if value else "No"
+    if isinstance(value, int):
+        return f"{value:,}"
     if isinstance(value, float):
-        return f"{value:,.2f}".rstrip("0").rstrip(".")
+        if value.is_integer():
+            return f"{int(value):,}"
+        return f"{value:,.1f}"
     return str(value)
 
 
@@ -305,18 +315,29 @@ def _render_report_section(
     renderer(flow, report, client or {}, show_title=show_title)
 
 
+def _prepared_label(bundle: dict) -> str:
+    exported = bundle.get("exported_at") or ""
+    if not exported:
+        return datetime.now(UTC).strftime("%d %B %Y")
+    try:
+        return datetime.fromisoformat(str(exported).replace("Z", "+00:00")).strftime("%d %B %Y")
+    except ValueError:
+        return str(exported)
+
+
 def build_reports_pdf(bundle: dict, *, single: bool = False) -> bytes:
-    """Build a PDF containing all client reports, or one report when single=True."""
+    """Build a PDF containing all client reports, or one report when single=True.
+
+    Page one is a drawn cover (title, client, date, contents); every later page
+    carries a running header and a "Page X of Y" footer.
+    """
     buf = BytesIO()
     client = bundle.get("client") or {}
     reports: list[dict] = bundle.get("reports") or []
     styles = _styles()
-    first_title = resolve_report_title(reports[0], client) if single and reports else ""
-    doc_title = (
-        first_title
-        if single and reports
-        else f"{client.get('name', 'Client')} — Phase Reports ({len(reports)})"
-    )
+    client_name = str(client.get("name") or "Client")
+    single_title = resolve_report_title(reports[0], client) if single and reports else ""
+    doc_title = single_title if single_title else f"{client_name}: phase reports"
 
     doc = SimpleDocTemplate(
         buf,
@@ -326,77 +347,63 @@ def build_reports_pdf(bundle: dict, *, single: bool = False) -> bytes:
         topMargin=0.75 * inch,
         bottomMargin=0.75 * inch,
         title=doc_title,
+        author="Radius OS",
     )
 
-    flow: list = []
-
-    if single and reports:
-        report = reports[0]
-        title = resolve_report_title(report, client)
-        exported_label = ""
-        exported = bundle.get("exported_at") or ""
-        if exported:
-            try:
-                dt = datetime.fromisoformat(str(exported).replace("Z", "+00:00"))
-                exported_label = f"Exported {dt.strftime('%d %B %Y')}"
-            except ValueError:
-                exported_label = f"Exported {exported}"
-        flow.extend(cover_page(client, title, exported_label))
-        flow.append(PageBreak())
-        _render_report_section(flow, report, client, show_title=False)
-    else:
-        # Cover
-        flow.append(Spacer(1, 1.5 * inch))
-        flow.append(Paragraph("Radius OS", styles["subtitle"]))
-        cover_title = f"{client.get('name') or 'Client'} — Phase Reports"
-        flow.append(Paragraph(_esc(cover_title), styles["cover_center"]))
-        if client.get("primary_url"):
-            flow.append(Paragraph(_esc(client["primary_url"]), styles["subtitle"]))
-        if client.get("industry"):
-            flow.append(Paragraph(_esc(client["industry"]), styles["subtitle"]))
-        exported = bundle.get("exported_at") or ""
-        if exported:
-            try:
-                dt = datetime.fromisoformat(str(exported).replace("Z", "+00:00"))
-                flow.append(Paragraph(f"Exported {dt.strftime('%d %B %Y')}", styles["subtitle"]))
-            except ValueError:
-                flow.append(Paragraph(f"Exported {exported}", styles["subtitle"]))
-        flow.append(Spacer(1, 0.4 * inch))
-        flow.append(Paragraph(f"{len(reports)} phase reports", styles["subtitle"]))
-
-        readiness = (bundle.get("phase_statuses") or {}).get("overall_readiness_score")
-        if readiness is not None:
-            flow.append(Paragraph(f"Readiness: {readiness:.0f}%", styles["subtitle"]))
-
-        flow.append(PageBreak())
-
-        # Table of contents
-        flow.append(Paragraph("Contents", styles["h1"]))
-        flow.append(Spacer(1, 8))
-        for i, report in enumerate(reports, 1):
-            flow.append(
-                Paragraph(
-                    f"{i}. {_esc(resolve_report_title(report, client))}",
-                    styles["toc"],
-                )
-            )
-        flow.append(PageBreak())
-
-        # Report sections
-        for i, report in enumerate(reports):
-            if i > 0:
-                flow.append(PageBreak())
-            _render_report_section(flow, report, client, show_title=True)
+    # Page one is drawn by draw_cover; the flow starts on page two.
+    flow: list = [Spacer(1, 1), PageBreak()]
+    contents, token = collect_contents()
+    try:
+        if single and reports:
+            _render_report_section(flow, reports[0], client, show_title=False)
+        else:
+            for i, report in enumerate(reports):
+                if i > 0:
+                    flow.append(PageBreak())
+                _render_report_section(flow, report, client, show_title=True)
+    finally:
+        stop_collecting(token)
 
     if not reports:
         flow.append(Paragraph("No reports generated yet.", styles["body"]))
         flow.append(
             Paragraph(
-                "Run discovery, tracking, website audit, and downstream phases in chat — "
+                "Run discovery, tracking, website audit, and downstream phases in chat, "
                 "then download again.",
                 styles["body"],
             )
         )
 
-    doc.build(flow)
+    if single and reports:
+        cover_contents = contents
+        contents_label = "In this report"
+    else:
+        cover_contents = [f"{i}. {resolve_report_title(r, client)}" for i, r in enumerate(reports, 1)]
+        contents_label = f"{len(reports)} phase reports in this pack"
+    readiness = (bundle.get("phase_statuses") or {}).get("overall_readiness_score")
+    subtitle = str(client.get("industry") or "")
+    if not single and readiness is not None:
+        subtitle = f"Readiness {readiness:.0f}%" + (f", {subtitle}" if subtitle else "")
+
+    def _first(canv, _doc) -> None:
+        draw_cover(
+            canv,
+            title=single_title or "Phase reports",
+            subtitle=subtitle,
+            client_name=client_name,
+            client_url=str(client.get("primary_url") or ""),
+            prepared=_prepared_label(bundle),
+            contents=cover_contents,
+            contents_label=contents_label,
+        )
+
+    def _later(canv, _doc) -> None:
+        draw_page_frame(
+            canv,
+            left=doc_title,
+            right=str(client.get("primary_url") or client_name),
+            footer=f"Prepared with Radius OS for {client_name}",
+        )
+
+    doc.build(flow, onFirstPage=_first, onLaterPages=_later, canvasmaker=NumberedCanvas)
     return buf.getvalue()

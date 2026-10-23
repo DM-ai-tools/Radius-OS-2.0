@@ -36,10 +36,12 @@ def test_build_cluster_report_assigns_intent_and_funnel():
         "orphans": [],
     }
     report = build_cluster_report_from_llm(llm_payload, cleaned)
-    assert len(report["clusters"]) == 1
-    cluster = report["clusters"][0]
-    assert cluster["intent"] == "commercial"
-    assert cluster["funnel"] == "MOFU"
-    kws = {k["keyword"]: k for k in cluster["keywords"]}
-    assert kws["what is seo"]["funnel"] == "TOFU"
-    assert kws["what is seo"]["intent"] == "informational"
+    assert len(report["clusters"]) == 2
+    by_intent = {cluster["intent"]: cluster for cluster in report["clusters"]}
+    assert by_intent["commercial"]["funnel"] == "MOFU"
+    assert by_intent["commercial"]["keywords"][0]["keyword"] == "seo audit"
+    info = by_intent["informational"]["keywords"][0]
+    assert info["keyword"] == "what is seo"
+    assert info["funnel"] == "TOFU"
+    assert by_intent["commercial"]["est_traffic"] == 500
+    assert by_intent["informational"]["avg_difficulty"] == 20.0

@@ -22,8 +22,8 @@ from urllib.parse import urlparse
 PLACEHOLDER_MARKERS = (
     'data-placeholder="true"',
     "copy to be written before go-live",
-    "[AUTHOR INPUT REQUIRED]",
-    "[VERIFY]",
+    "[AUTHOR INPUT REQUIRED",  # also "[AUTHOR INPUT REQUIRED — write ...]"
+    "[VERIFY",  # also "[VERIFY: what to check]"
     "TODO",
     "Lorem ipsum",
     "{{",

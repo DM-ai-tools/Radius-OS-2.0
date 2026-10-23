@@ -25,6 +25,14 @@ import ReadinessCard from "../components/cards/ReadinessCard";
 import RolePlayground from "../components/RolePlayground";
 import EngineRoomPanel from "../components/EngineRoomPanel";
 import CostTrackerPanel from "../components/CostTrackerPanel";
+import DeliverablesPanel, { DeliverableItem, DeliverablePhase } from "../components/DeliverablesPanel";
+import DownloadReportsMenu from "../components/DownloadReportsMenu";
+import ClientOverview, {
+  OverviewAction,
+  OverviewDeliverable,
+  OverviewNeed,
+  OverviewPhase,
+} from "../components/ClientOverview";
 import ReportCardShell from "../components/ReportCardShell";
 import { FieldGrid, humanLabel } from "../components/cards/PresentableValue";
 import { sleep, statusLinesForPrompt } from "../lib/thinkingStatus";
@@ -152,6 +160,8 @@ const CONTROL_PHASES: Array<{
     prompt: "Publish through the connected WordPress account using the internal linking plan",
   },
 ];
+
+const GAP_ACRONYMS = new Set(["cms", "crm", "seo", "url", "ga4", "gtm", "gsc", "dns", "ssl", "api", "cdd", "ctr"]);
 
 const PHASE_OWNER: Record<string, string> = {
   discovery: "SEO Strategist",
@@ -366,7 +376,7 @@ function reportsInPipelineOrder(messages: UiMessage[]): UiMessage[] {
 /** Higher = more likely the approved Phase 5 topic spine (not ranked best_opps). */
 function strategyQueueSpineScore(m: UiMessage): number {
   if (String(m.card?.card_type) !== "content_strategy_report") return 0;
-  const q = m.card?.priority_queue;
+  const q = m.card?.content_plan || m.card?.priority_queue;
   if (!Array.isArray(q) || !q.length) return 0;
   const top = q.slice(0, 5) as Array<Record<string, unknown>>;
   return top.filter((r) => r && r.from_phase5_topic).length;
@@ -389,7 +399,9 @@ function productionDraftScore(m: UiMessage): number {
 function hydrateStrategyQueueFromProfile(history: UiMessage[], profile?: Profile): UiMessage[] {
   const pack = profile?.seo_strategy_summary;
   if (!pack || typeof pack !== "object" || Array.isArray(pack)) return history;
-  const queue = (pack as Record<string, unknown>).priority_queue;
+  const queue =
+    (pack as Record<string, unknown>).content_plan ||
+    (pack as Record<string, unknown>).priority_queue;
   if (!Array.isArray(queue) || !queue.length) return history;
   const spineCount = queue
     .slice(0, 5)
@@ -397,17 +409,15 @@ function hydrateStrategyQueueFromProfile(history: UiMessage[], profile?: Profile
     .length;
   if (spineCount < 1) return history;
 
-  const calendar = (pack as Record<string, unknown>).calendar;
-  const combined = (pack as Record<string, unknown>).combined_priority_queue;
+  const calendar = (pack as Record<string, unknown>).content_calendar;
   return history.map((m) => {
     if (String(m.card?.card_type) !== "content_strategy_report" || !m.card) return m;
     return {
       ...m,
       card: {
         ...m.card,
-        priority_queue: queue,
-        ...(Array.isArray(calendar) ? { calendar, content_calendar: calendar } : {}),
-        ...(Array.isArray(combined) ? { combined_priority_queue: combined } : {}),
+        content_plan: queue,
+        ...(Array.isArray(calendar) ? { content_calendar: calendar } : {}),
         queue_source: "phase5_topic_plan",
         hydrated_from_cdp: true,
       },
@@ -450,7 +460,17 @@ function hydrateProductionDraftFromProfile(history: UiMessage[], profile?: Profi
         existing.length && typeof existing[0] === "object"
           ? String((existing[0] as Record<string, unknown>).markdown || "")
           : String(m.card.draft_markdown || "");
-      if (existingMd.length < md.length && first) {
+      const blocker = /\[VERIFY\b|\[AUTHOR INPUT REQUIRED/;
+      const cardTitle = String(
+        (existing[0] as Record<string, unknown> | undefined)?.title || m.card.draft_title || "",
+      );
+      const profileTitle = String(first?.title || "");
+      const sameDraft = !cardTitle || !profileTitle || cardTitle === profileTitle;
+      // A cleaned saved draft can be a few characters shorter than the chat card.
+      // Keep that copy when the card still has markers the saved draft no longer has.
+      const savedCopyIsCleaner =
+        sameDraft && blocker.test(existingMd) && !blocker.test(md);
+      if ((existingMd.length < md.length || savedCopyIsCleaner) && first) {
         next = {
           ...next,
           drafts,
@@ -623,7 +643,7 @@ function phaseStatusLabel(status: string): string {
   if (status === "complete") return "Approved";
   if (status === "pending_signoff") return "Needs approval";
   if (status === "awaiting_service_selection") return "Select services";
-  if (status === "in_progress") return "Running";
+  if (status === "in_progress") return "In progress";
   return "Waiting";
 }
 
@@ -652,27 +672,6 @@ const AGENT_PURPOSE: Record<string, string> = {
   on_page_seo: "On-page package and the internal linking plan",
   publishing: "Publish through the connected WordPress account",
 };
-
-function monitorStatusLabel(status: string): string {
-  if (status === "complete") return "Completed";
-  if (status === "in_progress") return "Running";
-  if (status === "pending_signoff") return "Sign-off";
-  return "Waiting";
-}
-
-function monitorStatusClass(status: string): string {
-  if (status === "complete") return "done";
-  if (status === "in_progress") return "running";
-  if (status === "pending_signoff") return "signoff";
-  return "waiting";
-}
-
-function phaseStatusTone(status: string): string {
-  if (status === "complete") return "pass";
-  if (status === "pending_signoff") return "warning";
-  if (status === "in_progress") return "unverified";
-  return "unverified";
-}
 
 function mapPhaseStatuses(
   src: Record<string, unknown> | null | undefined,
@@ -814,7 +813,6 @@ export default function ChatPage() {
   const [sidebarNav, setSidebarNav] = useState<
     "command" | "operations" | "reports" | "memory" | "agents" | "engine_room" | "cost_tracker" | "wordpress"
   >("command");
-  const [kpiDetail, setKpiDetail] = useState<null | "issues" | "opportunities">(null);
   const [reportFocusKey, setReportFocusKey] = useState<string | null>(null);
   const [changeDockOpen, setChangeDockOpen] = useState(false);
   const commandRef = useRef<HTMLTextAreaElement>(null);
@@ -841,7 +839,6 @@ export default function ChatPage() {
     threshold: 90,
   });
   const bottomRef = useRef<HTMLDivElement>(null);
-  const reportsEndRef = useRef<HTMLDivElement>(null);
   const reportPaneRef = useRef<HTMLDivElement>(null);
   const bootClientId = useRef<string | null>(null);
   const statusTimer = useRef<number | null>(null);
@@ -1484,21 +1481,29 @@ export default function ChatPage() {
     return () => window.clearTimeout(id);
   }, [changeDockOpen, awaitingChangeReply, thinking, changeThread.length]);
 
+  // Each phase opens at its top.
   useEffect(() => {
     if (sidebarNav !== "reports") return;
-    const id = window.requestAnimationFrame(() => {
-      if (reportFocusKey) {
-        // Focus the current (latest) pack for that phase — now at the bottom of
-        // its chronological stack, so scroll it into view from below.
-        document
-          .getElementById(`report-phase-${reportFocusKey}`)
-          ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-        return;
-      }
-      reportsEndRef.current?.scrollIntoView({ block: "end" });
-    });
-    return () => window.cancelAnimationFrame(id);
-  }, [sidebarNav, reportFocusKey, latestReports.length, changeThread.length]);
+    reportPaneRef.current?.scrollTo({ top: 0 });
+  }, [sidebarNav, reportFocusKey]);
+
+  // A revised deliverable that arrives after a change request opens in its own phase.
+  const lastRevisionRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    const revisions = latestReports.filter(isRevisionReport);
+    const newest = revisions[revisions.length - 1];
+    const seen = lastRevisionRef.current;
+    // The first non-empty list is the stored history loading, not a new revision.
+    if (seen === undefined) {
+      if (latestReports.length) lastRevisionRef.current = newest?.id ?? null;
+      return;
+    }
+    if (newest && newest.id !== seen) {
+      const key = reportPhaseKey(newest);
+      if (key) setReportFocusKey(key);
+    }
+    lastRevisionRef.current = newest?.id ?? null;
+  }, [latestReports]);
 
   const phasesCompleted = useMemo(
     () => CONTROL_PHASES.filter((p) => statuses[p.key] === "complete").length,
@@ -1551,6 +1556,165 @@ export default function ChatPage() {
     if (status === "in_progress" || key === activePipelineKey) return "is-running";
     return "is-waiting";
   }
+
+  const phaseName = (label: string) => label.replace(/^\d+[a-z]?\. /, "");
+
+  /** "conversion_event (warning)" -> "Needs review: Conversion event"; "cms_access" -> "Missing: CMS access". */
+  function describeGap(raw: string): string {
+    const warning = /\(warning\)\s*$/i.test(raw);
+    const words = raw
+      .replace(/\(warning\)\s*$/i, "")
+      .replace(/_/g, " ")
+      .trim()
+      .toLowerCase()
+      .split(/\s+/)
+      .map((w) => (GAP_ACRONYMS.has(w) ? w.toUpperCase() : w))
+      .join(" ");
+    const text = words.charAt(0).toUpperCase() + words.slice(1);
+    return `${warning ? "Needs review" : "Missing"}: ${text}`;
+  }
+
+  const overviewPhases: OverviewPhase[] = useMemo(() => {
+    const withReport = new Set(latestReports.map((m) => reportPhaseKey(m)).filter(Boolean));
+    return CONTROL_PHASES.map((p) => ({
+      key: String(p.key),
+      number: p.label.match(/^\d+[a-z]?/)?.[0] || "",
+      name: phaseName(p.label),
+      status: statuses[p.key],
+      hasDeliverable: withReport.has(String(p.key)),
+    }));
+  }, [statuses, latestReports]);
+
+  /** The newest deliverable per phase, most recent first. */
+  const overviewDeliverables: OverviewDeliverable[] = useMemo(() => {
+    const newest = new Map<string, UiMessage>();
+    for (const m of latestReports) {
+      const key = reportPhaseKey(m);
+      if (!key || !m.card || String(m.card.card_type) === "phase_validation_report") continue;
+      const prev = newest.get(key);
+      if (!prev || reportTime(m) >= reportTime(prev)) newest.set(key, m);
+    }
+    return [...newest.entries()]
+      .sort((a, b) => reportTime(b[1]) - reportTime(a[1]))
+      .slice(0, 5)
+      .map(([key, m]) => {
+        const phase = CONTROL_PHASES.find((p) => p.key === key);
+        const label = phase ? phaseName(phase.label) : humanLabel(key);
+        const title = String(m.card?.title || "").trim();
+        return { id: m.id, phaseKey: key, phase: label, title: title || label, createdAt: m.created_at };
+      });
+  }, [latestReports]);
+
+  /** Every phase with the deliverables it holds, in pipeline order; unphased cards go last. */
+  const deliverablePhases: DeliverablePhase[] = useMemo(() => {
+    const byPhase = new Map<string, DeliverableItem[]>();
+    for (const m of latestReports) {
+      if (!m.card || String(m.card.card_type) === "phase_validation_report") continue;
+      const key = reportPhaseKey(m) || "other";
+      const rerun = (m as any)._rerunIndex as number | undefined;
+      const revised = isRevisionReport(m);
+      const title = String(m.card.title || "").trim() || humanLabel(String(m.card.card_type || "")) || "Report";
+      const item: DeliverableItem = {
+        id: m.id,
+        label: title.replace(/^Phase\s+\d+[a-z]?\s*[—–-]\s*/i, ""),
+        tag: revised ? "Revised" : rerun ? `Earlier run ${rerun}` : undefined,
+        current: Boolean((m as any)._isLatestRun) && !revised && !rerun,
+        createdAt: m.created_at,
+      };
+      byPhase.set(key, [...(byPhase.get(key) || []), item]);
+    }
+    const phases: DeliverablePhase[] = CONTROL_PHASES.map((p) => ({
+      key: String(p.key),
+      number: p.label.match(/^\d+[a-z]?/)?.[0] || "",
+      name: phaseName(p.label),
+      status: statuses[p.key],
+      items: byPhase.get(String(p.key)) || [],
+    }));
+    if (byPhase.has("other")) {
+      phases.push({ key: "other", number: "", name: "Other deliverables", status: "complete", items: byPhase.get("other")! });
+    }
+    return phases;
+  }, [latestReports, statuses]);
+
+  function renderDeliverable(id: string) {
+    const m = latestReports.find((r) => r.id === id);
+    if (!m?.card) return null;
+    return (
+      <div className={`msg card-wrap${isRevisionReport(m) ? " is-revision-report" : ""}`}>
+        <ReportCardShell card={m.card} clientId={clientId} token={token} onError={setError}>
+          {renderCard(m.card)}
+        </ReportCardShell>
+      </div>
+    );
+  }
+
+  const overviewNeeds: OverviewNeed[] = [
+    ...CONTROL_PHASES.filter((p) => statuses[p.key] === "awaiting_service_selection").map((p) => ({
+      key: `select-${p.key}`,
+      phase: phaseName(p.label),
+      detail: "Choose which services to cover before this phase continues.",
+      action: { label: "Choose services", onClick: () => openPhaseReport(String(p.key)) },
+    })),
+    ...approvalQueue.map((p) => ({
+      key: `approve-${p.key}`,
+      phase: phaseName(p.label),
+      detail: canApprove(p.agent)
+        ? "Ready for your sign-off."
+        : `Waiting for sign-off from the ${PHASE_OWNER[String(p.key)] || "phase owner"}.`,
+      action: canApprove(p.agent)
+        ? { label: "Approve", onClick: () => void onCardAction(p.agent, "approve"), disabled: thinking }
+        : { label: "Review", onClick: () => openPhaseReport(String(p.key)) },
+    })),
+    ...readiness.missing.map((gap) => {
+      const split = gap.indexOf(":");
+      const key = split > 0 ? gap.slice(0, split).trim() : "";
+      const phase = CONTROL_PHASES.find((p) => p.key === key || p.agent === key);
+      return {
+        key: `gap-${gap}`,
+        phase: phase ? phaseName(phase.label) : "Readiness",
+        detail: describeGap(split > 0 ? gap.slice(split + 1).trim() : gap),
+      };
+    }),
+  ];
+
+  const overviewNextStep = (() => {
+    const text = nextStepHint()
+      .replace(/^Next:\s*/i, "")
+      .replace(/\s+->\s+/g, " then ")
+      .replace(/\s+-\s+/g, ", ")
+      .trim();
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  })();
+
+  const overviewRunning = thinking
+    ? (() => {
+        const phase = CONTROL_PHASES.find((p) => statuses[p.key] === "in_progress");
+        return phase ? `${phaseName(phase.label)} is running` : thinkingStatus || "Working";
+      })()
+    : null;
+
+  const overviewPrimary: OverviewAction | null = (() => {
+    if (thinking) return null;
+    const approvable = approvalQueue.find((p) => canApprove(p.agent));
+    if (approvable) {
+      return {
+        label: `Approve ${phaseName(approvable.label)}`,
+        onClick: () => void onCardAction(approvable.agent, "approve"),
+      };
+    }
+    const selecting = CONTROL_PHASES.find((p) => statuses[p.key] === "awaiting_service_selection");
+    if (selecting) return { label: "Choose services", onClick: () => openPhaseReport(String(selecting.key)) };
+    if (pendingHandoff) {
+      return { label: pendingHandoff.label || "Continue", onClick: () => void send(pendingHandoff.prompt), disabled: !sessionId };
+    }
+    return {
+      label: "Open deliverables",
+      onClick: () => {
+        setReportFocusKey(null);
+        setSidebarNav("reports");
+      },
+    };
+  })();
 
   async function onCardAction(
     agentKey: string,
@@ -1897,7 +2061,9 @@ export default function ChatPage() {
           canAct={canAct(trackingKey)}
           canSubmit={canSubmitPreGate(trackingKey)}
           canGrant={true}
-          onAction={(a, edits) => onCardAction(trackingKey, a, edits)}
+          onAction={(a: string, edits?: Record<string, unknown>) => {
+            void onCardAction(trackingKey, a, edits);
+          }}
           onGrant={onGrant}
           onSubmitKnownChanges={onSubmitKnownChanges}
         />
@@ -1908,7 +2074,9 @@ export default function ChatPage() {
         <WebsiteCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
+          onAction={(a: string, edits?: Record<string, unknown>) => {
+            void onCardAction(agentKey, a, edits);
+          }}
         />
       );
     }
@@ -1946,7 +2114,9 @@ export default function ChatPage() {
         <SeoAuditCard
           payload={card}
           canAct={canAct(agentKey)}
-          onAction={(a, edits) => onCardAction(agentKey, a, edits)}
+          onAction={(a: string, edits?: Record<string, unknown>) => {
+            void onCardAction(agentKey, a, edits);
+          }}
         />
       );
     }
@@ -2109,7 +2279,7 @@ export default function ChatPage() {
               <span className="cc-nav-ico">WP</span> WordPress
             </button>
             <button type="button" className={sidebarNav === "reports" ? "is-active" : ""} onClick={() => { setReportFocusKey(null); setSidebarNav("reports"); }}>
-              <span className="cc-nav-ico">04</span> Reports
+              <span className="cc-nav-ico">04</span> Deliverables
             </button>
             {canViewCostTracker ? (
               <button
@@ -2126,23 +2296,20 @@ export default function ChatPage() {
             <button type="button" className={sidebarNav === "agents" ? "is-active" : ""} onClick={() => setSidebarNav("agents")}>
               <span className="cc-nav-ico">06</span> Agents
             </button>
-            <button type="button" className={sidebarNav === "command" ? "is-active" : ""} onClick={() => setSidebarNav("command")}>
-              <span className="cc-nav-ico">07</span> Runs
-            </button>
             {canViewEngineRoom ? (
               <button
                 type="button"
                 className={sidebarNav === "engine_room" ? "is-active" : ""}
                 onClick={() => setSidebarNav("engine_room")}
               >
-                <span className="cc-nav-ico">08</span> Engine room
+                <span className="cc-nav-ico">07</span> Engine room
               </button>
             ) : null}
           </div>
           <div className="cc-nav-group">
             <div className="cc-nav-label">Knowledge</div>
             <button type="button" className={sidebarNav === "memory" ? "is-active" : ""} onClick={() => setSidebarNav("memory")}>
-              <span className="cc-nav-ico">09</span> Client Memory
+              <span className="cc-nav-ico">08</span> Client Memory
             </button>
           </div>
         </nav>
@@ -2193,7 +2360,6 @@ export default function ChatPage() {
             <RolePlayground
               playground={playground}
               loading={playgroundLoading}
-              variant="sidebar"
               clientId={clientId}
               token={token}
               onDownloadReports={(format) => downloadAllReports(format)}
@@ -2241,179 +2407,47 @@ export default function ChatPage() {
           />
         ) : sidebarNav === "reports" ? (
           <div className="cc-workspace cc-report-pane" ref={reportPaneRef}>
-            <div className="cc-report-heading">
-              <div>
-                <p className="cc-kicker">Radius OS Report</p>
-                <h2>{client?.name}</h2>
-                <p className="cc-report-next">
-                  <strong>{Math.round(readiness.overall)} / 100</strong> · {healthLabel} · {nextStepHint()}
-                </p>
-              </div>
-              <span className="cc-report-count">
-                {latestReports.length} {latestReports.length === 1 ? "report" : "reports"}
-              </span>
-            </div>
-            {reportFocusKey && !latestReports.some((m) => reportPhaseKey(m) === reportFocusKey) ? (
-              <p className="cc-report-empty-state">
-                No report yet for {CONTROL_PHASES.find((p) => p.key === reportFocusKey)?.label || reportFocusKey}. Run that stage first.
-              </p>
-            ) : null}
-            <div className="cc-report-list">
-              {latestReports.map((m, index) => {
-                if (!m.card) return null;
-                if (String(m.card.card_type) === "phase_validation_report") return null;
-                const phaseKey = reportPhaseKey(m);
-                const isRevision = isRevisionReport(m);
-                const rerunIndex = (m as any)._rerunIndex as number | undefined;
-                const phase = phaseKey ? CONTROL_PHASES.find((p) => p.key === phaseKey) : undefined;
-                const phaseLabel = phase?.label?.replace(/^\d+[a-z]?. /, "") || null;
-                const isLatest = Boolean((m as any)._isLatestRun) && !rerunIndex;
-                const previousPhase = index > 0 ? reportPhaseKey(latestReports[index - 1]) : null;
-                const isNewPhase = Boolean(phaseKey && phaseKey !== previousPhase);
-                const phaseStatus = phaseKey
-                  ? statuses[phaseKey as keyof typeof statuses]
-                  : null;
-                return (
-                  <section className="cc-report-group" key={m.id}>
-                    {isNewPhase && phase ? (
-                      <div className="cc-report-group-heading">
-                        <div>
-                          <span className="cc-report-step">{phase.label}</span>
-                          <h3>{phaseLabel}</h3>
-                        </div>
-                        <span className={`cc-report-status ${phaseStatusTone(phaseStatus || "")}`}>
-                          {phaseStatusLabel(phaseStatus || "not_started")}
-                        </span>
-                      </div>
-                    ) : null}
-                    <div
-                      id={phaseKey && !isRevision && isLatest ? `report-phase-${phaseKey}` : undefined}
-                      className={`msg card-wrap${phaseKey === reportFocusKey && !isRevision && isLatest ? " is-report-focus" : ""}${isRevision ? " is-revision-report" : ""}${rerunIndex ? " is-rerun-report" : ""}`}
-                    >
-                      {rerunIndex ? (
-                        <div className="cc-revision-banner">
-                          <span className="cc-revision-badge">Earlier run #{rerunIndex}</span>
-                          <span>{phaseLabel ? `${phaseLabel} — previous output` : "Previous report"}</span>
-                        </div>
-                      ) : isRevision ? (
-                        <div className="cc-revision-banner">
-                          <span className="cc-revision-badge">Revised</span>
-                          <span>{phaseLabel ? `${phaseLabel} — updated from your change request` : "Updated report"}</span>
-                        </div>
-                      ) : null}
-                      <ReportCardShell card={m.card} clientId={clientId} token={token} onError={setError}>
-                        {renderCard(m.card)}
-                      </ReportCardShell>
-                    </div>
-                  </section>
-                );
-              })}
-            </div>
-            {!latestReports.length ? <p className="cc-report-empty-state">No intelligence packs yet. Start an operation.</p> : null}
-            <div ref={reportsEndRef} />
+            <DeliverablesPanel
+              phases={deliverablePhases}
+              requestedKey={reportFocusKey}
+              onSelect={setReportFocusKey}
+              actions={
+                latestReports.length ? (
+                  <DownloadReportsMenu onPick={(format) => downloadAllReports(format)} loading={exportingReports} />
+                ) : null
+              }
+              renderItem={renderDeliverable}
+              onOpenOperations={() => setSidebarNav("operations")}
+            />
+          </div>
+        ) : sidebarNav === "command" ? (
+          <div className="cc-workspace">
+            <ClientOverview
+              token={token}
+              clientId={clientId}
+              clientUrl={client?.primary_url}
+              industry={client?.industry}
+              phases={overviewPhases}
+              readiness={readiness.overall}
+              nextStep={overviewNextStep}
+              running={overviewRunning}
+              primary={overviewPrimary}
+              needs={overviewNeeds}
+              deliverables={overviewDeliverables}
+              activity={liveActivity
+                .filter((m) => !/^validation\b/i.test(m.content.trim()))
+                .map((m) => ({ id: m.id, text: m.content, createdAt: m.created_at }))}
+              showSpend={canViewCostTracker}
+              onOpenPhase={openPhaseReport}
+              onOpenDeliverables={() => {
+                setReportFocusKey(null);
+                setSidebarNav("reports");
+              }}
+              onOpenCosts={() => setSidebarNav("cost_tracker")}
+            />
           </div>
         ) : (
           <div className="cc-workspace cc-overview">
-            <div className="cc-kpi-strip">
-              <div className="cc-kpi">
-                <span className="cc-kpi-label">SEO Health</span>
-                <div className="cc-kpi-metric">
-                  <span className="cc-kpi-value">{Math.round(readiness.overall)}</span>
-                  <span className={`cc-kpi-status ${healthTone}`}>{healthLabel}</span>
-                </div>
-              </div>
-              <div className="cc-kpi">
-                <span className="cc-kpi-label">Phases completed</span>
-                <div className="cc-kpi-metric">
-                  <span className="cc-kpi-value">{phasesCompleted}/{CONTROL_PHASES.length}</span>
-                  <span className="cc-kpi-status">{progressPct}% of pipeline</span>
-                </div>
-              </div>
-              <button
-                type="button"
-                className={`cc-kpi cc-kpi-action${kpiDetail === "issues" ? " is-open" : ""}`}
-                onClick={() => setKpiDetail((d) => (d === "issues" ? null : "issues"))}
-                aria-expanded={kpiDetail === "issues"}
-              >
-                <span className="cc-kpi-label">Issues</span>
-                <div className="cc-kpi-metric">
-                  <span className="cc-kpi-value">{readiness.missing.length}</span>
-                  <span className="cc-kpi-status warn">Gaps in readiness</span>
-                </div>
-              </button>
-              <button
-                type="button"
-                className={`cc-kpi cc-kpi-action${kpiDetail === "opportunities" ? " is-open" : ""}`}
-                onClick={() => setKpiDetail((d) => (d === "opportunities" ? null : "opportunities"))}
-                aria-expanded={kpiDetail === "opportunities"}
-              >
-                <span className="cc-kpi-label">Opportunities</span>
-                <div className="cc-kpi-metric">
-                  <span className="cc-kpi-value">{approvalQueue.length}</span>
-                  <span className="cc-kpi-status warn">Pending sign-off</span>
-                </div>
-              </button>
-            </div>
-
-            {kpiDetail === "issues" ? (
-              <div className="cc-kpi-detail">
-                <div className="cc-kpi-detail-head">
-                  <h2>Readiness gaps</h2>
-                  <p>{readiness.missing.length ? `${readiness.missing.length} item${readiness.missing.length === 1 ? "" : "s"} blocking a complete picture.` : "No readiness gaps right now."}</p>
-                </div>
-                {readiness.missing.length ? (
-                  <ul className="cc-gap-list">
-                    {readiness.missing.map((gap) => {
-                      const split = gap.indexOf(":");
-                      const phaseKey = split > 0 ? gap.slice(0, split).trim() : "";
-                      const detail = split > 0 ? gap.slice(split + 1).trim() : gap;
-                      const phase = CONTROL_PHASES.find((p) => p.key === phaseKey || p.agent === phaseKey);
-                      return (
-                        <li key={gap}>
-                          {phase ? <span className="cc-gap-phase">{phase.label}</span> : null}
-                          <span>{detail}</span>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : (
-                  <p className="cc-empty-note">Nothing missing in the current readiness check.</p>
-                )}
-              </div>
-            ) : null}
-
-            {kpiDetail === "opportunities" ? (
-              <div className="cc-kpi-detail">
-                <div className="cc-kpi-detail-head">
-                  <h2>Pending sign-off</h2>
-                  <p>
-                    {approvalQueue.length
-                      ? `${approvalQueue.length} phase${approvalQueue.length === 1 ? "" : "s"} waiting for human approval.`
-                      : "No phases are waiting for sign-off."}
-                  </p>
-                </div>
-                {approvalQueue.length ? (
-                  <ul className="cc-gap-list">
-                    {approvalQueue.map((phase) => (
-                      <li key={phase.key}>
-                        <span className="cc-gap-phase">{phase.label}</span>
-                        <span>{PHASE_OWNER[String(phase.key)] || "Needs approval"}</span>
-                        <button
-                          type="button"
-                          className="btn btn-primary cc-gap-go"
-                          onClick={() => void onCardAction(phase.agent, "approve")}
-                        >
-                          Approve
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="cc-empty-note">No pending approvals. Keep the pipeline moving from Operations.</p>
-                )}
-              </div>
-            ) : null}
-
             {approvalQueue.length ? (
               <div className="cc-attention">
                 <div>
@@ -2434,37 +2468,35 @@ export default function ChatPage() {
               </div>
             ) : null}
 
-            {sidebarNav === "operations" ? (
-              <div className="cc-card">
-                <div className="cc-card-head">
-                  <div>
-                    <h2>Start an operation</h2>
-                    <p>What should Radius OS accomplish? The system chooses which agents to run.</p>
-                  </div>
-                </div>
-                <div className="cc-card-body">
-                  <div className="cc-ops">
-                    {START_OPERATIONS.map((op) => (
-                      <button
-                        key={op.label}
-                        type="button"
-                        disabled={thinking || !sessionId || !canTrigger(op.agent)}
-                        onClick={() => void send(op.prompt)}
-                      >
-                        {op.label}
-                      </button>
-                    ))}
-                  </div>
+            <div className="cc-card">
+              <div className="cc-card-head">
+                <div>
+                  <h2>Start an operation</h2>
+                  <p>What should Radius OS accomplish? The system chooses which agents to run.</p>
                 </div>
               </div>
-            ) : null}
+              <div className="cc-card-body">
+                <div className="cc-ops">
+                  {START_OPERATIONS.map((op) => (
+                    <button
+                      key={op.label}
+                      type="button"
+                      disabled={thinking || !sessionId || !canTrigger(op.agent)}
+                      onClick={() => void send(op.prompt)}
+                    >
+                      {op.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
 
             <div className="cc-grid-7-5">
               <section className="cc-card">
                 <div className="cc-card-head">
                   <div>
                     <h2>SEO operation pipeline</h2>
-                    <p>{nextStepHint()}</p>
+                    <p>{overviewNextStep}</p>
                   </div>
                   {pendingHandoff && !thinking ? (
                     <button type="button" className="btn btn-primary" disabled={!sessionId} onClick={() => void send(pendingHandoff.prompt)}>
@@ -2512,61 +2544,18 @@ export default function ChatPage() {
               <section className="cc-card">
                 <div className="cc-card-head">
                   <div>
-                    <h2>Live operation monitor</h2>
-                    <p>Real-time system status</p>
+                    <h2>Live activity</h2>
+                    <p>What the agents are doing for this client right now.</p>
                   </div>
                 </div>
                 <div className="cc-card-body">
-                  <div className="cc-monitor-kpis">
-                    <div className="cc-kpi cc-kpi-compact">
-                      <span className="cc-kpi-label">Active agents</span>
-                      <div className="cc-kpi-metric">
-                        <span className="cc-kpi-value">{thinking ? 1 : 0}</span>
-                        <span className={`cc-kpi-status ${thinking ? "info" : "good"}`}>{thinking ? "Running" : "Idle"}</span>
-                      </div>
-                    </div>
-                    <div className="cc-kpi cc-kpi-compact">
-                      <span className="cc-kpi-label">Phases completed</span>
-                      <div className="cc-kpi-metric">
-                        <span className="cc-kpi-value">{phasesCompleted} / {CONTROL_PHASES.length}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="cc-monitor-list">
-                    {CONTROL_PHASES.map((phase) => {
-                      const st = statuses[phase.key];
-                      return (
-                        <button
-                          key={phase.key}
-                          type="button"
-                          className="cc-monitor-row"
-                          onClick={() => openPhaseReport(String(phase.key))}
-                        >
-                          <span>{phase.label.replace(/^\d+[a-z]? · /, "").replace(/^\d+[a-z]?. /, "")} Agent</span>
-                          <span className={`cc-dot-status ${monitorStatusClass(st)}`}>
-                            {monitorStatusLabel(st)}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="cc-kicker cc-section-label">Resource usage</div>
-                  <div className="cc-resource">
-                    <div className="cc-resource-top"><span>Readiness</span><span>{Math.round(readiness.overall)}%</span></div>
-                    <div className="cc-resource-track"><i className="bar-green" style={{ width: `${Math.min(100, readiness.overall)}%` }} /></div>
-                  </div>
-                  <div className="cc-resource">
-                    <div className="cc-resource-top"><span>Pipeline</span><span>{progressPct}%</span></div>
-                    <div className="cc-resource-track"><i className="bar-blue" style={{ width: `${progressPct}%` }} /></div>
-                  </div>
-                  <div className="cc-kicker cc-section-label">Live agent activity</div>
                   <div className="cc-activity">
                     {liveActivity.length ? liveActivity.map((m) => (
-                      <div key={m.id} className="cc-activity-row">
-                        <time>{new Date(m.created_at || Date.now()).toLocaleTimeString()}</time>
+                      <div key={m.id} className={`cc-activity-row${m.created_at ? "" : " no-time"}`}>
+                        {m.created_at ? <time>{new Date(m.created_at).toLocaleTimeString()}</time> : null}
                         <span>{m.content}</span>
                       </div>
-                    )) : <span className="cc-empty-note">No live events yet.</span>}
+                    )) : <span className="cc-empty-note">Nothing running right now.</span>}
                   </div>
                 </div>
               </section>
@@ -2578,11 +2567,11 @@ export default function ChatPage() {
           changeDockOpen || awaitingChangeReply ? (
           <div className="cc-changes-dock">
             <div className="cc-changes-head">
-              <strong>{sidebarNav === "reports" ? "Report changes" : "Memory changes"}</strong>
+              <strong>Request a change</strong>
               <span>
                 {sidebarNav === "reports"
-                  ? "Request edits below — updates appear in the thread and add a revised report at the bottom."
-                  : "Request edits to locked client memory packs."}
+                  ? "Describe what to change. The revised version opens under its phase."
+                  : "Describe what to change in this client's memory."}
               </span>
             </div>
             {(changeThread.length || awaitingChangeReply) ? (
@@ -2610,16 +2599,11 @@ export default function ChatPage() {
             ) : null}
             <form className="cc-command" onSubmit={onSubmitChange}>
               <div className="cc-command-row">
-                <span>CMD</span>
                 <textarea
                   ref={commandRef}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder={
-                    sidebarNav === "reports"
-                      ? "Request a change to this report..."
-                      : "Request a change to this client's memory..."
-                  }
+                  placeholder="Describe the change you want"
                   disabled={thinking || !sessionId}
                   rows={1}
                   onKeyDown={(e) => {
@@ -2628,14 +2612,14 @@ export default function ChatPage() {
                       void sendChangeRequest(input);
                     }
                   }}
-                  aria-label="Command"
+                  aria-label="Change request"
                 />
-                <button type="submit" disabled={thinking || !sessionId}>Enter</button>
+                <button type="submit" disabled={thinking || !sessionId}>Send request</button>
               </div>
               <p className="cc-command-hint">
                 {sidebarNav === "reports"
-                  ? "Ctrl/Cmd K to focus. Example: add keyword \"local seo melbourne\""
-                  : "Ctrl/Cmd K to focus. Use for change requests on locked packs."}
+                  ? "Enter sends, Shift+Enter adds a line, Ctrl+K focuses this box. For example: add the keyword \"local seo melbourne\"."
+                  : "Enter sends, Shift+Enter adds a line, Ctrl+K focuses this box."}
               </p>
             </form>
           </div>
@@ -2649,7 +2633,7 @@ export default function ChatPage() {
                   setCommandFocusTick((n) => n + 1);
                 }}
               >
-                {sidebarNav === "reports" ? "Request report change" : "Request memory change"}
+                Request a change
               </button>
             </div>
           )

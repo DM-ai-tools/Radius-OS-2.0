@@ -502,7 +502,7 @@ def build_priority_queue(
     Phase 5 ``topic_ideas`` are the topic spine. Ranked keyword buckets supply
     volume and difficulty for those topics. They do not add extra Fill-in rows.
     A confirmed service selection adds one optimize row per selected service
-    page and supporting pages for that service.
+    page. Supporting pages are the keyword clusters that belong to that service.
     """
     metrics = _metric_index(best, evergreen, trends, avoid)
     for c in report_clusters:
@@ -574,7 +574,7 @@ def build_priority_queue(
         row.setdefault("action", "create")
         row.setdefault("work_label", "Create page")
 
-    return merge_selected_service_work(out, selected_services or [], domain)
+    return merge_selected_service_work(out, selected_services or [], domain, report_clusters)
 
 
 def _service_path(service: dict[str, Any]) -> str:
@@ -592,8 +592,9 @@ def _service_path(service: dict[str, Any]) -> str:
 def selected_service_work_rows(
     selected_services: list[dict[str, Any]] | None,
     domain: str,
+    clusters: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """One optimize row per selected service page, plus two blog creates each."""
+    """One optimize row per selected service page, plus a page for each of its clusters."""
     rows: list[dict[str, Any]] = []
     host = (domain or "").strip().strip("/")
     for service in selected_services or []:
@@ -663,14 +664,10 @@ def selected_service_work_rows(
                     "rationale": f"Optimize the existing {sub_name} page under {name}.",
                 }
             )
-        from app.services.content_planning import (
-            BLOGISH_CONTENT,
-            SELECTED_SERVICE_PAGE_KINDS,
-            supporting_page_spec,
-        )
+        from app.services.content_planning import clusters_by_service, spec_from_keyword
 
-        for kind in SELECTED_SERVICE_PAGE_KINDS:
-            spec = supporting_page_spec(name, kind)
+        for cluster in clusters_by_service(list(selected_services or []), clusters).get(sid, []):
+            spec = spec_from_keyword(cluster)
             page_path = spec["path"]
             absolute_page = f"https://{host}{page_path}" if host else page_path
             page_type = spec["page_type"]
@@ -685,7 +682,7 @@ def selected_service_work_rows(
                     "page_type": page_type,
                     "priority": "Big bet",
                     "intent": spec["intent"],
-                    "funnel": "bofu" if spec["intent"] != "informational" else "tofu",
+                    "funnel": spec.get("funnel"),
                     "est_words": 1500,
                     "suggested_url": absolute_page,
                     "url": page_path,
@@ -693,12 +690,14 @@ def selected_service_work_rows(
                     "service": name,
                     "parent": path,
                     "from_selected_service": True,
-                    "from_selected_service_blog": page_type in BLOGISH_CONTENT,
+                    "from_keyword_cluster": True,
+                    "from_selected_service_blog": False,
                     "from_phase5_topic": False,
-                    "opportunity_score": 60,
+                    "volume": spec.get("volume"),
+                    "opportunity_score": spec.get("opportunity_score") if spec.get("opportunity_score") is not None else 60,
                     "rationale": (
-                        f"Create a {page_type} page for {name}. "
-                        "Each selected service is planned across every supporting page type."
+                        f"'{spec['keyword']}' is a keyword cluster for {name}. "
+                        f"The {page_type} page type follows that keyword's intent and funnel."
                     ),
                 }
             )
@@ -709,9 +708,10 @@ def merge_selected_service_work(
     queue: list[dict[str, Any]],
     selected_services: list[dict[str, Any]] | None,
     domain: str,
+    clusters: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Put selected-service optimize and supporting-page rows at the front of the queue."""
-    work = selected_service_work_rows(selected_services, domain)
+    """Put selected-service optimize rows, then that service's cluster pages, at the front."""
+    work = selected_service_work_rows(selected_services, domain, clusters)
     if not work:
         return queue
     claimed = {_norm(str(row.get("keyword") or "")) for row in work}
@@ -725,53 +725,10 @@ def merge_selected_service_work(
 
 
 def build_calendar(priority_queue: list[dict[str, Any]], weeks: int = 12) -> list[dict[str, Any]]:
-    """Schedule one week per priority-queue topic — do not recycle to pad 12 weeks.
+    """Schedule the work list in place and return the month rollup."""
+    from app.services.content_queue import schedule_content_plan
 
-    Selected-service optimization and supporting pages of every type are
-    scheduled first and are not dropped when they run past the default 12 weeks.
-    """
-    actionable = [p for p in priority_queue if p.get("priority") != "Avoid"]
-    selected = [p for p in actionable if p.get("from_selected_service")]
-    rest = [p for p in actionable if not p.get("from_selected_service")]
-    ordered = selected + rest
-    limit = len(selected) + min(len(rest), weeks)
-    scheduled = ordered[: min(len(ordered), limit)]
-    labels = {1: "Foundation", 2: "Expansion", 3: "Authority"}
-    months: list[dict[str, Any]] = []
-    idx = 0
-    month = 1
-    while month <= 3 or idx < len(scheduled):
-        month_weeks = []
-        for w in range(1, 5):
-            week_num = (month - 1) * 4 + w
-            if idx >= len(scheduled) or week_num > limit:
-                break
-            item = scheduled[idx]
-            idx += 1
-            role = item.get("content_type") or ("pillar" if w == 1 and month == 1 else "cluster")
-            month_weeks.append(
-                {
-                    "week": week_num,
-                    "month_week": w,
-                    "title": item.get("title"),
-                    "keyword": item.get("keyword"),
-                    "content_type": role,
-                    "action": item.get("action"),
-                    "work_label": item.get("work_label"),
-                    "priority": item.get("priority"),
-                    "est_words": item.get("est_words"),
-                    "suggested_url": item.get("suggested_url"),
-                    "service": item.get("service"),
-                    "supports_service_id": item.get("supports_service_id"),
-                }
-            )
-        months.append(
-            {"month": month, "label": labels.get(month, f"Month {month}"), "weeks": month_weeks}
-        )
-        month += 1
-        if idx >= len(scheduled) and month > 3:
-            break
-    return months
+    return schedule_content_plan(priority_queue, weeks=weeks)
 
 
 def build_internal_linking(
@@ -1093,69 +1050,37 @@ async def run_content_strategy_plan(
             for g in content_gaps[:8]:
                 g["competitor_blog_examples"] = blog_hints[:6]
 
-    calendar = build_calendar(priority_queue, weeks=12)
-    linking = build_internal_linking(core_topics, priority_queue)
-    metrics = build_success_metrics(priority_queue, core_topics)
+    from app.services.content_queue import (
+        build_content_plan,
+        order_content_plan,
+        schedule_content_plan,
+        summarize_content_plan,
+    )
+
+    audit = dict(content_audit or {})
+    audit_ready = bool(audit.get("inventory") or audit.get("refresh_queue") or audit.get("summary_counts"))
+    merged = build_content_plan(
+        content_audit=audit if audit_ready else None,
+        content_strategy={
+            "priority_queue": priority_queue,
+            "content_gaps": content_gaps,
+            "pillars": core_topics,
+        },
+        site_architecture=dict(site_architecture or {}),
+    )
+    content_plan = list(merged.get("content_plan") or [])
+    exclusions = list(merged.get("exclusions") or [])
+    calendar = schedule_content_plan(content_plan, weeks=12)
+    order_content_plan(content_plan)
+    plan_summary = summarize_content_plan(content_plan)
+    linking = build_internal_linking(core_topics, content_plan)
+    metrics = build_success_metrics(content_plan, core_topics)
     url_ia = build_url_ia(
         domain=domain,
         core_topics=core_topics,
         report_clusters=report_clusters,
-        priority_queue=priority_queue,
+        priority_queue=content_plan,
     )
-
-    # Legacy-compatible fields for existing UI / Phase memory
-    priority_pages_all = [
-        {
-            "keyword": p.get("keyword"),
-            "bucket": "best"
-            if p.get("priority") == "Quick win"
-            else "evergreen"
-            if p.get("priority") == "Fill-in"
-            else "trend"
-            if p.get("priority") == "Big bet"
-            else "avoid",
-            "priority_label": p.get("priority"),
-            "suggested_url": p.get("suggested_url"),
-            "opportunity_score": p.get("opportunity_score"),
-            "volume": p.get("volume"),
-            "difficulty": p.get("difficulty"),
-            "rationale": p.get("rationale"),
-            "beat_competitors": p.get("beat_competitors") or [],
-            "title": p.get("title"),
-            "intent": p.get("intent"),
-            "est_words": p.get("est_words"),
-            "content_type": p.get("content_type"),
-            "action": p.get("action"),
-            "work_label": p.get("work_label"),
-            "supports_service_id": p.get("supports_service_id"),
-            "from_selected_service": p.get("from_selected_service"),
-        }
-        for p in priority_queue
-        if p.get("priority") != "Avoid"
-    ]
-    selected_pages = [p for p in priority_pages_all if p.get("from_selected_service")]
-    priority_pages = selected_pages + [
-        p for p in priority_pages_all if not p.get("from_selected_service")
-    ][:15]
-
-    calendar_priorities = [
-        {
-            "wave": m["month"],
-            "focus": m["label"],
-            "pages": [w.get("keyword") for w in m.get("weeks") or [] if w.get("keyword")],
-            "plan": [
-                {
-                    "keyword": w.get("keyword"),
-                    "title": w.get("title"),
-                    "action": w.get("action"),
-                    "work_label": w.get("work_label"),
-                }
-                for w in m.get("weeks") or []
-                if w.get("keyword")
-            ],
-        }
-        for m in calendar
-    ]
     service_count = len(selected_services)
     blog_count = sum(
         1
@@ -1170,15 +1095,14 @@ async def run_content_strategy_plan(
     service_sentence = (
         f"Optimize {optimize_count} selected service page"
         f"{'s' if optimize_count != 1 else ''} and create {blog_count} supporting "
-        f"page{'s' if blog_count != 1 else ''} across guide, blog, comparison, FAQ, "
-        "listicle, landing, and tool. "
+        f"page{'s' if blog_count != 1 else ''} from the keyword clusters for those services. "
         if selected_services
         else ""
     )
 
     executive_summary = (
         f"Content strategy for {client_name}: {len(core_topics)} core topic pillars, "
-        f"{len(priority_queue)} prioritized pieces. "
+        f"{len(content_plan)} prioritized pieces. "
         f"{service_sentence}"
         f"Geo: {location_name}. "
         f"Gaps vs {', '.join(competitor_names[:3] or competitor_domains[:3]) or 'competitors'} "
@@ -1188,7 +1112,7 @@ async def run_content_strategy_plan(
         kpis = list(metrics.get("content_production_kpis") or [])
         metrics["content_production_kpis"] = [
             f"Optimize each of the {service_count} selected service pages",
-            "Create a guide, blog, comparison, FAQ, listicle, landing, and tool page for each selected service",
+            "Create a page for each keyword cluster that belongs to a selected service",
             *[
                 item
                 for item in kpis
@@ -1206,7 +1130,9 @@ async def run_content_strategy_plan(
         "executive_summary": executive_summary,
         "core_topics": core_topics,
         "content_gaps": content_gaps,
-        "priority_queue": priority_queue,
+        "content_plan": content_plan,
+        "content_plan_summary": plan_summary,
+        "exclusions": exclusions,
         "selected_services": selected_services,
         "selected_service_plan": {
             "service_count": service_count,
@@ -1214,7 +1140,8 @@ async def run_content_strategy_plan(
             "blog_create_count": blog_count,
             "note": (
                 "Each selected service page is optimized. "
-                "Each selected service is planned across guide, blog, comparison, FAQ, listicle, landing, and tool pages."
+                "Supporting pages are the keyword clusters for that service. "
+                "A service with no cluster does not get a guide, pricing, FAQ, or tool page."
             ),
         } if selected_services else None,
         "content_calendar": calendar,
@@ -1242,14 +1169,12 @@ async def run_content_strategy_plan(
             for c in core_topics
         ],
         "url_ia_plan": url_ia,
-        "priority_pages": priority_pages,
         "competitor_content_gaps": content_gaps,
-        "calendar_priorities": calendar_priorities,
         "clusters_used": len(report_clusters),
         "website_context": {"has_website_summary": bool(website)},
         "source_phase5_providers": demand.get("providers_used") or [],
         "skills_used": ["content_strategy"],
-        "funnel_balance": funnel_balance(priority_queue),
+        "funnel_balance": funnel_balance(content_plan),
         "source": "content_strategy_rules",
         "sibling_skill": "content-audit",
         "handoffs": [
@@ -1268,93 +1193,25 @@ async def run_content_strategy_plan(
         ],
     }
 
-    # Prefer refresh over new URL when Phase 8 audit already ran
-    audit = dict(content_audit or {})
-    audit_overrides: list[dict[str, Any]] = []
-    if audit.get("inventory") or audit.get("refresh_queue"):
-        refresh_paths: set[str] = set()
-        consolidate_paths: set[str] = set()
-        for row in list(audit.get("inventory") or []) + list(audit.get("refresh_queue") or []):
-            if not isinstance(row, dict):
-                continue
-            path = str(row.get("path") or row.get("url") or "").lower()
-            disp = str(row.get("disposition") or "").lower()
-            if disp == "refresh":
-                refresh_paths.add(path)
-            elif disp == "consolidate":
-                consolidate_paths.add(path)
-        for item in priority_queue:
-            if not isinstance(item, dict):
-                continue
-            sug = str(item.get("suggested_url") or item.get("url") or "").lower()
-            kw = str(item.get("keyword") or "").lower()
-            matched = None
-            for p in refresh_paths:
-                if p and (p in sug or sug in p or (kw and kw in p)):
-                    matched = "refresh"
-                    break
-            if not matched:
-                for p in consolidate_paths:
-                    if p and (p in sug or sug in p or (kw and kw in p)):
-                        matched = "consolidate"
-                        break
-            if matched:
-                item["action"] = matched
-                item["priority_note"] = (
-                    f"content-audit {matched.upper()} — prefer over new URL"
-                )
-                audit_overrides.append(
-                    {
-                        "keyword": item.get("keyword"),
-                        "suggested_url": item.get("suggested_url"),
-                        "action": matched,
-                    }
-                )
-        # Boost refresh items toward front of queue
-        priority_queue.sort(
-            key=lambda x: (
-                0 if str(x.get("action") or "") == "refresh" else 1,
-                0 if x.get("priority") == "Quick win" else 1,
-                0 if x.get("priority") == "Big bet" else 2,
-            )
-        )
-        plan["priority_queue"] = priority_queue
-        plan["priority_pages"] = priority_pages  # keep compat list; queue is canonical
-        plan["audit_overrides"] = audit_overrides
-        plan["content_audit_applied"] = True
+    audit_overrides = list(merged.get("audit_overrides") or [])
+    plan["audit_overrides"] = audit_overrides
+    plan["content_audit_applied"] = audit_ready
+    plan["both_skills_present"] = bool(merged.get("both_skills_present"))
+    plan["routing_rule"] = merged.get("routing_rule")
+    plan["queue_length"] = merged.get("queue_length")
+    if audit_ready:
         if audit_overrides and isinstance(plan.get("executive_summary"), str):
             plan["executive_summary"] = (
                 plan["executive_summary"]
                 + f" Applied {len(audit_overrides)} content-audit override(s) "
                 "(refresh/consolidate preferred over new URLs)."
             )
-        from app.services.content_queue import build_combined_priority_queue
-
-        combined = build_combined_priority_queue(
-            content_audit=audit,
-            content_strategy=plan,
-            site_architecture=dict(site_architecture or {}),
-        )
-        plan.update(combined)
-        if combined.get("combined_priority_queue"):
-            # Surface combined queue as the engagement priority list
-            plan["priority_queue_strategy_only"] = list(priority_queue)
     else:
-        plan["content_audit_applied"] = False
         plan["audit_note"] = (
             "Gap analysis plans *new* topics only. On established sites run "
             "content-audit first (GSC two periods). Without it, decay and "
             "cannibalisation cannot be assessed — this strategy is built on an "
             "unverified picture of what already exists."
-        )
-        from app.services.content_queue import build_combined_priority_queue
-
-        plan.update(
-            build_combined_priority_queue(
-                content_audit=None,
-                content_strategy=plan,
-                site_architecture=dict(site_architecture or {}),
-            )
         )
 
     # Optional LLM enrichment of summary + calendar polish
@@ -1374,7 +1231,7 @@ async def run_content_strategy_plan(
             f"Competitor site/blog snapshots: "
             f"{[{'name': s.get('name'), 'blogs': s.get('blog_count'), 'pages': s.get('page_count')} for s in competitor_sites[:4]]}\n"
             f"Core topics: {core_topics[:3]}\n"
-            f"Top priority queue: {priority_queue[:8]}\n"
+            f"Top priority queue: {content_plan[:8]}\n"
             f"Gaps: {content_gaps[:6]}\n"
             "Write a sharp executive_summary (4-6 sentences) and optional calendar_notes. "
             "Compare only against the listed competitors."
@@ -1397,7 +1254,7 @@ async def run_content_strategy_plan(
             polished = await synthesize_text(
                 "You are an SEO content strategist. Write 4-6 sentences.",
                 f"Summarize strategy for {client_name}: pillars={len(core_topics)}, "
-                f"queue={len(priority_queue)}, gaps={len(content_gaps)}, "
+                f"queue={len(content_plan)}, gaps={len(content_gaps)}, "
                 f"competitors={competitor_domains[:3]}",
             )
             if polished and len(polished.strip()) > 40:

@@ -37,6 +37,7 @@ from app.services.content_signals.weights import (
     ordered_by_weight,
     resolve_weights,
 )
+from app.services.service_scope import scope_signal
 
 log = get_logger("content_signals.context")
 
@@ -48,6 +49,7 @@ def build_content_context(
     keyword: str,
     page_type: str | None = None,
     intent: str | None = None,
+    service_id: str | None = None,
     # profile blobs (all optional — a missing blob just disables its signals)
     commercial: dict[str, Any] | None = None,
     marketing: dict[str, Any] | None = None,
@@ -166,11 +168,17 @@ def build_content_context(
         if not r.available
     ]
 
+    # Not a weighted signal: the offered sub-services are a hard constraint, so
+    # the operator cannot switch it off and it never moves the relevance score.
+    prioritization = dict(commercial.get("service_prioritization") or {})
+    service_scope = scope_signal(prioritization, service_id) if service_id else None
+
     return {
         "version": CONTEXT_VERSION,
         "keyword": keyword,
         "page_type": page_type,
         "funnel_stage": stage,
+        "service_scope": service_scope,
         "preset": preset_name,
         "weights": weights,
         "settings": {
@@ -195,6 +203,25 @@ def render_context_block(context: dict[str, Any], *, max_chars: int = 6000) -> s
         "CONTENT CONTEXT (signals below are ordered by operator-set weight; "
         "a signal that is absent was unavailable — do not invent it):",
     ]
+    scope = context.get("service_scope") or {}
+    if scope.get("scoped"):
+        offered = ", ".join(scope.get("offered") or []) or "none (service page only)"
+        lines.append(
+            f"\n[service scope · {scope.get('service')}] Offered sub-services: {offered}. "
+            + (
+                "Never mention, compare against, or promote: "
+                + ", ".join(scope.get("excluded") or [])
+                + ". "
+                if scope.get("excluded")
+                else ""
+            )
+            + "Do not introduce any sub-service that is not in the offered list."
+        )
+    elif scope:
+        lines.append(
+            f"\n[service scope · {scope.get('service')}] The offered sub-services for this "
+            "service have not been confirmed. Do not add sub-services beyond what the brief names."
+        )
     for name in context.get("signal_order") or []:
         signal = signals.get(name) or {}
         data = signal.get("data") or {}

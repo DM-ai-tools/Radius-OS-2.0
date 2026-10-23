@@ -55,8 +55,9 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
   const pillars = asRows(payload.pillars);
   const coreTopics = asRows(payload.core_topics);
   const priorities = asRows(payload.priority_pages);
-  const queue = asRows(payload.priority_queue);
-  const combinedQueue = asRows(payload.combined_priority_queue);
+  const queue = asRows(payload.content_plan).length
+    ? asRows(payload.content_plan)
+    : asRows(payload.priority_queue);
   const gapA = asRows(payload.competitor_content_gaps);
   const gaps = gapA.length ? gapA : asRows(payload.content_gaps);
   const calendar = asRows(payload.content_calendar);
@@ -73,7 +74,11 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
       ? (payload.success_metrics as Record<string, unknown>)
       : null;
   const displayQueue = queue.length ? queue : priorities;
-  const showCombined = combinedQueue.length > 0 && Boolean(payload.both_skills_present);
+  const planSummary =
+    payload.content_plan_summary && typeof payload.content_plan_summary === "object"
+      ? (payload.content_plan_summary as Record<string, unknown>)
+      : null;
+  const exclusions = asRows(payload.exclusions);
   const topicBlocks = coreTopics.length ? coreTopics : pillars;
   const funnelBal =
     payload.funnel_balance && typeof payload.funnel_balance === "object"
@@ -130,12 +135,6 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
         <p style={{ fontSize: 13, marginTop: 0 }}>
           <strong>Audience:</strong> {String(payload.target_audience)}
         </p>
-      ) : null}
-      {payload.executive_summary ? (
-        <p style={{ fontSize: 14, lineHeight: 1.5 }}>{String(payload.executive_summary)}</p>
-      ) : null}
-      {payload.calendar_notes ? (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>{String(payload.calendar_notes)}</p>
       ) : null}
 
       {funnelCounts ? (
@@ -250,57 +249,17 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
         <p style={{ fontSize: 13, color: "var(--muted)" }}>{String(payload.audit_note)}</p>
       ) : null}
 
-      {showCombined ? (
-        <>
-          <h4 style={{ marginBottom: 8 }}>Combined priority queue (audit + strategy)</h4>
-          <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
-            {String(payload.routing_rule || "")}
-            {payload.note && payload.both_skills_present ? ` · ${String(payload.note)}` : ""}
-          </p>
-          <div style={{ overflowX: "auto", marginBottom: 14 }}>
-            <table
-              className="kw-report-table"
-              style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
-            >
-              <thead>
-                <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
-                  <th style={{ padding: "6px 8px" }}>#</th>
-                  <th style={{ padding: "6px 8px" }}>Action</th>
-                  <th style={{ padding: "6px 8px" }}>Title</th>
-                  <th style={{ padding: "6px 8px" }}>Keyword</th>
-                  <th style={{ padding: "6px 8px" }}>Source</th>
-                  <th style={{ padding: "6px 8px" }}>Priority</th>
-                </tr>
-              </thead>
-              <tbody>
-                {combinedQueue.slice(0, 30).map((p, i) => (
-                  <tr key={`cq-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
-                    <td style={{ padding: "6px 8px" }}>{String(p.rank ?? i + 1)}</td>
-                    <td style={{ padding: "6px 8px" }}>
-                      <span className="cs-chip">{workLabel(p)}</span>
-                    </td>
-                    <td style={{ padding: "6px 8px", fontWeight: 600 }}>
-                      {String(p.title || "—")}
-                      {p.note ? (
-                        <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>
-                          {String(p.note).slice(0, 100)}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td style={{ padding: "6px 8px" }}>{String(p.keyword || "—")}</td>
-                    <td style={{ padding: "6px 8px", fontSize: 11 }}>{String(p.source || "—")}</td>
-                    <td style={{ padding: "6px 8px" }}>{String(p.priority || "—")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
+      <h4 style={{ marginBottom: 8 }}>Content plan</h4>
+      {planSummary ? (
+        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>
+          {String(planSummary.total ?? displayQueue.length)} pieces
+          {" · "}
+          {String(planSummary.scheduled ?? 0)} scheduled
+          {" · "}
+          {String(planSummary.unscheduled ?? 0)} unscheduled
+          {planSummary.combined_volume != null ? ` · volume ${fmtVol(planSummary.combined_volume)}` : ""}
+        </p>
       ) : null}
-
-      <h4 style={{ marginBottom: 8 }}>
-        {showCombined ? "Strategy-only queue (gaps / new)" : "Priority content queue"}
-      </h4>
       {payload.selected_service_plan &&
       typeof payload.selected_service_plan === "object" &&
       (payload.selected_service_plan as Record<string, unknown>).note ? (
@@ -314,7 +273,9 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
             <thead>
               <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
                 <th style={{ padding: "6px 8px" }}>#</th>
+                <th style={{ padding: "6px 8px" }}>Week</th>
                 <th style={{ padding: "6px 8px" }}>Work</th>
+                <th style={{ padding: "6px 8px" }}>Source</th>
                 <th style={{ padding: "6px 8px" }}>Title</th>
                 <th style={{ padding: "6px 8px" }}>Keyword</th>
                 <th style={{ padding: "6px 8px" }}>Vol</th>
@@ -334,9 +295,13 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                   strList(p.beat_competitors, 3) || strList(p.competitor_domains, 3);
                 return (
                   <tr key={`${String(p.keyword)}-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
-                    <td style={{ padding: "6px 8px", verticalAlign: "top" }}>{i + 1}</td>
+                    <td style={{ padding: "6px 8px", verticalAlign: "top" }}>{String(p.row ?? i + 1)}</td>
+                    <td style={{ padding: "6px 8px", verticalAlign: "top" }}>{fmtNum(p.week)}</td>
                     <td style={{ padding: "6px 8px", verticalAlign: "top" }}>
                       <span className="cs-chip">{workLabel(p)}</span>
+                    </td>
+                    <td style={{ padding: "6px 8px", verticalAlign: "top", fontSize: 11 }}>
+                      {String(p.source || "—")}
                     </td>
                     <td style={{ padding: "6px 8px", verticalAlign: "top", fontWeight: 600 }}>
                       {String(p.title || p.keyword || "—")}
@@ -390,7 +355,21 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
         <p style={{ fontSize: 13, color: "var(--muted)" }}>No prioritized pages yet</p>
       )}
 
-      {calendar.length ? (
+      {exclusions.length ? (
+        <>
+          <h4 style={{ marginBottom: 8 }}>Excluded</h4>
+          <ul className="missing-list">
+            {exclusions.slice(0, 12).map((row, i) => (
+              <li key={`${String(row.keyword || row.topic)}-${i}`}>
+                {String(row.keyword || row.topic || "—")}
+                {row.reason ? ` — ${String(row.reason)}` : ""}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+
+      {calendar.length && calendar.some((m) => Array.isArray(m.weeks)) ? (
         <>
           <h4 style={{ marginBottom: 8 }}>Content calendar (12 weeks)</h4>
           <div style={{ overflowX: "auto", marginBottom: 14 }}>
@@ -437,6 +416,36 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                     </tr>
                   ));
                 })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : calendar.length ? (
+        <>
+          <h4 style={{ marginBottom: 8 }}>Calendar</h4>
+          <div style={{ overflowX: "auto", marginBottom: 14 }}>
+            <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+                  <th style={{ padding: "6px 8px" }}>Month</th>
+                  <th style={{ padding: "6px 8px" }}>Theme</th>
+                  <th style={{ padding: "6px 8px" }}>Pieces</th>
+                  <th style={{ padding: "6px 8px" }}>Actions</th>
+                  <th style={{ padding: "6px 8px" }}>Volume</th>
+                  <th style={{ padding: "6px 8px" }}>Services</th>
+                </tr>
+              </thead>
+              <tbody>
+                {calendar.map((m, i) => (
+                  <tr key={`month-${String(m.month)}-${i}`} style={{ borderBottom: "1px solid var(--line)" }}>
+                    <td style={{ padding: "6px 8px" }}>{String(m.month ?? "—")}</td>
+                    <td style={{ padding: "6px 8px" }}>{String(m.theme || m.label || "—")}</td>
+                    <td style={{ padding: "6px 8px" }}>{String(m.pieces ?? "—")}</td>
+                    <td style={{ padding: "6px 8px" }}>{String(m.actions_label || "—")}</td>
+                    <td style={{ padding: "6px 8px" }}>{fmtVol(m.combined_volume)}</td>
+                    <td style={{ padding: "6px 8px" }}>{String(m.services_label || "—")}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

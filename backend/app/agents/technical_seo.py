@@ -32,18 +32,6 @@ def _load_phase7_contracts() -> dict[str, int]:
     return loaded
 
 
-def _ahrefs_project_id(profile) -> int | None:
-    """Per-client Ahrefs Site Audit project override from commercial_scope."""
-    scope = dict(profile.commercial_scope or {})
-    raw = scope.get("ahrefs_site_audit_project_id")
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
 async def run_technical_seo(
     db: AsyncSession,
     *,
@@ -158,8 +146,6 @@ async def run_technical_seo(
         primary_url=client.primary_url,
         site_architecture=ia,
         website=dict(profile.website_situation_summary or {}),
-        tracking=dict(profile.tracking_baseline or {}),
-        ahrefs_project_id=_ahrefs_project_id(profile),
         previous_summary=dict(profile.technical_seo_summary or {}),
         gsc_data=gsc_data,
     )

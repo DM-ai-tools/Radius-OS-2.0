@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from reportlab.platypus import Spacer
+from reportlab.platypus import CondPageBreak, Spacer
 
 from app.services.report_pdf_theme import (
     body,
@@ -13,9 +13,16 @@ from app.services.report_pdf_theme import (
     header_band,
     note_block,
     numbered_list,
-    numbered_section,
+    section_rule,
     subsection,
 )
+
+
+def _open_section(flow: list, number: int, title: str) -> None:
+    flow.append(Spacer(1, 6))
+    flow.append(section_rule())
+    flow.append(Spacer(1, 8))
+    flow.extend(header_band(f"{number}. {title}"))
 
 
 def _rows(raw: Any) -> list[dict[str, Any]]:
@@ -125,7 +132,9 @@ def render_site_architecture_blueprint(
     url_map_report = (
         payload.get("url_map_report") if isinstance(payload.get("url_map_report"), dict) else {}
     )
-    url_map = _rows((url_map_report or {}).get("final_url_map"))
+    from app.services.url_map_report import numbered
+
+    url_map = numbered(_rows((url_map_report or {}).get("final_url_map")))
     tree = _rows(payload.get("target_url_tree"))
     ownership = _rows(payload.get("cluster_ownership"))
     primary_nav = _rows(nav.get("primary_nav"))
@@ -152,38 +161,28 @@ def render_site_architecture_blueprint(
 
     title = resolve_report_title(report, client)
     if show_title:
-        flow.extend(header_band(title, " · ".join(meta_bits)))
+        flow.extend(header_band(title, " · ".join(meta_bits), level="report"))
     elif meta_bits:
         flow.append(body(" · ".join(meta_bits)))
         flow.append(Spacer(1, 6))
 
-    # Executive Summary
-    flow.append(subsection("Executive Summary"))
-    if payload.get("executive_summary"):
-        flow.append(body(str(payload["executive_summary"])))
-    else:
-        client_label = payload.get("client") or client.get("name") or "the client"
-        flow.append(
-            body(
-                f"This document establishes the site architecture blueprint for {client_label}. "
-                f"The architecture uses a hub-and-spoke content model with {len(tree)} planned URLs "
-                f"and {len(ownership)} cluster ownership assignments."
-            )
+    if show_title:
+        flow.append(Spacer(1, 8))
+        flow.append(section_rule())
+        flow.append(Spacer(1, 8))
+    flow.extend(header_band("Executive Summary"))
+    client_label = payload.get("client") or client.get("name") or "the client"
+    flow.append(
+        body(
+            f"This document establishes the site architecture blueprint for {client_label}. "
+            f"The architecture uses a hub-and-spoke content model with {len(tree)} planned URLs "
+            f"and {len(ownership)} cluster ownership assignments."
         )
+    )
     flow.append(Spacer(1, 10))
 
     # 1. Competitive Architecture Benchmarking
-    flow.append(numbered_section(1, "Competitive Architecture Benchmarking"))
-    if payload.get("competitor_ia_notes"):
-        flow.append(body(str(payload["competitor_ia_notes"])))
-    else:
-        flow.append(
-            body(
-                "A comparative analysis against key market competitors reveals structural positioning "
-                "across the competitive landscape. Specialized hubs support vertical targeting without "
-                "incurring crawl depth penalties."
-            )
-        )
+    _open_section(flow, 1, "Competitive Architecture Benchmarking")
     comp_rows = competitor_ia or competitor_sites
     flow.append(
         data_table_weighted(
@@ -197,13 +196,13 @@ def render_site_architecture_blueprint(
                 for c in comp_rows
             ],
             [1.1, 1.0, 2.4],
-            max_rows=8,
+            max_rows=40,
         )
     )
     flow.append(Spacer(1, 10))
 
     # 2. Crawl Metrics and Architecture Gate
-    flow.append(numbered_section(2, "Crawl Metrics and Architecture Gate"))
+    _open_section(flow, 2, "Crawl Metrics and Architecture Gate")
     flow.append(
         body(
             "Initial site crawl metrics and structural constraints are outlined below to ensure "
@@ -238,7 +237,7 @@ def render_site_architecture_blueprint(
     flow.append(Spacer(1, 10))
 
     # 3. Page-Type Model & Taxonomy
-    flow.append(numbered_section(3, "Page-Type Model & Taxonomy"))
+    _open_section(flow, 3, "Page-Type Model & Taxonomy")
     flow.append(
         body("The taxonomy defines the structural hierarchy, indexing rules, and URL patterns across the domain.")
     )
@@ -265,7 +264,7 @@ def render_site_architecture_blueprint(
     flow.append(Spacer(1, 10))
 
     # 4. Target URL Tree & Primary Navigation
-    flow.append(numbered_section(4, "Target URL Tree & Primary Navigation"))
+    _open_section(flow, 4, "Target URL Tree & Primary Navigation")
     flow.append(
         body("The target URL tree operationalizes the keyword targeting strategy across primary hubs and service spokes.")
     )
@@ -312,20 +311,22 @@ def render_site_architecture_blueprint(
     flow.append(Spacer(1, 10))
 
     # 5. URL Mapping & Taxonomy Plan
-    flow.append(numbered_section(5, "URL Mapping & Taxonomy Plan"))
+    _open_section(flow, 5, "URL Mapping & Taxonomy Plan")
     flow.append(
         body(
-            "Every keyword cluster resolved to a URL decision — optimize an existing page, "
-            "review a weak match before merging, or create new. Two views of the same rows: "
-            "taxonomy/status, then keyword economics."
+            "Every keyword cluster resolved to a URL decision: optimize an existing page, "
+            "review a weak match before merging, create new, or fold into a parent page that "
+            "is yet to be built. Three views of the same numbered rows: taxonomy and status, "
+            "keyword economics, then the decision and its evidence."
         )
     )
     flow.append(subsection("Taxonomy & Status"))
     flow.append(
         data_table_weighted(
-            ["Lvl", "L1", "L2", "L3", "L4", "Current URL", "Proposed URL", "Status", "Page Type", "Priority"],
+            ["#", "Lvl", "L1", "L2", "L3", "L4", "Current URL", "Proposed URL", "Status", "Page Type", "Priority"],
             [
                 [
+                    u.get("row_no"),
                     u.get("level"),
                     u.get("l1_category") or "—",
                     u.get("l2_subcategory") or "—",
@@ -339,7 +340,7 @@ def render_site_architecture_blueprint(
                 ]
                 for u in url_map
             ],
-            [0.4, 0.7, 0.8, 0.9, 0.8, 1.3, 1.3, 0.9, 0.7, 0.6],
+            [0.3, 0.45, 0.75, 0.65, 0.65, 0.65, 1.3, 1.3, 0.9, 0.75, 0.8],
             max_rows=40,
         )
     )
@@ -348,6 +349,7 @@ def render_site_architecture_blueprint(
     flow.append(
         data_table_weighted(
             [
+                "#",
                 "Primary Keyword",
                 "Vol/mo",
                 "CPC",
@@ -359,6 +361,7 @@ def render_site_architecture_blueprint(
             ],
             [
                 [
+                    u.get("row_no"),
                     u.get("primary_keyword"),
                     _fmt_vol(u.get("search_volume")),
                     _fmt_cpc(u.get("cpc")),
@@ -370,16 +373,47 @@ def render_site_architecture_blueprint(
                 ]
                 for u in url_map
             ],
-            [1.0, 0.5, 0.5, 1.8, 0.7, 0.6, 0.5, 1.4],
+            [0.3, 1.0, 0.5, 0.5, 1.8, 0.7, 0.6, 0.5, 1.4],
             max_rows=40,
         )
     )
+    from app.services.url_map_report import (
+        DECISION_HEADERS,
+        DECISION_WEIGHTS,
+        decision_row,
+        has_decision_evidence,
+    )
+
+    decided = [u for u in url_map if has_decision_evidence(u)]
+    if decided:
+        flow.append(Spacer(1, 8))
+        # Keep the heading with the first rows instead of alone at a page foot.
+        flow.append(CondPageBreak(180))
+        flow.append(subsection("Decision & Evidence"))
+        flow.append(
+            data_table_weighted(
+                DECISION_HEADERS,
+                [decision_row(u) for u in decided],
+                DECISION_WEIGHTS,
+                max_rows=40,
+            )
+        )
+    summary = (url_map_report or {}).get("summary") or {}
+    if summary:
+        flow.append(
+            body(
+                f"Checks: {summary.get('inconsistent_rows', 0)} contradictory rows rejected, "
+                f"{summary.get('url_collisions', 0)} URL collisions flagged, "
+                f"{summary.get('hygiene_review', 0)} proposals flagged by URL hygiene, "
+                f"{summary.get('scored_without_search_console', 0)} rows scored without Search Console."
+            )
+        )
     if len(url_map) > 40:
         flow.append(body(f"+{len(url_map) - 40} more mapped clusters in payload"))
     flow.append(Spacer(1, 10))
 
     # 6. Cluster Ownership & Governance
-    flow.append(numbered_section(6, "Cluster Ownership & Governance"))
+    _open_section(flow, 6, "Cluster Ownership & Governance")
     flow.append(
         body(
             "To prevent internal keyword cannibalization and establish clear authority, "
@@ -407,26 +441,26 @@ def render_site_architecture_blueprint(
                 for o in ownership
             ],
             [1.0, 1.2, 0.7, 0.8, 1.6],
-            max_rows=25,
+            max_rows=40,
         )
     )
     flow.append(Spacer(1, 10))
 
     # 7. URL Convention Rules & Governance
-    flow.append(numbered_section(7, "URL Convention Rules & Governance"))
+    _open_section(flow, 7, "URL Convention Rules & Governance")
     if url_rules:
         plain_rules = [
             f"{k.replace('_', ' ').title()}: {v}"
             for k, v in url_rules.items()
             if k != "references" and isinstance(v, str)
         ]
-        flow.extend(bullet_list(plain_rules, max_items=12))
+        flow.extend(bullet_list(plain_rules, max_items=60))
     else:
         flow.append(body("—"))
     flow.append(Spacer(1, 10))
 
     # 8. Rollout Plan and Phased Handoffs
-    flow.append(numbered_section(8, "Rollout Plan and Phased Handoffs"))
+    _open_section(flow, 8, "Rollout Plan and Phased Handoffs")
     if rollout:
         flow.append(
             body(
@@ -435,7 +469,7 @@ def render_site_architecture_blueprint(
         )
         seq = rollout.get("sequence") if isinstance(rollout.get("sequence"), list) else []
         if seq:
-            flow.extend(numbered_list([str(s) for s in seq], max_items=12))
+            flow.extend(numbered_list([str(s) for s in seq], max_items=60))
         extras: list[str] = []
         if rollout.get("freeze_window"):
             extras.append(f"Freeze: {rollout['freeze_window']}")
@@ -444,7 +478,7 @@ def render_site_architecture_blueprint(
         risks = rollout.get("high_risk_flags") if isinstance(rollout.get("high_risk_flags"), list) else []
         if risks:
             extras.append(f"Risk flags: {' · '.join(str(r) for r in risks)}")
-        flow.extend(bullet_list(extras, max_items=6))
+        flow.extend(bullet_list(extras, max_items=60))
     if redirects:
         flow.append(subsection("Redirect map (Technical SEO handoff)"))
         flow.append(
@@ -455,7 +489,7 @@ def render_site_architecture_blueprint(
                     for r in redirects
                 ],
                 [1.2, 1.2, 0.5, 1.6],
-                max_rows=15,
+                max_rows=40,
             )
         )
     if handoffs:
@@ -463,7 +497,13 @@ def render_site_architecture_blueprint(
         flow.append(
             data_table_weighted(
                 ["Deliverable", "Receiving phase / owner"],
-                [[h.get("item"), h.get("receiving")] for h in handoffs],
+                [
+                    [
+                        h.get("item") or h.get("concern") or h.get("deliverable"),
+                        h.get("receiving") or h.get("route_to") or h.get("owner"),
+                    ]
+                    for h in handoffs
+                ],
                 [1.4, 2.1],
             )
         )

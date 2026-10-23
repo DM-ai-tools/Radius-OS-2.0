@@ -1,5 +1,7 @@
 """Pipeline rules that keep DataForSEO metrics and Claude judgments apart."""
 
+import pytest
+
 from app.integrations.dataforseo import should_retry_dataforseo
 from app.services.keyword_cluster_naming import apply_cluster_names
 from app.services.keyword_metrics import volumes_disagree
@@ -44,6 +46,22 @@ def test_cluster_naming_ignores_a_primary_that_was_not_a_member():
     )
     assert named[0]["name"] == "Drain help"
     assert named[0]["primary_keyword"] == "drain cleaning"
+
+
+@pytest.mark.asyncio
+async def test_cluster_naming_keeps_rule_names_when_the_model_is_empty(monkeypatch):
+    from app.services.keyword_cluster_naming import name_clusters
+
+    async def _empty(**_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.keyword_cluster_naming.keyword_analysis_chat", _empty)
+    monkeypatch.setattr("app.services.keyword_cluster_naming.keyword_analysis_ready", lambda: True)
+    clusters = [{"name": "SEO", "primary_keyword": "seo", "keywords": [{"keyword": "seo"}]}]
+    audit: dict = {}
+    out = await name_clusters(clusters, audit=audit)
+    assert out[0]["name"] == "SEO"
+    assert audit["ran"] is False
 
 
 def test_dataforseo_retries_transport_and_server_errors_only():

@@ -304,7 +304,17 @@ async def test_all_other_phase_mutation_endpoints_reject_permissionless_user(
         (
             "post",
             f"/api/v1/clients/{client.id}/content-production/site-preview",
-            {"json": {"title": "Draft", "markdown": "Private draft"}},
+            {"json": {"action": "build", "draft": {"title": "Draft", "markdown": "Private draft"}}},
+        ),
+        (
+            "post",
+            f"/api/v1/clients/{client.id}/content-production/site-preview",
+            {"json": {"action": "status", "draft": {"title": "Draft", "markdown": "Private draft"}}},
+        ),
+        (
+            "get",
+            f"/api/v1/clients/{client.id}/content-production/site-preview?key=0123456789abcdef&include_html=true",
+            {},
         ),
         (
             "post",

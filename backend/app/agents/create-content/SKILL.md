@@ -46,7 +46,7 @@ AI cannot generate first-hand experience. Where a brief calls for original testi
 [AUTHOR INPUT REQUIRED — first-hand: … This section cannot be written without it.]
 ```
 
-Do not fill these with plausible-sounding invention. Same for statistics, quotes, prices, dates and study findings: cite a real source or mark `[VERIFY]` **next to that claim only**. Never invent a citation. Do not flag an entire section because it *might* need a source.
+Do not fill these with plausible-sounding invention. Do not write `[VERIFY]` or `[AUTHOR INPUT REQUIRED]` in the page. If a statistic, quote, price, date, or study was not supplied, leave that claim out. Never invent a citation.
 
 ## Writing rules
 
@@ -66,7 +66,7 @@ Do not fill these with plausible-sounding invention. Same for statistics, quotes
 1. Check the brief — pre-flight, differentiation, author. Stop if not.
 2. Restate differentiation in one sentence. If you can't, refuse.
 3. Outline against required coverage; honour out-of-scope.
-4. Write finished prose. Use `[AUTHOR INPUT REQUIRED]` or `[VERIFY]` only for a specific unknowable first-hand fact or unsourced number — never on every heading.
+4. Write finished prose. Never put `[AUTHOR INPUT REQUIRED]` or `[VERIFY]` in the page. Omit a fact you were not given.
 5. Self-check.
 6. Deliver with the **review queue on top**.
 
@@ -76,8 +76,8 @@ Do not fill these with plausible-sounding invention. Same for statistics, quotes
 # [Title]
 
 ## Review queue — resolve before publishing
-- [ ] [AUTHOR INPUT REQUIRED] × [n]
-- [ ] [VERIFY] × [n]
+- [ ] First-hand notes still to write: [n]
+- [ ] Unsourced claims left out: [n]
 - [ ] Named reviewer: ____________  Date: ________
 
 ## Draft metadata

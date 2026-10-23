@@ -1,9 +1,9 @@
 """Multi-mode keyword seeding from Ahrefs (exact / related / broad).
 
 Phase 5 seeding:
-  - Pull expansions per CDD seed from Ahrefs matching-terms + related-terms
-  - Keep only volume > min_volume (default 10)
-  - Classify each keyword: exact | related | broad
+  - Expand each service seed through DataForSEO Labs (suggestions, related, ideas)
+  - Keep a keyword only when DataForSEO reported a search volume greater than 9
+  - Classify each keyword: exact | phrase | related | broad
   - Emit a multi-keyword dataset keyed by seed with nested clusters
 """
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.config import get_settings
@@ -20,17 +21,40 @@ from app.services.keyword_opportunity import (
     detect_funnel,
     detect_intent,
     is_stale_year_keyword,
+    normalize_provider_intent,
 )
+from app.services.keyword_provider_filters import noise_filters
 from app.services.keyword_relevance import (
     RelevanceContext,
     compact_cleaning_audit,
     empty_cleaning_audit,
     filter_relevant_keywords,
 )
+from app.services.keyword_variants import collapse_close_variants
+from app.services.query_variants import anchor_term
 
 log = get_logger("keyword_seeding")
 
 MATCH_CLASSES = ("exact", "phrase", "related", "broad")
+# Volume-qualified rows need a DataForSEO search volume strictly above this.
+# 10 qualifies. 9, 0, and a missing volume do not.
+SEARCH_VOLUME_ABOVE = 9
+_METRIC_FIELDS = (
+    "volume",
+    "difficulty",
+    "cpc",
+    "traffic_potential",
+    "trend",
+    "competition",
+    "bid_low",
+    "bid_high",
+    "volume_clickstream",
+    "serp_referring_domains",
+    "serp_domain_rank",
+    "intent",
+    "detected_language",
+    "is_another_language",
+)
 _CLASS_RANK = {"exact": 0, "phrase": 1, "related": 2, "broad": 3}
 _STOP = {"the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "with"}
 
@@ -157,15 +181,117 @@ def classify_vs_seed(keyword: str, seed: str, *, source_hint: str | None = None)
     return classify_expansion(keyword, seed)
 
 
-def _passes_volume(row: dict[str, Any], min_volume: int) -> bool:
-    vol = row.get("volume")
-    if vol is None:
-        # Keep seed overview rows without inventing volume — drop expansions lacking volume
+def volume_qualifies(volume: Any, *, min_volume: int = 10) -> bool:
+    """True only for an integer DataForSEO volume greater than 9.
+
+    A missing volume stays null and does not pass. A caller that asks for a
+    higher minimum (``min_volume`` of 50 means volume >= 50) still applies,
+    and that minimum can never drop the floor to 9 or below.
+    """
+    if volume is None:
         return False
     try:
-        return int(vol) > int(min_volume)
+        value = int(volume)
     except (TypeError, ValueError):
         return False
+    if value <= SEARCH_VOLUME_ABOVE:
+        return False
+    floor = int(min_volume)
+    if floor > SEARCH_VOLUME_ABOVE and value < floor:
+        return False
+    return True
+
+
+def _passes_volume(row: dict[str, Any], min_volume: int) -> bool:
+    return volume_qualifies(row.get("volume"), min_volume=min_volume)
+
+
+# How a row's search volume is known. The minimum-volume threshold applies only to
+# MEASURED volume above zero; a row with no volume (or zero, which is no
+# measurement of demand) is kept and flagged unverified instead of being dropped.
+VOLUME_MEASURED = "measured"
+VOLUME_ESTIMATED = "estimated"
+VOLUME_UNVERIFIED = "unverified"
+
+
+def volume_status(row: dict[str, Any]) -> str:
+    if row.get("provider_fallback") or row.get("volume_estimated"):
+        return VOLUME_ESTIMATED
+    try:
+        value = int(row.get("volume"))
+    except (TypeError, ValueError):
+        return VOLUME_UNVERIFIED
+    return VOLUME_MEASURED if value > 0 else VOLUME_UNVERIFIED
+
+
+def keep_for_volume(row: dict[str, Any], min_volume: int) -> bool:
+    """Drop only a measured volume that is below the floor; keep everything else."""
+    if volume_status(row) != VOLUME_MEASURED:
+        return True
+    return volume_qualifies(row.get("volume"), min_volume=min_volume)
+
+
+def flag_volume(row: dict[str, Any]) -> dict[str, Any]:
+    status = volume_status(row)
+    row["volume_status"] = status
+    row["volume_unverified"] = status == VOLUME_UNVERIFIED
+    return row
+
+
+def volume_coverage(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """How many rows have measured, estimated or unverified volume."""
+    counts = {VOLUME_MEASURED: 0, VOLUME_ESTIMATED: 0, VOLUME_UNVERIFIED: 0}
+    for row in rows:
+        if isinstance(row, dict):
+            counts[volume_status(row)] += 1
+    counts["total"] = sum(counts.values())
+    return counts
+
+
+# Funnel coverage: the informational (awareness, TOFU) share of a seed's keywords
+# below which the seed gets an informational-only top-up from keyword ideas.
+INFORMATIONAL_FUNNEL = "TOFU"
+INFORMATIONAL_SHARE_FLOOR = 0.15
+
+
+def funnel_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"TOFU": 0, "MOFU": 0, "BOFU": 0}
+    for row in rows:
+        stage = str(row.get("funnel") or "")
+        if stage in counts:
+            counts[stage] += 1
+    return counts
+
+
+def _merge_keyword_row(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """Keep one keyword record. A missing metric must not erase a measured one."""
+    merged = dict(current)
+    sources = list(current.get("sources") or [])
+    for item in list(incoming.get("sources") or []):
+        if item and item not in sources:
+            sources.append(item)
+    endpoint = incoming.get("dataforseo_endpoint") or incoming.get("ahrefs_endpoint")
+    if endpoint and endpoint not in sources:
+        sources.append(str(endpoint))
+    for field in _METRIC_FIELDS:
+        value = incoming.get(field)
+        if value is None:
+            continue
+        existing = merged.get(field)
+        if existing is None:
+            merged[field] = value
+        elif (
+            field == "volume"
+            and isinstance(existing, (int, float))
+            and isinstance(value, (int, float))
+            and int(value) > int(existing)
+        ):
+            merged[field] = int(value)
+    for field in ("source", "seed", "parent_topic", "match_class", "funnel", "intent_basis", "provider_intent"):
+        if merged.get(field) in (None, "") and incoming.get(field) not in (None, ""):
+            merged[field] = incoming.get(field)
+    merged["sources"] = sources
+    return merged
 
 
 def _mock_expansions(seed: str, *, min_volume: int) -> list[dict[str, Any]]:
@@ -229,6 +355,71 @@ _DFS_SOURCE_FOR_CLASS = {
     "broad": "keyword_ideas",
 }
 
+# One DataForSEO page per buyer stage. The intent filter is what the Labs
+# field is called; the funnel name is what the report shows.
+_FUNNEL_INTENTS = (
+    ("TOFU", "informational"),
+    ("MOFU", "commercial"),
+    ("BOFU", "transactional"),
+)
+
+
+_FUNNEL_INTENT_VALUES = [intent for _stage, intent in _FUNNEL_INTENTS]
+
+
+def _intent_field(endpoint: str) -> str:
+    """The Labs path for search intent. Related keywords nest it under keyword_data."""
+    return (
+        "keyword_data.search_intent_info.main_intent"
+        if endpoint == "related_keywords"
+        else "search_intent_info.main_intent"
+    )
+
+
+def _intent_filter(endpoint: str, intent: str) -> list[Any]:
+    return [_intent_field(endpoint), "=", intent]
+
+
+def _volume_field(endpoint: str) -> str:
+    return (
+        "keyword_data.keyword_info.search_volume"
+        if endpoint == "related_keywords"
+        else "keyword_info.search_volume"
+    )
+
+
+def _capped_followups(
+    rows: list[dict[str, Any]], *, endpoint: str, page: int, provider_min: int
+) -> list[tuple[str, int, list[list[Any]]]]:
+    """What each funnel intent still needs after a full all-intents page.
+
+    Labs sorts by volume, highest first, with null volumes last (checked live
+    2026-10-18). So a full page holds each intent's top rows, and the rest of an
+    intent's own page lies at or below the page's lowest volume, or among the
+    nulls once the page reached them. Each follow-up asks only for that remainder,
+    so together they return what one page per intent would have.
+    Returns ``(intent, limit, filters)`` per intent that is still short.
+    """
+    field = _volume_field(endpoint)
+    measured = [r["volume"] for r in rows if r.get("volume") is not None]
+    reached_nulls = len(measured) < len(rows)
+    out: list[tuple[str, int, list[list[Any]]]] = []
+    for intent in _FUNNEL_INTENT_VALUES:
+        mine = [r for r in rows if r.get("intent") == intent]
+        if len(mine) >= page:
+            continue
+        if reached_nulls or not measured:
+            # Every measured row is already here; only nulls remain.
+            mine_measured = sum(1 for r in mine if r.get("volume") is not None)
+            out.append((intent, page - mine_measured, [_intent_filter(endpoint, intent), [field, "=", None]]))
+            continue
+        cut = min(measured)
+        # Rows at exactly the cut may come back again; they are de-duplicated.
+        ties = sum(1 for r in mine if r.get("volume") == cut)
+        band = [[[field, ">=", provider_min], "and", [field, "<=", cut]], "or", [field, "=", None]]
+        out.append((intent, min(page, page - len(mine) + ties), [band, _intent_filter(endpoint, intent)]))
+    return out
+
 
 async def expand_seed_dataforseo(
     seed: str,
@@ -268,61 +459,151 @@ async def expand_seed_dataforseo(
     if not language:
         errors.append("dataforseo_language_missing")
         return [], errors
+    # Labs filters are inclusive. Volume must be greater than 9, so ask for
+    # at least 10 unless the caller set a higher minimum.
+    provider_min = max(int(min_volume), SEARCH_VOLUME_ABOVE + 1)
 
-    async def _fetch(endpoint: str):
+    page = max(1, min(int(limit), dataforseo.MAX_LABS_LIMIT))
+
+    async def _fetch(endpoint: str, filters: list[list[Any]], *, page_limit: int = page, floor: bool = True):
         kwargs: dict[str, Any] = {
             "location_code": location_code,
             "language_code": language,
-            "limit": limit,
-            "min_volume": min_volume,
+            "limit": page_limit,
+            # Follow-ups carry their own volume band in ``filters``.
+            "min_volume": provider_min if floor else None,
+            "keep_null_volume": floor,
+            # Labs bills per row: do not pay for rows cleaning always rejects.
+            "extra_filters": [*filters, *noise_filters(endpoint)],
         }
         if endpoint == "related_keywords":
             kwargs["depth"] = depth
         return await fetchers[endpoint](query, **kwargs)
 
-    results = await asyncio.gather(
-        *[_fetch(e) for e in ordered],
-        return_exceptions=True,
-    )
+    called: list[str] = []
+    failed_endpoints: list[str] = []
 
+    def _failed(endpoint: str, intent: str, exc: BaseException) -> None:
+        errors.append(f"dataforseo_{endpoint}_{intent}_error")
+        failed_endpoints.append(f"{endpoint}:{intent}")
+        log.warning(
+            "keyword_endpoint_failed",
+            seed=seed,
+            endpoint=endpoint,
+            intent=intent,
+            error=type(exc).__name__,
+        )
+
+    async def _endpoint_rows(endpoint: str) -> list[dict[str, Any]]:
+        # One page for all three funnel intents instead of one page each: Labs
+        # charges per request, and most pages are not full. A page that is not
+        # full holds every matching row, the same rows three pages would return.
+        # Only a full page needs follow-ups, for what each intent is still short.
+        called.append(f"{endpoint}:all_intents")
+        try:
+            rows, errs = await _fetch(endpoint, [[_intent_field(endpoint), "in", _FUNNEL_INTENT_VALUES]])
+        except Exception as exc:  # noqa: BLE001 — one endpoint failing must not sink the seed
+            _failed(endpoint, "all_intents", exc)
+            return []
+        errors.extend(errs)
+        if len(rows) < page or not getattr(get_settings(), "keyword_labs_followups", False):
+            return rows
+        followups = _capped_followups(rows, endpoint=endpoint, page=page, provider_min=provider_min)
+        called.extend(f"{endpoint}:{intent}" for intent, _n, _f in followups)
+        results = await asyncio.gather(
+            *[_fetch(endpoint, f, page_limit=n, floor=False) for _intent, n, f in followups],
+            return_exceptions=True,
+        )
+        merged = list(rows)
+        seen = {str(r.get("keyword") or "").lower() for r in rows}
+        for (intent, _n, _f), res in zip(followups, results):
+            if isinstance(res, BaseException):
+                _failed(endpoint, intent, res)
+                continue
+            more, errs = res
+            errors.extend(errs)
+            for r in more:
+                key = str(r.get("keyword") or "").lower()
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(r)
+        return merged
+
+    per_endpoint = await asyncio.gather(*[_endpoint_rows(endpoint) for endpoint in ordered])
+
+    out: list[dict[str, Any]] = []
+    for endpoint, rows in zip(ordered, per_endpoint):
+        out.extend(dataforseo_rows(rows, endpoint=endpoint, seed=seed, query=query))
+    log.info(
+        "keyword_seed_endpoints",
+        seed=seed,
+        endpoints_called=called,
+        endpoints_failed=failed_endpoints,
+        keywords_retrieved=len(out),
+    )
+    return out, errors
+
+
+def dataforseo_rows(
+    rows: list[dict[str, Any]], *, endpoint: str, seed: str, query: str | None = None
+) -> list[dict[str, Any]]:
+    """Keyword rows from one DataForSEO endpoint, each with intent and funnel stamped.
+
+    Every endpoint (suggestions, related, ideas, and the informational variant and
+    top-up calls) goes through here, so no row leaves without both labels.
+    """
+    query = query or clean_provider_seed(seed)
     seed_aliases = {_norm(seed), _norm(query)}
     out: list[dict[str, Any]] = []
-    for endpoint, res in zip(ordered, results):
-        if isinstance(res, BaseException):
-            errors.append(f"dataforseo_{endpoint}_error")
+    for r in rows:
+        kw = str(r.get("keyword") or "").strip()
+        if not kw or is_stale_year_keyword(kw):
             continue
-        rows, errs = res
-        errors.extend(errs)
-        for r in rows:
-            kw = str(r.get("keyword") or "").strip()
-            if not kw or is_stale_year_keyword(kw):
-                continue
-            is_seed = _norm(kw) in seed_aliases
-            row_intent = detect_intent(kw, r.get("intent") or r.get("search_intent"))
-            out.append(
-                {
-                    "keyword": kw,
-                    "volume": r.get("volume"),
-                    "difficulty": r.get("difficulty"),
-                    "cpc": r.get("cpc"),
-                    "traffic_potential": None,
-                    "intent": row_intent,
-                    "funnel": detect_funnel(kw, row_intent),
-                    "parent_topic": seed,
-                    "source": "dataforseo",
-                    "sources": [endpoint],
-                    "ahrefs_endpoint": f"dataforseo_{endpoint}",
-                    "seed": seed,
-                    "match_class": (
-                        "exact"
-                        if is_seed
-                        else classify_expansion(
-                            kw, query, source_hint=f"dataforseo_{endpoint}"
-                        )
-                    ),
-                }
-            )
-    return out, errors
+        is_seed = _norm(kw) in seed_aliases
+        # Only a label that maps onto the four valid intents counts as provider
+        # evidence; anything else is left to the heuristic.
+        provider_intent = normalize_provider_intent(r.get("intent") or r.get("search_intent"))
+        row_intent = detect_intent(kw, provider_intent)
+        out.append(
+            {
+                "keyword": kw,
+                "volume": r.get("volume"),
+                "difficulty": r.get("difficulty"),
+                "cpc": r.get("cpc"),
+                "traffic_potential": None,
+                "intent": row_intent,
+                # A label the provider gave us is evidence; one inferred
+                # from the keyword text is not. Keep them distinguishable.
+                "intent_basis": "measured" if provider_intent else "unmeasured",
+                "provider_intent": provider_intent,
+                # Measured fields the Labs response already carried. Without
+                # these the row reached scoring with no demand direction and
+                # no commercial value, and had to be re-priced by a second call.
+                "trend": r.get("trend"),
+                "competition": r.get("competition"),
+                "bid_low": r.get("bid_low"),
+                "bid_high": r.get("bid_high"),
+                "volume_clickstream": r.get("volume_clickstream"),
+                "serp_referring_domains": r.get("serp_referring_domains"),
+                "serp_domain_rank": r.get("serp_domain_rank"),
+                "detected_language": r.get("detected_language"),
+                "is_another_language": r.get("is_another_language"),
+                "funnel": detect_funnel(kw, row_intent),
+                "parent_topic": seed,
+                "source": "dataforseo",
+                "sources": [endpoint],
+                "ahrefs_endpoint": f"dataforseo_{endpoint}",
+                "seed": seed,
+                "match_class": (
+                    "exact"
+                    if is_seed
+                    else classify_expansion(
+                        kw, query, source_hint=f"dataforseo_{endpoint}"
+                    )
+                ),
+            }
+        )
+    return out
 
 
 async def expand_seed(
@@ -335,6 +616,9 @@ async def expand_seed(
     language_code: str | None = None,
     enable_dataforseo_fallback: bool = True,
     min_keywords: int = 20,
+    variants: Callable[[], Awaitable[list[str]]] | None = None,
+    service: str | None = None,
+    report: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Expand one seed into exact / phrase / related / broad via DataForSEO.
 
@@ -342,6 +626,12 @@ async def expand_seed(
     deterministic coverage expansions (>= min_keywords) — those are flagged
     ``provider_fallback`` and ``volume_estimated`` so downstream reports can mark
     them as estimates rather than presenting them as measured demand.
+
+    ``variants`` returns this seed's informational query variants (see
+    ``query_variants``). They widen the pull with one extra keyword-ideas call, and
+    when the seed's informational (TOFU) share is still under 15% they drive a second,
+    informational-only call. ``report`` (if given) receives the seed's funnel
+    coverage before and after.
     """
     errors: list[str] = []
     settings = get_settings()
@@ -352,13 +642,18 @@ async def expand_seed(
     if settings.use_mock_providers:
         return _mock_expansions(seed, min_volume=min_volume), errors
 
-    # Keywords that pass the volume floor, plus a reservoir of real but
-    # sub-threshold keywords used only to fill a class that would be empty.
     by_kw: dict[str, dict[str, Any]] = {}
-    reservoir: dict[str, dict[str, Any]] = {}
+    pending: dict[str, dict[str, Any]] = {}
+    stats = {
+        "retrieved": 0,
+        "duplicates_removed": 0,
+        "rejected_volume": 0,
+        "missing_volume": 0,
+    }
 
     def _ingest(rows: list[dict[str, Any]], *, endpoint: str, source: str) -> None:
         for r in rows:
+            stats["retrieved"] += 1
             kw = str(r.get("keyword") or "").strip()
             key = _norm(kw)
             if not key or is_stale_year_keyword(kw):
@@ -371,24 +666,19 @@ async def expand_seed(
                 "ahrefs_endpoint": hint,
                 "match_class": classify_expansion(kw, seed, source_hint=hint),
             }
-            target = by_kw if (_passes_volume(row, min_volume) or key == _norm(seed)) else reservoir
-            if row.get("volume") is None and target is reservoir:
-                continue
-            prev = target.get(key)
+            if row.get("volume") is None:
+                stats["missing_volume"] += 1
+                row["volume"] = None
             incoming = list(row.get("sources") or [])
             if not incoming and row.get("dataforseo_endpoint"):
                 incoming = [str(row.get("dataforseo_endpoint"))]
+            row["sources"] = incoming
+            prev = pending.get(key)
             if prev:
-                sources = list(prev.get("sources") or [])
-                for item in incoming:
-                    if item and item not in sources:
-                        sources.append(item)
-                if not prev or (row.get("volume") or 0) > (prev.get("volume") or 0):
-                    target[key] = {**row, "sources": sources}
-                else:
-                    prev["sources"] = sources
+                stats["duplicates_removed"] += 1
+                pending[key] = _merge_keyword_row(prev, row)
             else:
-                target[key] = {**row, "sources": incoming}
+                pending[key] = row
 
     # DataForSEO is the only keyword provider. Each match class has its own
     # dedicated endpoint — suggestions=phrase, related=related, ideas=broad — so
@@ -399,46 +689,126 @@ async def expand_seed(
     if location_code is None:
         errors.append("dataforseo_location_missing")
     else:
-        df_rows, df_errs = await expand_seed_dataforseo(
-            seed,
-            location_code=location_code,
-            min_volume=min_volume,
-            limit=limit_per_mode,
-            classes=("phrase", "related", "broad"),
-            language_code=language_code,
-        )
+        language = language_code or getattr(settings, "dataforseo_language_code", None)
+        variant_limit = max(20, min(100, int(limit_per_mode) // 2))
+        anchor = anchor_term(seed, service)
+        on_topic = [["keyword", "like", f"%{anchor}%"]] if anchor else []
+
+        async def _variant_queries() -> list[str]:
+            if variants is None or not language:
+                return []
+            try:
+                return list(await variants())
+            except Exception as exc:  # noqa: BLE001 — variants are optional
+                errors.append(f"query_variants_failed:{type(exc).__name__}")
+                return []
+
+        async def _ideas(queries: list[str], extra: list[list[Any]], tag: str) -> list[dict[str, Any]]:
+            rows, errs = await dataforseo.keyword_ideas(
+                seed,
+                keywords=queries,
+                location_code=location_code,
+                language_code=language,
+                limit=variant_limit,
+                min_volume=max(int(min_volume), SEARCH_VOLUME_ABOVE + 1),
+                keep_null_volume=True,
+                extra_filters=[*extra, *noise_filters("keyword_ideas")],
+            )
+            errors.extend(errs)
+            out = dataforseo_rows(rows, endpoint="keyword_ideas", seed=seed)
+            for row in out:
+                row["query_variant"] = True
+                row["variant_queries"] = list(queries)
+                row["sources"] = [tag]
+                row["ahrefs_endpoint"] = f"dataforseo_{tag}"
+                if tag == "keyword_ideas_informational_topup":
+                    row["informational_topup"] = True
+            return out
+
+        async def _variant_pull() -> tuple[list[str], list[dict[str, Any]]]:
+            queries = await _variant_queries()
+            if not queries:
+                return [], []
+            try:
+                # Research and consideration stage only: keyword ideas is category-based,
+                # and without this half of a live pull was local clinic names
+                # (navigational) rather than the questions the variants ask.
+                research = [*on_topic, ["search_intent_info.main_intent", "in", ["informational", "commercial"]]]
+                return queries, await _ideas(queries, research, "keyword_ideas_variants")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"dataforseo_keyword_ideas_variants_error:{type(exc).__name__}")
+                return queries, []
+
+        if getattr(settings, "keyword_extra_idea_pulls", False):
+            (df_rows, df_errs), (queries, variant_rows) = await asyncio.gather(
+                expand_seed_dataforseo(
+                    seed,
+                    location_code=location_code,
+                    min_volume=min_volume,
+                    limit=limit_per_mode,
+                    classes=("phrase", "related", "broad"),
+                    language_code=language_code,
+                ),
+                _variant_pull(),
+            )
+        else:
+            df_rows, df_errs = await expand_seed_dataforseo(
+                seed,
+                location_code=location_code,
+                min_volume=min_volume,
+                limit=limit_per_mode,
+                classes=("phrase", "related", "broad"),
+                language_code=language_code,
+            )
+            queries, variant_rows = [], []
         errors.extend(df_errs)
         _ingest(df_rows, endpoint="dataforseo", source="dataforseo")
+        _ingest(variant_rows, endpoint="dataforseo_keyword_ideas_variants", source="dataforseo")
 
-    # Last resort: fill a still-empty class from real sub-threshold keywords
-    # rather than leaving the bucket blank. Never invents a keyword.
-    present = {str(r.get("match_class")) for r in by_kw.values()}
-    for cls in MATCH_CLASSES:
-        if cls in present:
-            continue
-        spares = sorted(
-            (r for k, r in reservoir.items() if r.get("match_class") == cls and k not in by_kw),
-            key=lambda r: -(r.get("volume") or 0),
-        )[:5]
-        for row in spares:
-            by_kw[_norm(str(row.get("keyword") or ""))] = {**row, "below_volume_floor": True}
+        def _settle() -> None:
+            by_kw.clear()
+            stats["rejected_volume"] = 0
+            for key, row in pending.items():
+                if keep_for_volume(row, min_volume):
+                    by_kw[key] = flag_volume(row)
+                else:
+                    stats["rejected_volume"] += 1
 
-    # Ensure the seed itself is present (overview fills its volume later)
-    if _norm(seed) not in by_kw:
-        by_kw[_norm(seed)] = {
-            "keyword": seed,
-            "volume": None,
-            "difficulty": None,
-            "traffic_potential": None,
-            "cpc": None,
-            "intent": "",
-            "funnel": detect_funnel(seed, ""),
-            "parent_topic": seed,
-            "source": "dataforseo",
-            "ahrefs_endpoint": "seed",
-            "seed": seed,
-            "match_class": "exact",
-        }
+        _settle()
+        before = funnel_counts(list(by_kw.values()))
+        total = sum(before.values())
+        share = (before[INFORMATIONAL_FUNNEL] / total) if total else 0.0
+        topped_up = 0
+        if getattr(settings, "keyword_extra_idea_pulls", False) and total and share < INFORMATIONAL_SHARE_FLOOR and language:
+            # Too few awareness keywords: ask keyword ideas for informational ones
+            # only, from the variants (or the seed itself when there are none), and
+            # still about the seed's subject.
+            informational = [["search_intent_info.main_intent", "=", "informational"], *on_topic]
+            try:
+                topup = await _ideas(queries or [seed], informational, "keyword_ideas_informational_topup")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"dataforseo_informational_topup_error:{type(exc).__name__}")
+                topup = []
+            new_keys = {_norm(str(r.get("keyword") or "")) for r in topup} - set(pending)
+            topped_up = len(new_keys)
+            _ingest(topup, endpoint="dataforseo_keyword_ideas_informational_topup", source="dataforseo")
+            _settle()
+        after = funnel_counts(list(by_kw.values()))
+        if report is not None:
+            report.update(
+                {
+                    "seed": seed,
+                    "variant_queries": list(queries),
+                    "variant_keywords": len(variant_rows),
+                    "funnel_before": before,
+                    "informational_share_before": round(share, 3),
+                    "topped_up": topped_up,
+                    "funnel_after": after,
+                    "informational_share_after": round(
+                        after[INFORMATIONAL_FUNNEL] / max(1, sum(after.values())), 3
+                    ),
+                }
+            )
 
     # When live providers are plan-blocked or unreachable there is nothing to
     # expand. Say so loudly and return the little we have. Padding the pool with
@@ -458,6 +828,15 @@ async def expand_seed(
             kept=len(by_kw),
             errors=errors[:5],
         )
+    log.info(
+        "keyword_seed_fetch",
+        seed=seed,
+        keywords_retrieved=stats["retrieved"],
+        duplicates_removed=stats["duplicates_removed"],
+        rejected_volume=stats["rejected_volume"],
+        missing_volume=stats["missing_volume"],
+        keywords_kept=len(by_kw),
+    )
 
     return list(by_kw.values()), errors
 
@@ -529,7 +908,7 @@ def build_seed_clusters(
             "keyword_count": 0,
             "volume_sum": 0,
         }
-        for field in ("page_type", "page_path", "parent_segment"):
+        for field in ("page_type", "page_path", "parent_segment", "seed_origin", "synonym_of"):
             if meta.get(field):
                 by_seed[key][field] = meta[field]
 
@@ -565,6 +944,9 @@ def build_seed_clusters(
             "cpc": row.get("cpc"),
             "intent": entry_intent,
             "funnel": row.get("funnel") or detect_funnel(entry_kw, entry_intent),
+            # Where the intent came from, so cluster rows can show it.
+            "intent_basis": row.get("intent_basis"),
+            "provider_intent": row.get("provider_intent"),
             "parent_topic": row.get("parent_topic"),
             "traffic_potential": row.get("traffic_potential"),
             "match_class": cls,
@@ -582,6 +964,11 @@ def build_seed_clusters(
             "reroute_reason": row.get("reroute_reason"),
             "gap_flag": bool(row.get("gap_flag")),
             "provider_fallback": bool(row.get("provider_fallback")),
+            "volume_estimated": bool(row.get("volume_estimated")),
+            "volume_status": row.get("volume_status") or volume_status(row),
+            "volume_unverified": bool(row.get("volume_unverified")),
+            "query_variant": bool(row.get("query_variant")),
+            "informational_topup": bool(row.get("informational_topup")),
         }
         bucket[cls].append(entry)
         bucket["keyword_count"] += 1
@@ -595,6 +982,18 @@ def build_seed_clusters(
         bucket = by_seed.get(key)
         if not bucket:
             continue
+        # One search worded several ways ("seo agency", "agency seo", "seo
+        # agencies") counts once per seed, across classes; the other wordings
+        # stay listed on the kept keyword (keyword_variants).
+        kept, folded = collapse_close_variants([r for cls in MATCH_CLASSES for r in bucket[cls]])
+        if folded:
+            for cls in MATCH_CLASSES:
+                bucket[cls] = [r for r in kept if r.get("match_class") == cls]
+            bucket["keyword_count"] = len(kept)
+            bucket["volume_sum"] = sum(
+                int(r["volume"]) for r in kept if isinstance(r.get("volume"), (int, float))
+            )
+        bucket["close_variants_folded"] = len(folded)
         for cls in MATCH_CLASSES:
             bucket[cls] = sorted(
                 bucket[cls],
@@ -610,15 +1009,23 @@ def flatten_dataset(seed_clusters: list[dict[str, Any]]) -> list[dict[str, Any]]
     flat: list[dict[str, Any]] = []
     # Preserve the same keyword under every seed it belongs to. Deduplicating only
     # by keyword hid valid seed-to-keyword associations in the exported dataset.
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for cluster in seed_clusters:
         seed = cluster.get("seed")
         target = cluster.get("target")
         target_type = cluster.get("target_type")
+        # A service-scoped run stamps its clusters with the service that owns the seed.
+        # Carry it onto every keyword row so a keyword never loses its service, and
+        # keep the seed's origin so keywords found through a synonym seed stay traceable.
+        owner = {
+            k: cluster[k] for k in ("service", "service_id", "seed_origin") if cluster.get(k)
+        }
         for cls in MATCH_CLASSES:
             for row in cluster.get(cls) or []:
                 kw = _norm(str(row.get("keyword") or ""))
-                association = (_norm(str(seed or "")), kw)
+                # De-duplicate per (service, seed, keyword): the same seed text under two
+                # services is two separate associations and must both survive.
+                association = (_norm(str(owner.get("service") or "")), _norm(str(seed or "")), kw)
                 if not kw or association in seen:
                     continue
                 seen.add(association)
@@ -629,6 +1036,7 @@ def flatten_dataset(seed_clusters: list[dict[str, Any]]) -> list[dict[str, Any]]
                         "target": target,
                         "target_type": target_type,
                         "match_class": cls,
+                        **owner,
                     }
                 )
     return flat
@@ -689,8 +1097,13 @@ async def run_multi_mode_seeding(
     location_code: int | None = None,
     language_code: str | None = None,
     relevance_context: RelevanceContext | None = None,
+    query_variants: Any | None = None,
 ) -> dict[str, Any]:
     """Expand every seed via Ahrefs multi-mode pipeline into a clustered dataset.
+
+    ``query_variants`` (a ``QueryVariantResolver``) supplies each seed's informational
+    query variants; without it the informational widening and top-up use the seed
+    alone.
 
     seed_targets maps normalized seed -> {"target": str, "target_type": str} so
     each seed root can be a targeted service / page (not only CDD keywords).
@@ -705,12 +1118,32 @@ async def run_multi_mode_seeding(
             continue
         used_seeds.append(s)
 
+    # One model call for every seed's variants, started now and awaited by each
+    # seed only when it needs them, so it overlaps the main keyword fetches.
+    variants_task = (
+        asyncio.ensure_future(query_variants.variants_for(used_seeds))
+        if query_variants is not None and used_seeds
+        else None
+    )
+
+    def _variants_for(s: str) -> Callable[[], Awaitable[list[str]]] | None:
+        if variants_task is None:
+            return None
+
+        async def _get() -> list[str]:
+            return list((await asyncio.shield(variants_task)).get(s) or [])
+
+        return _get
+
+    funnel_reports: list[dict[str, Any]] = []
+
     # Expand every seed concurrently (bounded) — each seed itself fans out 3 calls
     sem = asyncio.Semaphore(3)
 
     async def _expand(s: str) -> tuple[list[dict[str, Any]], list[str]]:
+        report: dict[str, Any] = {}
         async with sem:
-            return await expand_seed(
+            result = await expand_seed(
                 s,
                 country=country,
                 min_volume=min_volume,
@@ -718,7 +1151,13 @@ async def run_multi_mode_seeding(
                 location_code=location_code,
                 language_code=language_code,
                 min_keywords=20,
+                variants=_variants_for(s),
+                service=str((seed_targets.get(_norm(s)) or {}).get("service") or "") or None,
+                report=report,
             )
+        if report:
+            funnel_reports.append(report)
+        return result
 
     results = await asyncio.gather(*[_expand(s) for s in used_seeds])
     for rows, errs in results:
@@ -743,31 +1182,41 @@ async def run_multi_mode_seeding(
         if not ov:
             continue
         for field in ("volume", "difficulty", "traffic_potential", "cpc", "intent", "parent_topic"):
-            if ov.get(field) is not None and (row.get(field) is None or field == "volume"):
-                row[field] = ov.get(field)
+            value = ov.get(field)
+            if value is None:
+                continue
+            if row.get(field) is None:
+                row[field] = value
+            elif (
+                field == "volume"
+                and isinstance(row.get(field), (int, float))
+                and isinstance(value, (int, float))
+                and int(value) > int(row[field])
+            ):
+                row[field] = int(value)
         # Only the row under its OWN seed is the exact match. A seed that happens
         # to be another seed's expansion must keep its real relationship class.
         if _norm(str(row.get("seed") or "")) == key:
             row["match_class"] = "exact"
         row["ahrefs_endpoint"] = row.get("ahrefs_endpoint") or "overview"
 
-    # Drop expansions still below volume (except we already filtered)
     filtered = []
+    rejected_volume = 0
+    missing_volume = 0
     for row in all_rows:
         kw = str(row.get("keyword") or "")
         if is_stale_year_keyword(kw):
             continue
         vol = row.get("volume")
-        if vol is None and _norm(kw) in {_norm(s) for s in used_seeds}:
-            # Seed with unknown volume — keep as exact placeholder only if overview missing
-            filtered.append(row)
-            continue
-        # Deliberate sub-threshold fills keep an otherwise-empty class populated
-        if row.get("below_volume_floor") or row.get("provider_fallback"):
-            filtered.append(row)
-            continue
-        if vol is not None and int(vol) > min_volume:
-            filtered.append(row)
+        if vol is None:
+            missing_volume += 1
+            row["volume"] = None
+        # Only a measured volume below the floor is dropped. No volume is kept,
+        # flagged volume_unverified, and reported separately.
+        if keep_for_volume(row, min_volume):
+            filtered.append(flag_volume(row))
+        else:
+            rejected_volume += 1
 
     # Stamp search intent + funnel stage on every expansion (Ahrefs intents when
     # present, else heuristic) — the single choke point every seeded keyword
@@ -779,6 +1228,10 @@ async def run_multi_mode_seeding(
         return {**row, "intent": intent, "funnel": row.get("funnel") or detect_funnel(kw, intent)}
 
     filtered = [_stamp(row) for row in filtered]
+    unlabelled = [r for r in filtered if not r.get("intent") or not r.get("funnel")]
+    if unlabelled:  # detect_intent / detect_funnel always answer; this is a guard
+        log.error("keyword_rows_missing_labels", count=len(unlabelled))
+        filtered = [r for r in filtered if r.get("intent") and r.get("funnel")]
 
     cleaning_audit = empty_cleaning_audit()
     excluded_keywords: list[dict[str, Any]] = []
@@ -818,6 +1271,19 @@ async def run_multi_mode_seeding(
             }
         )
 
+    log.info(
+        "keyword_fetch_summary",
+        seeds_processed=len(used_seeds),
+        seeds_configured=len([s for s in seeds if str(s).strip()]),
+        keywords_retrieved=len(all_rows),
+        rejected_volume=rejected_volume,
+        missing_volume=missing_volume,
+        keyword_count=len(dataset),
+    )
+    coverage_of_volume = volume_coverage(dataset)
+    log.info("keyword_volume_coverage", **coverage_of_volume)
+    dataset_funnel = funnel_counts(dataset)
+
     source_set = {str(row.get("source") or "").strip() for row in dataset}
     providers = [p for p in ("dataforseo", "fallback") if p in source_set]
     # Nothing is fabricated to cover an outage any more, so the signal the
@@ -836,6 +1302,14 @@ async def run_multi_mode_seeding(
         "target_type_counts": target_type_counts,
         "class_coverage": coverage,
         "seeds_with_all_classes": full_coverage,
+        # How each keyword's volume is known: measured, estimated or unverified
+        # (no volume; kept and flagged, not dropped).
+        "volume_coverage": coverage_of_volume,
+        # Funnel mix of the final dataset, and per seed: the informational share
+        # before and after the variant pull and any informational top-up.
+        "funnel_counts": dataset_funnel,
+        "funnel_coverage": funnel_reports,
+        "informational_topups": sum(1 for r in funnel_reports if r.get("topped_up")),
         "provider_errors": sorted(set(errors)),
         "providers": providers,
         "provider_expansion_unavailable": expansion_unavailable,
@@ -852,7 +1326,9 @@ async def run_multi_mode_seeding(
             f"(phrase/terms/related-terms); DataForSEO tops up missing classes "
             f"(suggestions=phrase, related=related, ideas=broad). "
             f"All 4 classes filled for {full_coverage}/{len(seed_clusters)} seeds; "
-            f"volume > {min_volume}."
+            f"measured search volume > {SEARCH_VOLUME_ABOVE}; "
+            f"{coverage_of_volume[VOLUME_UNVERIFIED]} keyword(s) without measured volume "
+            "kept and flagged volume_unverified."
             + (
                 " Live keyword APIs were UNAVAILABLE for this run — the pool is "
                 "short because expansion failed, not because demand is thin. "

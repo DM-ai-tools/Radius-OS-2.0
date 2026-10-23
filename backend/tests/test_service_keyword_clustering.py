@@ -9,6 +9,7 @@ def _seed_cluster(
     target: str | None = None,
     target_type: str = "keyword",
     page_path: str | None = None,
+    parent_segment: str | None = None,
     exact: list[str] | None = None,
     phrase: list[str] | None = None,
     related: list[str] | None = None,
@@ -38,6 +39,8 @@ def _seed_cluster(
     }
     if page_path:
         cluster["page_path"] = page_path
+    if parent_segment:
+        cluster["parent_segment"] = parent_segment
     return cluster
 
 
@@ -123,15 +126,22 @@ def test_groups_explicit_service_seed_with_all_extracted_keywords():
     assert empty["keyword_count"] == 0
 
 
-def test_nests_subservice_seeds_under_parent_service():
+def test_selected_seo_themes_stay_seeds_of_the_parent_service():
     groups = build_service_seed_clusters(
         [
             _seed_cluster(
                 "local seo",
-                target="Local SEO",
-                target_type="sub_service",
-                page_path="/services/seo/local-seo",
+                target="SEO",
+                target_type="seed",
+                parent_segment="SEO Services",
                 phrase=["local seo services"],
+            ),
+            _seed_cluster(
+                "technical seo",
+                target="SEO",
+                target_type="seed",
+                parent_segment="SEO Services",
+                phrase=["technical seo audit"],
             ),
             _seed_cluster(
                 "seo audit",
@@ -143,11 +153,14 @@ def test_nests_subservice_seeds_under_parent_service():
     )
 
     seo = next(g for g in groups if g["service"] == "SEO Services")
-    assert seo["subservice_count"] == 1
-    assert seo["subservices"][0]["subservice"] == "Local SEO"
-    assert seo["subservices"][0]["page_path"] == "/services/seo/local-seo"
-    assert seo["subservices"][0]["seeds"][0]["seed"] == "local seo"
-    assert seo["seeds"][0]["seed"] == "seo audit"
+    assert seo["subservice_count"] == 0
+    assert seo["subservices"] == []
+    assert {seed["seed"] for seed in seo["seeds"]} == {
+        "local seo",
+        "technical seo",
+        "seo audit",
+    }
+    assert [seed["seed_label"] for seed in seo["seeds"]] == ["Seed 1", "Seed 2", "Seed 3"]
 
 
 def test_maps_page_seed_to_service_by_overlap_and_keeps_unmapped_visible():
@@ -295,9 +308,10 @@ def test_enrich_subservice_competitor_matrix():
         competitive_landscape=competitive,
         competitors=[{"name": "Rival A", "domain": "rival-a.com"}],
     )
-    sub = enriched[0]["subservices"][0]
-    assert sub["gap_keyword_count"] == 1
-    assert sub["competitor_category"] == "seo"
-    assert sub["category_leader"]["competitor"] == "Rival A"
-    assert matrix[0]["subservice"] == "Local SEO"
-    assert matrix[0]["gap_keyword_count"] == 1
+    assert enriched[0]["subservices"] == []
+    seed = next(row for row in enriched[0]["seeds"] if row["seed"] == "local seo")
+    assert seed["seed_label"].startswith("Seed ")
+    assert seed["gap_keyword_count"] == 1
+    assert enriched[0]["competitor_category"] == "seo"
+    assert enriched[0]["category_leader"]["competitor"] == "Rival A"
+    assert matrix == []

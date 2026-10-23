@@ -95,6 +95,7 @@ def _kw_row(row: dict[str, Any], *, with_serp: bool = False) -> dict[str, Any]:
         "volume": row.get("volume"),
         "difficulty": row.get("difficulty"),
         "intent": row.get("intent"),
+        "funnel": row.get("funnel"),
         "opportunity_score": row.get("opportunity_score"),
         "bucket": row.get("bucket"),
         "gap_flag": bool(row.get("gap_flag")),
@@ -164,6 +165,13 @@ def _slim_competitor_sites(rows: Any, *, limit: int = 4) -> list[dict[str, Any]]
     return out
 
 
+def _slim_primary_selection(selection: Any) -> dict[str, Any] | None:
+    if not isinstance(selection, dict):
+        return None
+    keep = ("keyword", "reason", "score", "exact_service_match", "volume_basis", "runner_up")
+    return {k: selection.get(k) for k in keep if selection.get(k) is not None}
+
+
 def _slim_clusters(rows: Any, *, limit: int = 10) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     if not isinstance(rows, list):
@@ -182,7 +190,15 @@ def _slim_clusters(rows: Any, *, limit: int = 10) -> list[dict[str, Any]]:
                             "volume": item.get("volume"),
                             "difficulty": item.get("difficulty"),
                             "intent": item.get("intent"),
+                            "funnel": item.get("funnel"),
                             "role": item.get("role"),
+                            # Where each label came from and how sure it is.
+                            "role_reason": item.get("role_reason"),
+                            "intent_source": item.get("intent_source"),
+                            "intent_confidence": item.get("intent_confidence"),
+                            "funnel_source": item.get("funnel_source"),
+                            "funnel_confidence": item.get("funnel_confidence"),
+                            "label_disagreement": item.get("label_disagreement"),
                         }
                     )
                 elif isinstance(item, str) and item.strip():
@@ -208,6 +224,11 @@ def _slim_clusters(rows: Any, *, limit: int = 10) -> list[dict[str, Any]]:
             "best_score": c.get("best_score") or c.get("opportunity_score"),
             "keywords": kws,
             "competitor_domains": list(c.get("competitor_domains") or [])[:3],
+            # Why this primary, and the member mix behind the cluster's labels.
+            "primary_selection": _slim_primary_selection(c.get("primary_selection")),
+            "intent_distribution": c.get("intent_distribution"),
+            "funnel_distribution": c.get("funnel_distribution"),
+            "role_counts": c.get("role_counts"),
         }
         out.append({k: v for k, v in item.items() if v not in (None, "", [], {})})
     return out
@@ -317,6 +338,8 @@ def slim_search_demand_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                         "keyword": r.get("keyword"),
                         "volume": r.get("volume"),
                         "intent": r.get("intent"),
+                        "funnel": r.get("funnel"),
+                        "volume_unverified": bool(r.get("volume_unverified")),
                         "match_class": "exact",
                     }
                     for r in (c.get("exact") or [])[:8]
@@ -327,6 +350,8 @@ def slim_search_demand_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                         "keyword": r.get("keyword"),
                         "volume": r.get("volume"),
                         "intent": r.get("intent"),
+                        "funnel": r.get("funnel"),
+                        "volume_unverified": bool(r.get("volume_unverified")),
                         "match_class": "phrase",
                     }
                     for r in (c.get("phrase") or [])[:8]
@@ -337,6 +362,8 @@ def slim_search_demand_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                         "keyword": r.get("keyword"),
                         "volume": r.get("volume"),
                         "intent": r.get("intent"),
+                        "funnel": r.get("funnel"),
+                        "volume_unverified": bool(r.get("volume_unverified")),
                         "match_class": "related",
                     }
                     for r in (c.get("related") or [])[:8]
@@ -347,6 +374,8 @@ def slim_search_demand_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                         "keyword": r.get("keyword"),
                         "volume": r.get("volume"),
                         "intent": r.get("intent"),
+                        "funnel": r.get("funnel"),
+                        "volume_unverified": bool(r.get("volume_unverified")),
                         "match_class": "broad",
                     }
                     for r in (c.get("broad") or [])[:6]
@@ -485,10 +514,14 @@ def slim_seo_strategy_memory(full: dict[str, Any] | None) -> dict[str, Any]:
             for c in (full.get("core_topics") or full.get("pillars") or [])[:8]
             if isinstance(c, dict)
         ],
-        "priority_queue": [
+        "content_plan": [
             {
+                "id": p.get("id"),
+                "rank": p.get("rank"),
+                "row": p.get("row"),
                 "title": p.get("title") or p.get("keyword"),
                 "keyword": p.get("keyword"),
+                "primary_keyword": p.get("primary_keyword") or p.get("keyword"),
                 "priority": p.get("priority") or p.get("priority_label"),
                 "intent": p.get("intent"),
                 "funnel": p.get("funnel"),
@@ -498,29 +531,22 @@ def slim_seo_strategy_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                 "content_type": p.get("content_type"),
                 "est_words": p.get("est_words"),
                 "suggested_url": p.get("suggested_url"),
+                "existing_url": p.get("existing_url"),
                 "action": p.get("action"),
                 "work_label": p.get("work_label"),
+                "source": p.get("source"),
+                "owner": p.get("owner"),
+                "service": p.get("service"),
+                "week": p.get("week"),
+                "month": p.get("month"),
+                "month_theme": p.get("month_theme"),
                 "supports_service_id": p.get("supports_service_id"),
                 "from_selected_service": p.get("from_selected_service") or None,
                 "beat_competitors": list(p.get("beat_competitors") or [])[:3] or None,
                 "image_suggestions": list(p.get("image_suggestions") or [])[:12] or None,
             }
             for p in _prefer_selected_work(
-                full.get("priority_queue") or full.get("priority_pages") or []
-            )[:24]
-            if isinstance(p, dict)
-        ],
-        "priority_pages": [
-            {
-                "title": p.get("title") or p.get("keyword"),
-                "keyword": p.get("keyword"),
-                "priority": p.get("priority"),
-                "suggested_url": p.get("suggested_url") or p.get("url"),
-                "action": p.get("action"),
-                "work_label": p.get("work_label"),
-            }
-            for p in _prefer_selected_work(
-                full.get("priority_pages") or full.get("priority_queue") or []
+                full.get("content_plan") or full.get("priority_queue") or full.get("priority_pages") or []
             )[:24]
             if isinstance(p, dict)
         ],
@@ -532,18 +558,6 @@ def slim_seo_strategy_memory(full: dict[str, Any] | None) -> dict[str, Any]:
             }
             for u in (full.get("url_ia_plan") or [])[:12]
             if isinstance(u, dict)
-        ],
-        "combined_priority_queue": [
-            {
-                "rank": q.get("rank"),
-                "action": q.get("action"),
-                "title": _trim(q.get("title"), 80),
-                "keyword": q.get("keyword"),
-                "source": q.get("source"),
-                "priority": q.get("priority"),
-            }
-            for q in (full.get("combined_priority_queue") or [])[:15]
-            if isinstance(q, dict)
         ],
         "both_skills_present": bool(full.get("both_skills_present")),
         "content_audit_applied": bool(full.get("content_audit_applied")),
@@ -557,7 +571,7 @@ def slim_seo_strategy_memory(full: dict[str, Any] | None) -> dict[str, Any]:
             for g in (full.get("content_gaps") or full.get("competitor_content_gaps") or [])[:8]
             if isinstance(g, dict)
         ],
-        "calendar_priorities": list(full.get("calendar_priorities") or [])[:6],
+        "content_calendar": list(full.get("content_calendar") or [])[:6],
         "note": _trim(
             full.get("note") or "Shared memory essentials — full strategy report is in chat.",
             200,
@@ -755,15 +769,21 @@ def slim_content_audit_memory(full: dict[str, Any] | None) -> dict[str, Any]:
             if isinstance(c, dict)
         ],
         "could_not_assess": list(full.get("could_not_assess") or [])[:6],
-        "combined_priority_queue": [
+        "content_plan": [
             {
+                "id": q.get("id"),
                 "rank": q.get("rank"),
                 "action": q.get("action"),
+                "work_label": q.get("work_label"),
                 "title": _trim(q.get("title"), 80),
                 "keyword": q.get("keyword"),
                 "source": q.get("source"),
+                "owner": q.get("owner"),
+                "priority": q.get("priority"),
+                "week": q.get("week"),
+                "suggested_url": q.get("suggested_url") or q.get("url"),
             }
-            for q in (full.get("combined_priority_queue") or [])[:15]
+            for q in (full.get("content_plan") or full.get("combined_priority_queue") or [])[:15]
             if isinstance(q, dict)
         ],
         "both_skills_present": bool(full.get("both_skills_present")),

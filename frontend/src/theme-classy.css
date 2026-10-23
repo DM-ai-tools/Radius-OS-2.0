@@ -245,7 +245,6 @@ html.theme-classy:not(.theme-light):not(:has(.landing)) .playground-card,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .playground-role-pill,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .pg-report-table-wrap,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .auth-modal,
-html.theme-classy:not(.theme-light):not(:has(.landing)) .role-picker-menu,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-wrap,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-menu,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .site-preview-modal,
@@ -312,13 +311,10 @@ html.theme-classy:not(.theme-light):not(:has(.landing)) .anomaly-banner {
   color: var(--text-primary);
 }
 
-html.theme-classy:not(.theme-light):not(:has(.landing)) .role-picker-menu button,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-menu button {
   color: var(--text-primary);
 }
 
-html.theme-classy:not(.theme-light):not(:has(.landing)) .role-picker-menu button:hover,
-html.theme-classy:not(.theme-light):not(:has(.landing)) .role-picker-menu button.selected,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-menu button:hover,
 html.theme-classy:not(.theme-light):not(:has(.landing)) .industry-combo-menu button.selected {
   background: var(--brand-blue-soft);

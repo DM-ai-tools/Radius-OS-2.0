@@ -147,7 +147,27 @@ async def _fetch(url: str, params: dict[str, Any]) -> tuple[str | None, str | No
             )
     except (httpx.TimeoutException, httpx.TransportError) as exc:
         log.warning("semrush_request_failed", error=type(exc).__name__)
+        from app.services.api_meter import record_api_call
+
+        await record_api_call(
+            provider="semrush",
+            operation=str(params.get("type") or "request"),
+            status="error",
+            error_detail="semrush_request_failed",
+        )
         return None, "semrush_request_failed"
+    from app.services.api_meter import record_api_call
+
+    operation = str(params.get("type") or url.rsplit("/", 1)[-1] or "request")
+
+    async def _meter(status: str, error: str | None = None) -> None:
+        await record_api_call(
+            provider="semrush",
+            operation=operation,
+            status=status,
+            error_detail=error,
+        )
+
     text = resp.text or ""
     if text.lstrip().upper().startswith("ERROR"):
         upper = text.upper()
@@ -155,28 +175,35 @@ async def _fetch(url: str, params: dict[str, Any]) -> tuple[str | None, str | No
             from app.integrations.provider_access import clear_access_failure
 
             clear_access_failure(_SEMRUSH)
+            await _meter("success")
             return "", None
         if any(token in upper for token in ("ERROR 131", "ERROR 132", "ERROR 133", "API UNITS", "LIMIT EXCEEDED")):
             from app.integrations.provider_access import CREDIT
 
             _mark_quota_blocked("semrush_units_exhausted", kind=CREDIT)
+            await _meter("error", "semrush_units_exhausted")
             return None, "semrush_units_exhausted"
         if "ERROR 120" in upper or "WRONG KEY" in upper or resp.status_code in (401, 403):
             _mark_auth_blocked("semrush_auth_failed")
+            await _meter("error", "semrush_auth_failed")
             return None, "semrush_auth_failed"
         log.warning("semrush_http_error", status=resp.status_code, snippet=text[:120])
+        await _meter("error", "semrush_http_error")
         return None, "semrush_http_error"
     if resp.status_code == 429:
         from app.integrations.provider_access import RATE_LIMIT
 
         _mark_quota_blocked("semrush_rate_limited", kind=RATE_LIMIT)
+        await _meter("error", "semrush_rate_limited")
         return None, "semrush_rate_limited"
     if resp.status_code >= 400:
         log.warning("semrush_http_error", status=resp.status_code, snippet=text[:120])
+        await _meter("error", "semrush_http_error")
         return None, "semrush_http_error"
     from app.integrations.provider_access import clear_access_failure
 
     clear_access_failure(_SEMRUSH)
+    await _meter("success")
     return text, None
 
 

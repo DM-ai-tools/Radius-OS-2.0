@@ -554,6 +554,9 @@ def test_expand_vertical_subservice_seeds_adds_missing_roots():
     )
     assert "Technical SEO" in roots
     assert "technical seo" in targets
+    assert targets["technical seo"]["target_type"] == "seed"
+    assert targets["technical seo"]["target"] == "SEO"
+    assert targets["technical seo"]["parent_segment"] == "SEO"
 
 
 def test_ia_nodes_from_competitor_tree():

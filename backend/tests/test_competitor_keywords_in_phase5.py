@@ -101,12 +101,13 @@ def test_depth_presets_raise_the_seed_root_cap():
     standard = max_seed_roots_for_pool_target(4500)
     deep = max_seed_roots_for_pool_target(8000)
     assert focused < standard < deep
-    assert standard == 8  # unchanged default for existing clients
+    assert standard == 16
+    assert deep == 24
 
 
 def test_seed_root_cap_snaps_an_arbitrary_target_to_a_preset():
-    assert max_seed_roots_for_pool_target(4400) == 8
-    assert max_seed_roots_for_pool_target(9000) == 14
+    assert max_seed_roots_for_pool_target(4400) == 16
+    assert max_seed_roots_for_pool_target(9000) == 24
     assert max_seed_roots_for_pool_target(0) == 6
 
 

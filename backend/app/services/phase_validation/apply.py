@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -32,6 +33,70 @@ log = get_logger("phase_validation.apply")
 AgentRunner = Callable[..., Awaitable[list[dict]]]
 
 
+def _without_phase_cards(events: list[dict]) -> list[dict]:
+    kept: list[dict] = []
+    for ev in events:
+        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        if ev.get("type") == "structured_card" and payload.get("card_type") != "phase_validation_report":
+            continue
+        kept.append(ev)
+    return kept
+
+
+def _reject_narrower_output(
+    *,
+    profile: ClientDigitalProfile,
+    agent_key: str,
+    events: list[dict],
+    held_summary: dict | None,
+    held_events: list[dict] | None,
+    held_breadth: int,
+) -> tuple[list[dict], dict | None, list[dict] | None, int, bool]:
+    """Keep the saved deliverable when this run contains less work than the last.
+
+    Returns events, held summary, held events, held breadth, and whether the new
+    run was discarded.
+    """
+    from app.services.phase_validation.breadth import deliverable_breadth
+    from app.services.phase_validation.context import extract_phase_output
+
+    output = extract_phase_output(profile=profile, agent_key=agent_key, events=events)
+    new_breadth = deliverable_breadth(output)
+    attr = AGENT_SUMMARY_ATTR.get(agent_key)
+    if held_breadth and new_breadth < held_breadth:
+        if attr and held_summary is not None:
+            setattr(profile, attr, deepcopy(held_summary))
+        restored = list(held_events) if held_events is not None else _without_phase_cards(events)
+        restored.append(
+            {
+                "type": "system_notice",
+                "content": (
+                    "This run was smaller than the saved deliverable "
+                    f"({new_breadth} items vs {held_breadth}). "
+                    "The wider deliverable was kept."
+                ),
+            }
+        )
+        log.info(
+            "phase_output_narrowing_rejected",
+            agent_key=agent_key,
+            previous=held_breadth,
+            current=new_breadth,
+        )
+        return restored, held_summary, held_events, held_breadth, True
+
+    if new_breadth >= held_breadth and new_breadth > 0:
+        summary = getattr(profile, attr, None) if attr else None
+        return (
+            events,
+            deepcopy(summary) if isinstance(summary, dict) else held_summary,
+            list(events),
+            new_breadth,
+            False,
+        )
+    return events, held_summary, held_events, held_breadth, False
+
+
 def _attach_validation_to_summary(
     profile: ClientDigitalProfile,
     agent_key: str,
@@ -50,11 +115,18 @@ def _attach_validation_to_summary(
     setattr(profile, attr, summary)
 
 
-def _attach_validation_to_cards(events: list[dict], result: ValidationResult) -> list[dict]:
+def _attach_validation_to_cards(
+    events: list[dict],
+    result: ValidationResult,
+    *,
+    keep_approve: bool = False,
+) -> list[dict]:
     """Return phase cards plus a validation report.
 
     On acceptance the phase card keeps Approve. On an unrecoverable failure we strip
     Approve so a blocked output cannot be signed off, then still surface the QC card.
+    A semantic reject that the deterministic re-check would still allow
+    (``keep_approve``) leaves Approve in place for the human sign-off.
     Intermediate revision attempts stay silent until the loop finishes.
     """
     out: list[dict] = []
@@ -62,6 +134,7 @@ def _attach_validation_to_cards(events: list[dict], result: ValidationResult) ->
         payload = dict(ev.get("payload") or {}) if isinstance(ev.get("payload"), dict) else {}
         if (
             result.blocks_pipeline
+            and not keep_approve
             and ev.get("type") in ("structured_card", "checkpoint")
             and payload.get("card_type") != "phase_validation_report"
         ):
@@ -158,9 +231,19 @@ async def run_phase_with_validation(
     max_attempts = 1 if agent_key == "technical_seo" else max(
         1, int(getattr(settings, "validation_max_attempts", 2))
     )
-    current_message = message
+    from app.services.agent_memory import record_qa_result, with_memory
+
+    remembered = with_memory(message, client_id=str(client.id), agent_key=agent_key)
+    current_message = remembered
     events: list[dict] = []
     result: ValidationResult | None = None
+    attr = AGENT_SUMMARY_ATTR.get(agent_key)
+    existing = getattr(profile, attr, None) if attr else None
+    from app.services.phase_validation.breadth import deliverable_breadth
+
+    held_summary = deepcopy(existing) if isinstance(existing, dict) and existing else None
+    held_events: list[dict] | None = None
+    held_breadth = deliverable_breadth(existing) if isinstance(existing, dict) else 0
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -176,6 +259,14 @@ async def run_phase_with_validation(
             await db.rollback()
             raise
         await db.refresh(profile)
+        events, held_summary, held_events, held_breadth, discarded_narrowing = _reject_narrower_output(
+            profile=profile,
+            agent_key=agent_key,
+            events=events,
+            held_summary=held_summary,
+            held_events=held_events,
+            held_breadth=held_breadth,
+        )
 
         result = await validate_phase_output(
             client=client,
@@ -185,6 +276,7 @@ async def run_phase_with_validation(
             iteration=attempt,
         )
         _attach_validation_to_summary(profile, agent_key, result)
+        record_qa_result(client_id=str(client.id), result=result)
 
         # Accepted — return the phase output plus the validation report.
         if result.passed or result.decision == ValidationDecision.UNAVAILABLE.value:
@@ -195,7 +287,10 @@ async def run_phase_with_validation(
 
         # Needs revision and attempts remain — silently loop: feed corrections back
         # to the generating agent and re-run. Nothing is surfaced to the user.
-        if should_retry(result, attempt=attempt, max_attempts=max_attempts):
+        if (
+            not discarded_narrowing
+            and should_retry(result, attempt=attempt, max_attempts=max_attempts)
+        ):
             await _persist_validation_row(
                 db, client_id=client.id, session_id=session_id, result=result
             )
@@ -210,7 +305,7 @@ async def run_phase_with_validation(
             status_attr = AGENT_STATUS_ATTR.get(agent_key)
             if status_attr:
                 setattr(profile, status_attr, "in_progress")
-            current_message = revision_message_for(result, message)
+            current_message = revision_message_for(result, remembered)
             await db.flush()
             continue
 
@@ -220,10 +315,32 @@ async def run_phase_with_validation(
         await _persist_validation_row(
             db, client_id=client.id, session_id=session_id, result=result
         )
+        _attach_validation_to_summary(profile, agent_key, result)
         status_attr = AGENT_STATUS_ATTR.get(agent_key)
+        # Same gate the review endpoint uses. A semantic reject on a real
+        # deliverable must not hide Approve; an empty or broken output still does.
+        human_can_approve = (
+            await latest_validation_blocks_approve(
+                db, client_id=client.id, agent_key=agent_key
+            )
+        ) is None
+        if human_can_approve:
+            if status_attr and getattr(profile, status_attr, None) != "pending_signoff":
+                setattr(profile, status_attr, "pending_signoff")
+            events = _attach_validation_to_cards(events, result, keep_approve=True)
+            out = list(events)
+            if status_attr:
+                out.append(
+                    {
+                        "type": "phase_status",
+                        "payload": {status_attr: "pending_signoff"},
+                    }
+                )
+            await db.flush()
+            return out
+
         if status_attr:
             setattr(profile, status_attr, "in_progress")
-        _attach_validation_to_summary(profile, agent_key, result)
         events = _attach_validation_to_cards(events, result)
         out = list(events)
         out.append(

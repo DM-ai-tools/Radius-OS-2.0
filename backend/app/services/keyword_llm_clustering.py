@@ -3,17 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from typing import Any
 
 from app.config import get_settings
-from app.integrations.llm import _skill_chat
+from app.integrations.llm import keyword_analysis_chat, keyword_analysis_ready
 from app.logging_config import get_logger
+from app.services.keyword_cluster_roles import (
+    RoleContext,
+    finalize_cluster,
+    label_keyword,
+    normalize_provider_intent,
+)
+from app.services.keyword_cluster_structure import (
+    SPLIT_THRESHOLD,
+    split_name,
+    split_oversized,
+)
 from app.services.keyword_clustering import (
+    _ORPHAN_LABEL_FIELDS,
     _content_type,
-    _detect_funnel,
-    _detect_intent,
+    _grouping_funnel,
+    _grouping_intent,
     _modifier_bucket,
     _norm,
     _slug,
@@ -57,8 +70,15 @@ Return valid JSON only:
 Rules:
 - Use ONLY keywords from the input — never invent new keywords.
 - Every input keyword must appear exactly once in clusters, dropped, or orphans.
-- Prefer specific service keywords as Primary over generic head terms.
-- Do not copy or invent volume/difficulty — metrics are attached separately.
+- Group by meaning, search intent, and topic. Shared words alone are not a cluster.
+- Keep informational, commercial, and transactional queries in separate clusters.
+- Keep TOFU, MOFU, and BOFU queries in separate clusters. One cluster is one intent and one funnel.
+- A long-tail keyword can belong with its topic even when it does not repeat the service name.
+- A keyword that does not belong with the others stays in orphans, as its own topic.
+- The primary keyword and roles you suggest are advisory: the primary and roles are
+  decided afterwards from measured metrics, so focus on grouping and on each keyword's
+  intent and funnel.
+- Do not copy or invent volume, CPC, difficulty, or trends.
 """
 
 
@@ -179,7 +199,7 @@ async def _call_llm(
         chunk_total=chunk_total,
     )
     try:
-        raw = await _skill_chat(
+        raw = await keyword_analysis_chat(
             system=_SYSTEM,
             user=user,
             model=model,
@@ -222,12 +242,13 @@ async def llm_cluster_keywords(
     max_per_chunk: int = 100,
     max_concurrent: int = 3,
     model: str | None = None,
+    role_context: RoleContext | None = None,
 ) -> dict[str, Any]:
     """Run Anthropic Claude Sonnet on all cleaned keywords."""
     settings = get_settings()
     use_model = model or settings.skill_model or DEFAULT_MODEL
 
-    if settings.use_mock_llm or not settings.anthropic_api_key:
+    if not keyword_analysis_ready():
         return {
             "dropped": [],
             "clusters": [],
@@ -239,21 +260,37 @@ async def llm_cluster_keywords(
     chunks = _chunk_rows(cleaned, max_per_chunk)
     sem = asyncio.Semaphore(max_concurrent)
     results: list[dict[str, Any]] = []
+    run_cache: dict[str, dict[str, Any]] = {}
 
     async def _run(i: int, batch: list[dict[str, Any]]) -> None:
         async with sem:
-            results.append(
-                await _call_llm(
-                    batch,
-                    brand_name=brand_name,
-                    domain=domain,
-                    products=products,
-                    seeds=seeds,
-                    chunk_index=i + 1,
-                    chunk_total=len(chunks),
-                    model=use_model,
-                )
+            user = _user_message(
+                batch,
+                brand_name=brand_name,
+                domain=domain,
+                products=products,
+                seeds=seeds,
+                chunk_index=i + 1,
+                chunk_total=len(chunks),
             )
+            digest = hashlib.sha256(f"{use_model}|{user}".encode()).hexdigest()
+            cached = run_cache.get(digest)
+            if cached is not None:
+                log.info("keyword_cluster_cache_hit", chunk=i + 1)
+                results.append(cached)
+                return
+            parsed = await _call_llm(
+                batch,
+                brand_name=brand_name,
+                domain=domain,
+                products=products,
+                seeds=seeds,
+                chunk_index=i + 1,
+                chunk_total=len(chunks),
+                model=use_model,
+            )
+            run_cache[digest] = parsed
+            results.append(parsed)
 
     await asyncio.gather(*[_run(i, batch) for i, batch in enumerate(chunks)])
 
@@ -264,6 +301,10 @@ async def llm_cluster_keywords(
         relevance_context=relevance_context,
         model=use_model,
         chunks_processed=len(chunks),
+        role_context=role_context
+        or RoleContext.build(
+            cleaned, brand_name=brand_name, domain=domain, relevance_context=relevance_context
+        ),
     )
     return report
 
@@ -275,9 +316,17 @@ def build_cluster_report_from_llm(
     relevance_context: Any | None = None,
     model: str = DEFAULT_MODEL,
     chunks_processed: int = 1,
+    role_context: RoleContext | None = None,
 ) -> dict[str, Any]:
-    """Ground LLM cluster output against cleaned keyword metrics."""
+    """Ground LLM cluster output against cleaned keyword metrics.
+
+    The model groups keywords and labels each one. Its labels are kept as one
+    source among three (``llm_intent``/``llm_funnel``); the primary, the roles and
+    the final labels come from ``keyword_cluster_roles.finalize_cluster``, the
+    same decider the deterministic path uses.
+    """
     by_kw = {_norm(str(r.get("keyword") or "")): r for r in cleaned}
+    ctx = role_context or RoleContext.build(cleaned, relevance_context=relevance_context)
     input_keys = set(by_kw)
 
     dropped_llm = [
@@ -290,6 +339,19 @@ def build_cluster_report_from_llm(
     clusters_out: list[dict[str, Any]] = []
     ungrounded_dropped: list[dict[str, Any]] = []
     assigned: set[str] = set()
+    split_originals = 0
+    clusters_from_splits = 0
+    oversized_unsplit = 0
+
+    def _labels_for(member: dict[str, Any]) -> tuple[str, str]:
+        src = by_kw.get(_norm(str(member.get("keyword") or "")))
+        labels = label_keyword(
+            src or {"keyword": member.get("keyword")},
+            brand_tokens=ctx.brand_tokens,
+            llm_intent=member.get("llm_intent"),
+            llm_funnel=member.get("llm_funnel"),
+        )
+        return labels["intent"], labels["funnel"]
 
     for c in llm_payload.get("clusters") or []:
         if not isinstance(c, dict):
@@ -302,7 +364,7 @@ def build_cluster_report_from_llm(
             if not isinstance(item, dict):
                 continue
             kw = _norm(str(item.get("keyword") or ""))
-            if not kw:
+            if not kw or kw in assigned:
                 continue
             src = by_kw.get(kw)
             if src is None and relevance_context is not None:
@@ -312,24 +374,24 @@ def build_cluster_report_from_llm(
                         {"keyword": kw, "reason": reason, "cluster": c.get("name")}
                     )
                     continue
-            role = str(item.get("role") or ("Primary" if i == 0 else "Supporting"))
-            item_intent = str(
-                item.get("intent") or (src or {}).get("intent") or _detect_intent(kw)
-            ).lower()
-            item_funnel = str(
-                item.get("funnel") or (src or {}).get("funnel") or _detect_funnel(kw, item_intent)
-            ).upper()
+            # One page is one intent and one funnel. The model's cluster is
+            # split on both before it is named.
+            group_intent = str(item.get("intent") or _grouping_intent(kw, src or {})).lower()
+            llm_funnel = str(item.get("funnel") or "").strip().upper()
+            if llm_funnel not in ("TOFU", "MOFU", "BOFU"):
+                llm_funnel = _grouping_funnel(kw, src or {}, group_intent)
             fixed.append(
                 {
                     "keyword": kw or item.get("keyword"),
-                    "volume": (src or {}).get("volume"),
-                    "difficulty": (src or {}).get("difficulty"),
-                    "cpc": (src or {}).get("cpc"),
-                    "intent": item_intent,
-                    "funnel": item_funnel,
-                    "role": role,
+                    "volume": (src or {}).get("volume") if src else None,
+                    "difficulty": (src or {}).get("difficulty") if src else None,
+                    "cpc": (src or {}).get("cpc") if src else None,
                     "opportunity_score": (src or {}).get("opportunity_score"),
                     "ungrounded": src is None,
+                    # The model's own labels: one input to the label decision.
+                    "llm_intent": normalize_provider_intent(item.get("intent")),
+                    "llm_funnel": llm_funnel if llm_funnel in ("TOFU", "MOFU", "BOFU") else None,
+                    "_group_focus": f"{group_intent}|{llm_funnel}",
                 }
             )
             assigned.add(kw)
@@ -337,32 +399,82 @@ def build_cluster_report_from_llm(
         if not fixed:
             continue
 
-        primary = next((k for k in fixed if k.get("role") == "Primary"), fixed[0])
-        intent = str(c.get("intent") or primary.get("intent") or _detect_intent(str(primary.get("keyword") or ""))).lower()
-        funnel = str(c.get("funnel") or primary.get("funnel") or _detect_funnel(str(primary.get("keyword") or ""), intent)).upper()
-        primary_kw = str(primary.get("keyword") or "")
-        ctype = str(
-            c.get("content_type") or _content_type(_modifier_bucket(primary_kw), intent)[0]
-        )
-        vols = [int(k["volume"]) for k in fixed if isinstance(k.get("volume"), (int, float))]
+        by_focus: dict[str, list[dict[str, Any]]] = {}
+        for item in fixed:
+            by_focus.setdefault(str(item.pop("_group_focus") or "informational|TOFU"), []).append(item)
+        base_name = str(c.get("name") or "").strip()
+        # Size discipline: a part over SPLIT_THRESHOLD is split by modifier
+        # pattern, then intent, then funnel stage (same rule as the rule path).
+        decided = []
+        for group_label, members in by_focus.items():
+            parts = (
+                split_oversized(members, _labels_for) if len(members) > SPLIT_THRESHOLD else [(members, [])]
+            )
+            if len(members) > SPLIT_THRESHOLD:
+                if len(parts) > 1:
+                    split_originals += 1
+                    clusters_from_splits += len(parts)
+                else:
+                    oversized_unsplit += 1
+            for part, path in parts:
+                decided.append(
+                    (group_label, finalize_cluster({"keywords": part}, ctx), path, len(members))
+                )
+        for group_label, d, path, whole_size in decided:
+            members = d["keywords"]
+            intent, funnel = d["intent"], d["funnel"]
+            primary_kw = str(d["primary_keyword"] or "")
+            ctype = str(
+                c.get("content_type") or _content_type(_modifier_bucket(primary_kw), intent)[0]
+            )
+            vols = [int(k["volume"]) for k in members if isinstance(k.get("volume"), (int, float))]
+            difficulties = [
+                float(k["difficulty"]) for k in members if isinstance(k.get("difficulty"), (int, float))
+            ]
+            name = base_name or primary_kw or "Cluster"
+            if len(by_focus) > 1:
+                # Parts are told apart by the stage and intent that split them.
+                name = f"{name} ({funnel} · {intent})" if not path else f"{name} ({group_label})"
+            whole_name = name
+            name = split_name(name, path)
+            clusters_out.append(
+                {
+                    "name": name,
+                    "intent": intent,
+                    "funnel": funnel,
+                    "recommended_content": c.get("recommended_content") or _content_type(None, intent)[1],
+                    "content_type": ctype,
+                    "recommended_url": c.get("recommended_url") or f"/blog/{_slug(primary_kw or 'cluster')}",
+                    "primary_keyword": d["primary_keyword"],
+                    "est_traffic": sum(vols) if vols else None,
+                    "keyword_count": len(members),
+                    "avg_difficulty": (
+                        round(sum(difficulties) / len(difficulties), 1) if difficulties else None
+                    ),
+                    "best_score": max((k.get("opportunity_score") or 0) for k in members),
+                    "competitor_domains": [],
+                    "intent_distribution": d["intent_distribution"],
+                    "funnel_distribution": d["funnel_distribution"],
+                    "role_counts": d["role_counts"],
+                    "label_confidence": d["label_confidence"],
+                    "primary_selection": d["primary_selection"],
+                    # Set when this cluster is one part of an oversized group.
+                    "split_from": whole_name if path else None,
+                    "split_by": [dimension for dimension, _v in path] if path else None,
+                    "split_from_size": whole_size if path else None,
+                    "keywords": members,
+                }
+            )
 
-        clusters_out.append(
-            {
-                "name": str(c.get("name") or primary_kw or "Cluster").strip(),
-                "intent": intent,
-                "funnel": funnel,
-                "recommended_content": c.get("recommended_content") or _content_type(None, intent)[1],
-                "content_type": ctype,
-                "recommended_url": c.get("recommended_url") or f"/blog/{_slug(primary_kw or 'cluster')}",
-                "primary_keyword": primary.get("keyword"),
-                "est_traffic": c.get("est_traffic") if c.get("est_traffic") is not None else (sum(vols) if vols else None),
-                "keyword_count": len(fixed),
-                "avg_difficulty": None,
-                "best_score": max((k.get("opportunity_score") or 0) for k in fixed),
-                "competitor_domains": [],
-                "keywords": fixed[:15],
-            }
+    def _orphan_labels(kw: str, llm_intent: Any = None, llm_funnel: Any = None) -> dict[str, Any]:
+        # Orphans are labelled by the same decider as cluster members.
+        labels = label_keyword(
+            by_kw.get(kw) or {"keyword": kw},
+            brand_tokens=ctx.brand_tokens,
+            llm_intent=llm_intent,
+            llm_funnel=llm_funnel,
         )
+        return {k: labels[k] for k in _ORPHAN_LABEL_FIELDS}
 
     orphans: list[dict[str, Any]] = []
     for o in llm_payload.get("orphans") or []:
@@ -373,14 +485,22 @@ def build_cluster_report_from_llm(
                     "keyword": o.get("keyword"),
                     "notes": o.get("notes") or "orphan",
                     "volume": (by_kw.get(kw) or {}).get("volume"),
-                    "intent": o.get("intent"),
-                    "funnel": o.get("funnel"),
+                    **_orphan_labels(kw, o.get("intent"), o.get("funnel")),
+                    "exclusion_reason": "no_topic_fit",
                 }
             )
             assigned.add(kw)
         elif isinstance(o, str):
             kw = _norm(o)
-            orphans.append({"keyword": o, "notes": "orphan", "volume": (by_kw.get(kw) or {}).get("volume")})
+            orphans.append(
+                {
+                    "keyword": o,
+                    "notes": "orphan",
+                    "volume": (by_kw.get(kw) or {}).get("volume"),
+                    **_orphan_labels(kw),
+                    "exclusion_reason": "no_topic_fit",
+                }
+            )
             assigned.add(kw)
 
     # Keywords LLM missed — treat as orphans rather than silently dropping
@@ -392,10 +512,28 @@ def build_cluster_report_from_llm(
                 "keyword": src.get("keyword") or kw,
                 "notes": "not assigned by LLM",
                 "volume": src.get("volume"),
-                "intent": src.get("intent"),
-                "funnel": src.get("funnel"),
+                **_orphan_labels(kw),
+                "exclusion_reason": "unassigned_by_model",
             }
         )
+
+    # Real keywords the model judged irrelevant. They stay in the analysis as
+    # orphans with that reason, so the accounting shows where they went.
+    for d in dropped_llm:
+        kw = _norm(str(d.get("keyword") or ""))
+        if kw not in input_keys or kw in assigned:
+            continue
+        src = by_kw.get(kw) or {}
+        orphans.append(
+            {
+                "keyword": src.get("keyword") or kw,
+                "notes": str(d.get("reason") or "dropped by the model as not relevant"),
+                "volume": src.get("volume"),
+                **_orphan_labels(kw),
+                "exclusion_reason": "dropped_for_relevance",
+            }
+        )
+        assigned.add(kw)
 
     roadmap = [
         {
@@ -414,10 +552,22 @@ def build_cluster_report_from_llm(
 
     return {
         "clusters": clusters_out,
-        "orphans": orphans[:30],
+        # Every orphan: the caller counts them for the keyword accounting and
+        # caps only what it displays.
+        "orphans": orphans,
         "content_roadmap": roadmap,
         "llm_dropped": dropped_llm[:50],
         "llm_invented_dropped": ungrounded_dropped[:20],
+        "llm_invented_dropped_count": len(ungrounded_dropped),
+        "size_discipline": {
+            "split_threshold": SPLIT_THRESHOLD,
+            # The small-cluster merge belongs to the rule path; the model groups
+            # its own clusters.
+            "merged_small_clusters": 0,
+            "split_clusters": split_originals,
+            "clusters_from_splits": clusters_from_splits,
+            "oversized_unsplit": oversized_unsplit,
+        },
         "llm_cluster_audit": {
             "model": model,
             "input_count": len(cleaned),

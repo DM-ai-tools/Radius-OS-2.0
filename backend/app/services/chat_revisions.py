@@ -348,7 +348,7 @@ def _preferred_lists(summary: dict[str, Any], agent_key: str) -> list[str]:
             "clusters",
         ]
     if agent_key == "content_strategy":
-        return ["priority_queue", "core_topics", "content_gaps"]
+        return ["content_plan", "priority_queue", "core_topics", "content_gaps"]
     if agent_key == "competitor_market_agent":
         return ["competitors", "scorecards"]
     if agent_key == "site_architecture":

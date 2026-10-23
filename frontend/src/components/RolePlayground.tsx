@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
+import DownloadReportsMenu from "./DownloadReportsMenu";
+import PhaseBrowser, { type BrowserEntry } from "./PhaseBrowser";
 import PlaygroundPhaseReport from "./PlaygroundPhaseReport";
 import ReportDownloadButton from "./ReportDownloadButton";
 import { PHASE_REPORT_CARD_TYPE } from "./ReportCardShell";
@@ -7,98 +9,35 @@ import type { Playground, PlaygroundSection, ReportDownloadFormat } from "../api
 type Props = {
   playground: Playground | null;
   loading?: boolean;
-  /** Sidebar/drawer layout — single-column cards, compact header */
-  variant?: "page" | "sidebar";
   clientId?: string;
   token?: string | null;
-  onClose?: () => void;
   onDownloadReports?: (format: ReportDownloadFormat) => void;
   downloadingReports?: boolean;
   onError?: (message: string) => void;
 };
 
-const DOWNLOAD_FORMATS: { format: ReportDownloadFormat; label: string }[] = [
-  { format: "pdf", label: "PDF" },
-  { format: "docx", label: "Word (.docx)" },
-];
-
-function DownloadReportsButton({
-  onPick,
-  loading,
-}: {
-  onPick: (format: ReportDownloadFormat) => void;
-  loading: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onDocClick(e: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, [open]);
-
-  return (
-    <div ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
-      <button
-        type="button"
-        className="btn btn-ghost"
-        style={{ fontSize: 12, padding: "4px 10px" }}
-        disabled={loading}
-        onClick={() => setOpen((v) => !v)}
-        title="Download all phase reports as PDF or Word"
-        aria-haspopup="true"
-        aria-expanded={open}
-      >
-        {loading ? "Preparing…" : "Download reports ▾"}
-      </button>
-      {open ? (
-        <div className="report-download-menu-list" role="menu">
-          {DOWNLOAD_FORMATS.map((f) => (
-            <button
-              key={f.format}
-              type="button"
-              role="menuitem"
-              className="report-download-menu-item"
-              onClick={() => {
-                setOpen(false);
-                onPick(f.format);
-              }}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 type PhaseMeta = {
   id: string;
   order: number;
+  /** Position in the pipeline, e.g. "05" or "06a". */
+  number: string;
   label: string;
 };
 
 const PIPELINE: PhaseMeta[] = [
-  { id: "discovery", order: 1, label: "01 · Discovery" },
-  { id: "tracking", order: 2, label: "02 · Tracking" },
-  { id: "website", order: 3, label: "03 · Website audit + sitemap" },
-  { id: "competitor", order: 4, label: "04 · Competitors" },
-  { id: "search_demand", order: 5, label: "05 · Keywords" },
-  { id: "site_architecture", order: 6, label: "06a · URL mapping" },
-  { id: "seo_strategy", order: 7, label: "06b · Titles & calendar" },
-  { id: "technical_seo", order: 8, label: "07 · Technical SEO" },
-  { id: "content_audit", order: 9, label: "08 · Existing content audit" },
-  { id: "content_planning", order: 10, label: "09 · Content planning" },
-  { id: "content_production", order: 11, label: "10 · Draft & preview" },
-  { id: "on_page_seo", order: 12, label: "11 · On-page & linking" },
-  { id: "publishing", order: 13, label: "12 · Publish to WordPress" },
+  { id: "discovery", order: 1, number: "01", label: "Discovery" },
+  { id: "tracking", order: 2, number: "02", label: "Tracking" },
+  { id: "website", order: 3, number: "03", label: "Website audit + sitemap" },
+  { id: "competitor", order: 4, number: "04", label: "Competitors" },
+  { id: "search_demand", order: 5, number: "05", label: "Keywords" },
+  { id: "site_architecture", order: 6, number: "06a", label: "URL mapping" },
+  { id: "seo_strategy", order: 7, number: "06b", label: "Titles & calendar" },
+  { id: "technical_seo", order: 8, number: "07", label: "Technical SEO" },
+  { id: "content_audit", order: 9, number: "08", label: "Existing content audit" },
+  { id: "content_planning", order: 10, number: "09", label: "Content planning" },
+  { id: "content_production", order: 11, number: "10", label: "Draft & preview" },
+  { id: "on_page_seo", order: 12, number: "11", label: "On-page & linking" },
+  { id: "publishing", order: 13, number: "12", label: "Publish to WordPress" },
 ];
 
 const KIND_TO_ID: Record<string, string> = {
@@ -171,10 +110,11 @@ type PhaseCard = {
 const CONTEXT_PHASE: PhaseMeta = {
   id: "context",
   order: 0,
+  number: "",
   label: "Client & overview",
 };
 
-function emptySection(meta: PhaseMeta): PlaygroundSection {
+function emptySection(meta: { label: string }): PlaygroundSection {
   return {
     title: meta.label,
     source_role: "shared",
@@ -230,161 +170,111 @@ function buildPhaseCards(sections: PlaygroundSection[]): PhaseCard[] {
   return cards.filter((c) => c.id !== "context" || c.sections.length > 0);
 }
 
-function statusLabel(status: PhaseCard["status"]): string {
-  if (status === "ready") return "Ready";
-  if (status === "mixed") return "Partial";
-  if (status === "planned") return "Later";
-  return "Waiting";
+function entryFor(card: PhaseCard, number: string): BrowserEntry {
+  const saved = card.status === "ready";
+  const partial = card.status === "mixed";
+  return {
+    key: card.id,
+    number,
+    name: card.label,
+    state: saved ? "done" : partial ? "wait" : "todo",
+    statusText: saved ? "Saved" : partial ? "Partly saved" : card.status === "planned" ? "Later" : "Nothing yet",
+    hasContent: saved || partial,
+  };
 }
 
 export default function RolePlayground({
   playground,
   loading,
-  variant = "page",
   clientId,
   token = null,
-  onClose,
   onDownloadReports,
   downloadingReports = false,
   onError,
 }: Props) {
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [pick, setPick] = useState<string | null>(null);
 
   const phaseCards = useMemo(
     () => (playground ? buildPhaseCards(playground.sections) : []),
     [playground]
   );
+  const entries = useMemo(() => {
+    const numbers = new Map(PIPELINE.map((p) => [p.id, p.number]));
+    return phaseCards.map((c) => entryFor(c, numbers.get(c.id) || ""));
+  }, [phaseCards]);
 
   if (loading) {
     return (
-      <div className={`playground${variant === "sidebar" ? " is-sidebar" : ""}`}>
-        <div className="playground-loading">Loading team memory…</div>
+      <div className="ct" aria-busy="true">
+        <div className="ct-skeleton" />
       </div>
     );
   }
 
   if (!playground) {
     return (
-      <div className={`playground${variant === "sidebar" ? " is-sidebar" : ""}`}>
-        <div className="playground-loading">
-          Team memory unavailable. Refresh the page — if this persists, confirm the API on port
-          8000 is running.
-        </div>
+      <div className="ct">
+        <p className="ct-empty">Client memory could not be loaded. Refresh the page to try again.</p>
       </div>
     );
   }
 
-  const clientName = playground.client?.name || "Client";
+  const clientName = playground.client?.name || "this client";
+  const roleLabel = playground.role_label || playground.role_name;
+  const pipelineIds = new Set(PIPELINE.map((p) => p.id));
+  const saved = entries.filter((e) => e.hasContent && pipelineIds.has(e.key)).length;
+  const firstWithContent = entries.find((e) => e.hasContent)?.key ?? null;
+  const selectedKey = entries.some((e) => e.key === pick && e.hasContent) ? pick : firstWithContent;
+  const card = phaseCards.find((c) => c.id === selectedKey) || null;
+  const singleSection = card && card.sections.length === 1 ? card.sections[0] : null;
 
   return (
-    <div className={`playground playground-accordion${variant === "sidebar" ? " is-sidebar" : ""}`}>
-      <header className="playground-hero">
-        <div className="playground-hero-row">
-          <div>
-            <h2>Client memory</h2>
-            <p className="playground-sub">
-              {clientName} · {playground.role_label || playground.role_name} · locked packs from approved phases
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            {onDownloadReports ? (
-              <DownloadReportsButton onPick={onDownloadReports} loading={downloadingReports} />
-            ) : null}
-            {onClose ? (
-              <button type="button" className="btn btn-ghost playground-close" onClick={onClose}>
-                Close
-              </button>
-            ) : null}
-          </div>
-        </div>
-      </header>
-
-      <div className="playground-phase-list">
-        <div className="playground-phase-group">
-          <div className="playground-phase-group-title">Pipeline · 01–12</div>
-          {phaseCards.map((card) => {
-            const open = openId === card.id;
-            return (
-              <article
-                key={card.id}
-                className={`playground-phase-card status-${card.status}${open ? " is-open" : ""}`}
-              >
-                    <button
-                      type="button"
-                      className="playground-phase-toggle"
-                      aria-expanded={open}
-                      onClick={() => setOpenId(open ? null : card.id)}
-                    >
-                      <span className="playground-phase-toggle-main">
-                        <span className="playground-phase-label">{card.label}</span>
-                        <span className={`playground-phase-pill status-${card.status}`}>
-                          {statusLabel(card.status)}
-                        </span>
-                      </span>
-                      <span className="playground-phase-meta">
-                        {card.sections.length > 1
-                          ? `${card.sections.length} blocks`
-                          : card.sections[0]?.source_label || "Shared"}
-                      </span>
-                      <span className="playground-phase-chevron" aria-hidden>
-                        {open ? "▾" : "▸"}
-                      </span>
-                    </button>
-
-                    {open ? (
-                      <div className="playground-phase-body">
-                        {clientId && PHASE_REPORT_CARD_TYPE[card.id] ? (
-                          <div className="playground-phase-download">
-                            <ReportDownloadButton
-                              clientId={clientId}
-                              token={token}
-                              cardType={PHASE_REPORT_CARD_TYPE[card.id]}
-                              label="Download phase report"
-                              onError={onError}
-                            />
-                          </div>
-                        ) : null}
-                        {card.sections.map((sec) => (
-                          <div key={sec.title} className="playground-phase-section">
-                            {card.sections.length > 1 || sec.title !== card.label ? (
-                              <div className="playground-phase-section-head">
-                                <h4>{sec.title}</h4>
-                                <span className="playground-source">
-                                  {sec.source_label}
-                                  {sec.status === "ready"
-                                    ? " · ready"
-                                    : sec.status === "planned"
-                                      ? " · later"
-                                      : " · waiting"}
-                                </span>
-                              </div>
-                            ) : (
-                              <div className="playground-phase-section-head">
-                                <span className="playground-source">
-                                  {sec.source_label}
-                                  {sec.status === "ready" ? " · in memory" : ""}
-                                </span>
-                              </div>
-                            )}
-                            {sec.data != null ? (
-                              <div className="playground-body">
-                                <PlaygroundPhaseReport
-                                  reportKind={sec.report_kind || inferKind(sec.title)}
-                                  data={sec.data}
-                                />
-                              </div>
-                            ) : (
-                              <p className="playground-empty">{sec.empty_hint}</p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-              </article>
-            );
-          })}
-        </div>
-      </div>
-    </div>
+    <PhaseBrowser
+      title="Client memory"
+      summary={`${saved} of ${PIPELINE.length} phases are saved for ${clientName}. Showing the ${roleLabel} view.`}
+      actions={
+        onDownloadReports ? <DownloadReportsMenu onPick={onDownloadReports} loading={downloadingReports} /> : null
+      }
+      entries={entries}
+      selectedKey={selectedKey}
+      onSelect={setPick}
+      missingNote="have nothing saved yet"
+      empty={<p className="ct-empty">Nothing is saved for {clientName} yet. Memory fills in as the phases run.</p>}
+      detailMeta={singleSection?.source_label ? `From the ${singleSection.source_label}` : undefined}
+      detailActions={
+        card && clientId && PHASE_REPORT_CARD_TYPE[card.id] ? (
+          <ReportDownloadButton
+            clientId={clientId}
+            token={token}
+            cardType={PHASE_REPORT_CARD_TYPE[card.id]}
+            label="Download report"
+            onError={onError}
+          />
+        ) : null
+      }
+    >
+      {card
+        ? card.sections.map((sec) => (
+            <div key={sec.title} className="pb-block">
+              {card.sections.length > 1 ? (
+                <div className="pb-block-head">
+                  <h4>{sec.title}</h4>
+                  <span className="pb-block-source">
+                    {sec.source_label}
+                    {sec.status === "ready" ? "" : sec.status === "planned" ? ", later" : ", nothing saved yet"}
+                  </span>
+                </div>
+              ) : null}
+              {sec.data != null ? (
+                <div className="playground-body">
+                  <PlaygroundPhaseReport reportKind={sec.report_kind || inferKind(sec.title)} data={sec.data} />
+                </div>
+              ) : (
+                <p className="pb-empty">{sec.empty_hint}</p>
+              )}
+            </div>
+          ))
+        : null}
+    </PhaseBrowser>
   );
 }

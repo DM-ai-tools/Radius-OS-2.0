@@ -116,7 +116,7 @@ def test_slim_strategy_keeps_clusters_and_difficulty():
     )
     core = (slim.get("core_topics") or [])[0]
     assert len(core.get("clusters") or []) == 2
-    q0 = (slim.get("priority_queue") or [])[0]
+    q0 = (slim.get("content_plan") or [])[0]
     assert q0.get("difficulty") == 42
     assert q0.get("opportunity_score") == 70
 
@@ -204,9 +204,10 @@ def test_combined_queue_refresh_beats_new():
             "pillars": [{"name": "SEO"}],
         },
     )
-    actions = [r["action"] for r in out["combined_priority_queue"]]
-    assert "refresh" in actions
-    assert "create" not in actions  # same topic dropped
+    actions = [r["action"] for r in out["content_plan"]]
+    assert actions == ["optimize"]
+    assert out["content_plan"][0]["disposition"] == "refresh"
+    assert "combined_priority_queue" not in out
 
 
 def test_combined_queue_keeps_service_optimize_and_blog_create():
@@ -234,7 +235,7 @@ def test_combined_queue_keeps_service_optimize_and_blog_create():
             "pillars": [{"name": "Email Marketing"}],
         },
     )
-    rows = out["combined_priority_queue"]
+    rows = out["content_plan"]
     assert rows[0]["action"] == "optimize"
     assert rows[0]["work_label"] == "Optimize service page"
     assert rows[1]["action"] == "create"

@@ -241,6 +241,24 @@ async def test_keywords_are_batched_not_sent_one_per_call():
     assert len(calls) == 3, "45 keywords at batch size 20 must be 3 calls, not 45"
 
 
+async def test_deadline_stops_new_judgements_so_the_report_can_save():
+    async def judge(system, user, batch_size=0):
+        raise AssertionError("judge should not run after the deadline")
+
+    kept, dropped, audit = await validate_keywords(
+        [{"keyword": "email marketing strategy", "service": "Email Marketing", "volume": 20}],
+        client_id="client-deadline",
+        services=["Email Marketing"],
+        caller=judge,
+        enabled=True,
+        deadline=0,
+    )
+    assert dropped == []
+    assert kept[0]["relevance_unjudged_cause"] == "time_budget"
+    assert audit["api_calls"] == 0
+    assert audit["quarantined_by_cause"]["time_budget"] == 1
+
+
 async def test_max_calls_cap_quarantines_the_remainder():
     calls: list = []
     caller = _caller(
@@ -338,3 +356,104 @@ async def test_gate_can_be_disabled_by_settings(monkeypatch, disabled_value):
     assert dropped == []
     assert calls == []
     assert audit["skipped"] == "disabled"
+
+
+async def test_haiku_screen_keep_and_drop_are_final(monkeypatch):
+    from app.config import clear_settings_cache
+
+    monkeypatch.setenv("SKILL_MODEL", "claude-sonnet-5")
+    monkeypatch.setenv("KEYWORD_SCREEN_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("KEYWORD_SCREEN_ENABLED", "true")
+    clear_settings_cache()
+    monkeypatch.setattr(gate, "keyword_analysis_ready", lambda: True)
+    calls: list[tuple[str, str]] = []
+
+    async def chat(*, system, user, model, max_tokens, allow_fallback=True):
+        calls.append((model, user))
+        if model == "claude-haiku-4-5":
+            assert allow_fallback is False
+            return (
+                '{"r":['
+                '["teeth whitening cost","k","c","whitening"],'
+                '["free dental jobs","d","n","dental jobs","job advert"]'
+                "]}"
+            )
+        raise AssertionError("Sonnet must not see a batch Haiku already decided")
+
+    monkeypatch.setattr(gate, "keyword_analysis_chat", chat)
+    kept, dropped, audit = await validate_keywords(
+        rows("teeth whitening cost", "free dental jobs"), **CONTEXT
+    )
+    assert [r["keyword"] for r in kept] == ["teeth whitening cost"]
+    assert dropped[0]["keyword"] == "free dental jobs"
+    assert dropped[0]["relevance_drop_reason"] == "screen: job advert"
+    assert audit["screen_dropped"] == 1
+    assert audit["screen_kept"] == 1
+    assert audit["api_calls"] == 1
+    assert [model for model, _user in calls] == ["claude-haiku-4-5"]
+
+
+async def test_an_unsure_screen_row_is_the_only_one_sonnet_sees(monkeypatch):
+    from app.config import clear_settings_cache
+
+    monkeypatch.setenv("SKILL_MODEL", "claude-sonnet-5")
+    monkeypatch.setenv("KEYWORD_SCREEN_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("KEYWORD_SCREEN_ENABLED", "true")
+    clear_settings_cache()
+    monkeypatch.setattr(gate, "keyword_analysis_ready", lambda: True)
+    sonnet_users: list[str] = []
+
+    async def chat(*, system, user, model, max_tokens, allow_fallback=True):
+        if model == "claude-haiku-4-5":
+            return (
+                '{"r":['
+                '["teeth whitening cost","k","c","whitening"],'
+                '["seo consultant","u","c","consultant"]'
+                "]}"
+            )
+        sonnet_users.append(user)
+        return '{"r":[["seo consultant","k","c","consultant"]]}'
+
+    monkeypatch.setattr(gate, "keyword_analysis_chat", chat)
+    kept, dropped, audit = await validate_keywords(
+        rows("teeth whitening cost", "seo consultant"), **CONTEXT
+    )
+    assert dropped == []
+    assert {r["keyword"] for r in kept} == {"teeth whitening cost", "seo consultant"}
+    assert audit["screen_kept"] == 1
+    assert len(sonnet_users) == 1
+    assert "seo consultant" in sonnet_users[0]
+    assert "teeth whitening cost" not in sonnet_users[0]
+
+
+async def test_a_failed_screen_sends_the_whole_batch_to_sonnet(monkeypatch):
+    from app.config import clear_settings_cache
+
+    monkeypatch.setenv("SKILL_MODEL", "claude-sonnet-5")
+    monkeypatch.setenv("KEYWORD_SCREEN_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("KEYWORD_SCREEN_ENABLED", "true")
+    clear_settings_cache()
+    monkeypatch.setattr(gate, "keyword_analysis_ready", lambda: True)
+    sonnet_users: list[str] = []
+
+    async def chat(*, system, user, model, max_tokens, allow_fallback=True):
+        if model == "claude-haiku-4-5":
+            return None
+        sonnet_users.append(user)
+        return (
+            '{"r":['
+            '["teeth whitening cost","k","c","whitening"],'
+            '["seo consultant","k","c","consultant"]'
+            "]}"
+        )
+
+    monkeypatch.setattr(gate, "keyword_analysis_chat", chat)
+    kept, dropped, audit = await validate_keywords(
+        rows("teeth whitening cost", "seo consultant"), **CONTEXT
+    )
+    assert dropped == []
+    assert {r["keyword"] for r in kept} == {"teeth whitening cost", "seo consultant"}
+    assert audit["screen_dropped"] == 0
+    assert len(sonnet_users) == 1
+    assert "teeth whitening cost" in sonnet_users[0]
+    assert "seo consultant" in sonnet_users[0]

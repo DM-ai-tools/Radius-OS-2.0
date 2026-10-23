@@ -62,26 +62,6 @@ def _pick(row: dict[str, Any], *keys: str) -> Any:
     return None
 
 
-def _flatten_content_calendar(calendar: Any) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for month in _as_rows(calendar):
-        month_label = _first(month.get("label"), f"Month {month.get('month')}")
-        for week in _as_rows(month.get("weeks")):
-            rows.append(
-                {
-                    "week": week.get("week"),
-                    "month": month_label,
-                    "title": _first(week.get("title"), week.get("keyword")),
-                    "keyword": week.get("keyword"),
-                    "type": _first(week.get("content_type"), week.get("type")),
-                    "priority": week.get("priority"),
-                    "est_words": week.get("est_words"),
-                    "suggested_url": week.get("suggested_url"),
-                }
-            )
-    return rows
-
-
 def _normalize_handoffs(rows: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in _as_rows(rows):
@@ -343,12 +323,22 @@ def _normalize_search_demand(payload: dict[str, Any]) -> dict[str, Any]:
             ]
     if not out.get("summary") and out.get("note"):
         out["summary"] = str(out.get("note"))
+    # The layered Keyword Clusters sections read kc_* keys; the raw report and
+    # the flattened list would otherwise also be auto-rendered as extra tables.
+    from app.services.keyword_cluster_report import build_cluster_report_view
+
+    out.update(build_cluster_report_view(out))
+    out.pop("cluster_report", None)
+    out.pop("clusters", None)
     return out
 
 
 def _normalize_content_strategy(payload: dict[str, Any]) -> dict[str, Any]:
     out = dict(payload)
-    out["summary"] = _first(out.get("executive_summary"), out.get("summary"), out.get("note"))
+    # The model write-up is internal. Downloads show the tables, not that essay.
+    out.pop("executive_summary", None)
+    out.pop("calendar_notes", None)
+    out.pop("summary", None)
 
     core_topics = []
     for row in _as_rows(out.get("core_topics") or out.get("pillars")):
@@ -393,37 +383,12 @@ def _normalize_content_strategy(payload: dict[str, Any]) -> dict[str, Any]:
     if gaps:
         out["content_gaps"] = gaps
 
-    calendar = out.get("content_calendar")
-    if calendar:
-        flat = _flatten_content_calendar(calendar)
-        if flat:
-            out["content_calendar"] = flat
-        elif _as_rows(calendar) and not any(isinstance(r.get("weeks"), list) for r in _as_rows(calendar)):
-            # Already flat rows — normalize field aliases
-            out["content_calendar"] = [
-                {
-                    **row,
-                    "title": _first(row.get("title"), row.get("keyword")),
-                    "type": _first(row.get("type"), row.get("content_type")),
-                }
-                for row in _as_rows(calendar)
-            ]
-
     if out.get("handoffs"):
         out["handoffs"] = _normalize_handoffs(out.get("handoffs"))
 
-    queue = []
-    for row in _as_rows(out.get("priority_queue") or out.get("priority_pages")):
-        queue.append(
-            {
-                **row,
-                "title": _first(row.get("title"), row.get("keyword")),
-                "priority": _first(row.get("priority"), row.get("priority_label"), row.get("bucket")),
-                "suggested_url": _first(row.get("suggested_url"), row.get("url")),
-            }
-        )
-    if queue:
-        out["priority_queue"] = queue
+    from app.services.content_queue import present_content_plan
+
+    out = present_content_plan(out)
 
     if not out.get("url_ia_plan"):
         out["url_ia_plan"] = _as_rows(out.get("url_ia_plan") or out.get("url_plan"))
@@ -486,36 +451,195 @@ def _normalize_discovery(payload: dict[str, Any], card_type: str) -> dict[str, A
     return out
 
 
+def _percent_label(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number == int(number):
+        return f"{int(number)}"
+    return f"{number:.1f}"
+
+
 def _normalize_readiness(payload: dict[str, Any]) -> dict[str, Any]:
     out = dict(payload)
     phases = _as_dict(out.get("phases"))
-    if phases and not out.get("missing"):
-        missing: list[str] = []
+    scores: list[str] = []
+    missing: list[str] = list(out.get("missing") or [])
+    if phases:
+        if not missing:
+            missing = []
+            for phase, data in phases.items():
+                if not isinstance(data, dict):
+                    continue
+                for item in data.get("missing") or []:
+                    missing.append(f"{phase}: {item}")
+            out["missing"] = missing
         for phase, data in phases.items():
-            if not isinstance(data, dict):
+            if not isinstance(data, dict) or data.get("score") is None:
                 continue
-            for item in data.get("missing") or []:
-                missing.append(f"{phase}: {item}")
-        out["missing"] = missing
+            name = str(phase).replace("_", " ").title()
+            scores.append(f"{name} — {_percent_label(data.get('score'))}%")
+    if scores:
+        out["phase_scores"] = scores
     return out
+
+
+def _title_text(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _first(value.get("after"), value.get("before"), value.get("text"))
+    return value
 
 
 def _normalize_on_page(payload: dict[str, Any]) -> dict[str, Any]:
     out = dict(payload)
-    if not out.get("pages"):
-        out["pages"] = _as_rows(out.get("queue"))
+    pages = _as_rows(out.get("pages") or out.get("queue"))
+    if pages:
+        out["pages"] = [
+            {
+                **row,
+                "url": _first(row.get("url"), row.get("path")),
+                "title": _first(_title_text(row.get("title")), row.get("h1")),
+                "score": _first(row.get("score"), row.get("current_score")),
+                "keyword": _first(row.get("keyword"), row.get("fixes"), row.get("target_keyword")),
+            }
+            for row in pages
+        ]
     if not out.get("summary"):
         out["summary"] = _first(out.get("note"), out.get("headline"))
     return out
 
 
+# Report slug per audit group (matches report_pdf_document.TECH_GROUP_SLUGS).
+_TECH_GROUP_SLUG = {
+    "Crawlability": "crawlability",
+    "Indexation": "indexation",
+    "URL structure": "url_structure",
+    "Canonicalisation": "canonicalisation",
+    "Sitemap": "sitemap",
+    "Internal linking": "internal_linking",
+    "On-page technical SEO": "on_page",
+    "JavaScript/rendering": "javascript_rendering",
+    "Performance": "performance",
+    "Mobile": "mobile",
+    "Structured data": "structured_data",
+    "Security": "security",
+}
+# What would complete each group when fields are not measured.
+_TECH_GROUP_NEEDS = {
+    "Crawlability": "A deeper crawl (more pages) for crawl depth, orphans and blocked resources.",
+    "Indexation": "Search Console connection for indexed, excluded and soft-404 counts.",
+    "URL structure": "Full-site crawl for parameter and duplicate URL inventories.",
+    "Canonicalisation": "Search Console for Google-selected canonicals; full crawl for every page's canonical.",
+    "Sitemap": "Sitemap XML reachable from this server; Search Console for submitted sitemaps.",
+    "Internal linking": "A deeper crawl for the link graph, anchors and orphan pages.",
+    "On-page technical SEO": "Full-site crawl to extend the page sample to every URL.",
+    "JavaScript/rendering": "A browser-rendered copy (Firecrawl) to compare with raw HTML.",
+    "Performance": "Chrome UX Report field data (needs enough real traffic) for INP and pass/fail.",
+    "Mobile": "Manual tap-target review (no longer audited by Lighthouse).",
+    "Structured data": "A deeper crawl to check every template's markup.",
+    "Security": "Response headers readable from this server (some sites block it).",
+}
+
+
+def _technical_seo_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Curated payload for the twelve-group layout. Only what the blueprint renders
+    (plus identity and summary), so raw provider blobs do not spill into
+    auto-generated sections."""
+    out: dict[str, Any] = {
+        key: payload.get(key)
+        for key in (
+            "client_name", "primary_url", "site", "executive_summary", "severity", "phase6_connected",
+            "scorecard_line", "quick_wins", "priority_backlog", "ia_actions", "specialist_routing",
+            "not_measured", "audit_coverage", "page_sample", "on_page_audit", "canonical_audit",
+            "js_rendering_audit", "performance_audit", "structured_data_audit", "security_audit",
+        )
+        if payload.get(key) not in (None, "", [], {})
+    }
+    out["score"] = _first(payload.get("score"), payload.get("overall_score"))
+    pct = _as_dict(_as_dict(payload.get("audit_coverage")).get("summary")).get("coverage_pct")
+    if out["score"] is not None and isinstance(pct, (int, float)) and pct < 50:
+        # A mean over a few measured groups reads as authoritative; say how much it covers.
+        out["score"] = f"{out['score']} (based on {pct}% of fields)"
+    out["coverage_label"] = "Crawl and page sample"
+    out["data_source_note"] = " ".join(
+        bit for bit in (
+            "Providers: " + ", ".join(payload.get("providers_used") or []) + "." if payload.get("providers_used") else "",
+            "Sections marked Reduced coverage had fields this pass could not measure; each says why.",
+        ) if bit
+    )
+    groups: dict[str, Any] = {}
+    for g in _as_rows(payload.get("audit_groups")):
+        slug = _TECH_GROUP_SLUG.get(str(g.get("group")))
+        if not slug:
+            continue
+        score = g.get("score")
+        groups[slug] = {**g, "score_label": f"{score}/100" if score is not None else "not measured"}
+    out["group"] = groups
+    cov = _as_dict(payload.get("audit_coverage"))
+    needs = {**_TECH_GROUP_NEEDS, **_as_dict(payload.get("coverage_needs"))}
+    out["coverage_matrix"] = [
+        {
+            "group": row.get("group"),
+            "fields": len(row.get("fields") or []),
+            "measured": sum(1 for f in row.get("fields") or [] if f.get("status") != "not_measured"),
+            "with_issues": row.get("issue_count"),
+            "not_measured": row.get("not_measured_count"),
+            "needs": needs.get(str(row.get("group")), "") if row.get("not_measured_count") else "Complete this pass.",
+        }
+        for row in _as_rows(cov.get("groups"))
+    ]
+    sd = dict(_as_dict(out.get("structured_data_audit")))
+    if sd:
+        sd["eligible_rows"] = [{"result": r} for r in sd.get("rich_results_eligible") or []]
+        out["structured_data_audit"] = sd
+    sec = dict(_as_dict(out.get("security_audit")))
+    wp = _as_dict(sec.get("wordpress"))
+    if wp.get("is_wordpress"):
+        sec["wordpress_rows"] = [
+            {"check": "Config backups readable", "result": ", ".join(wp.get("exposed_files") or []) or "none of the common names"},
+            {"check": "XML-RPC", "result": "enabled" if wp.get("xmlrpc_enabled") else f"not exposed (status {wp.get('xmlrpc_status')})"},
+            {"check": "Version disclosed", "result": wp.get("version_exposed") or "no"},
+            {"check": "readme.html public", "result": "yes" if wp.get("readme_exposed") else "no"},
+        ]
+        out["security_audit"] = sec
+    clusters = _as_dict(out.get("canonical_audit"))
+    if clusters.get("duplicate_clusters"):
+        out["canonical_audit"] = {
+            **clusters,
+            "duplicate_clusters": [
+                {**c, "urls": ", ".join(str(u) for u in (c.get("urls") or [])[:5])}
+                for c in _as_rows(clusters.get("duplicate_clusters"))
+            ],
+        }
+    return out
+
+
 def _normalize_technical_seo(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("audit_groups"):
+        return _technical_seo_report_payload(payload)
     out = dict(payload)
     out["score"] = _first(out.get("score"), out.get("overall_score"))
-    if not out.get("findings_by_theme") and out.get("themes"):
-        out["findings_by_theme"] = _as_rows(out.get("themes"))
-    if not out.get("priority_backlog") and out.get("backlog"):
-        out["priority_backlog"] = _as_rows(out.get("backlog"))
+    if not out.get("findings_by_theme"):
+        themes = _as_rows(out.get("themes"))
+        if themes:
+            out["findings_by_theme"] = themes
+        else:
+            sections = _as_dict(out.get("sections"))
+            if sections:
+                out["findings_by_theme"] = [
+                    {
+                        "theme": name.replace("_", " ").title(),
+                        "score": data.get("score"),
+                        "findings": data.get("findings") or [],
+                    }
+                    for name, data in sections.items()
+                    if isinstance(data, dict)
+                ]
+    if not out.get("priority_backlog"):
+        backlog = _as_rows(out.get("backlog") or out.get("priority_fixes"))
+        if backlog:
+            out["priority_backlog"] = backlog
     return out
 
 
@@ -523,6 +647,11 @@ def _normalize_content_audit(payload: dict[str, Any]) -> dict[str, Any]:
     out = dict(payload)
     if not out.get("inventory") and out.get("pages"):
         out["inventory"] = _as_rows(out.get("pages"))
+    inventory = _as_rows(out.get("inventory"))
+    if out.get("inventory_count") is None:
+        out["inventory_count"] = len(inventory)
+    if out.get("handoffs"):
+        out["handoffs"] = _normalize_handoffs(out.get("handoffs"))
     return out
 
 
@@ -562,6 +691,72 @@ def _normalize_content_planning(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _normalize_seo_audit(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    if not out.get("summary"):
+        bits = []
+        if out.get("overall_score") is not None:
+            bits.append(f"Score {out.get('overall_score')}/100")
+        if out.get("score_band"):
+            bits.append(str(out["score_band"]))
+        if out.get("pages_analyzed") is not None:
+            bits.append(f"{out.get('pages_analyzed')} pages analyzed")
+        if out.get("error"):
+            bits.append(str(out["error"]))
+        out["summary"] = " · ".join(bits)
+    if not out.get("issues"):
+        issues: list[dict[str, Any]] = []
+        for severity, key in (
+            ("Critical", "critical"),
+            ("Warning", "warnings"),
+            ("Opportunity", "opportunities"),
+        ):
+            for row in _as_rows(out.get(key)):
+                issues.append(
+                    {
+                        "issue": _first(row.get("issue"), row.get("message"), row.get("title")),
+                        "severity": severity,
+                        "url": _first(row.get("url"), row.get("ref")),
+                    }
+                )
+        out["issues"] = issues
+    return out
+
+
+def _normalize_content_production(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    briefs = []
+    for row in _as_rows(out.get("briefs")):
+        briefs.append(
+            {
+                **row,
+                "url": _first(row.get("url"), row.get("path")),
+                "angle": _first(row.get("angle"), row.get("differentiation")),
+                "status": _first(
+                    row.get("status"),
+                    "writer ready" if row.get("writer_ready") else None,
+                ),
+            }
+        )
+    if briefs:
+        out["briefs"] = briefs
+    return out
+
+
+def _normalize_publishing(payload: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    rows = _as_rows(out.get("queue") or out.get("publish_queue"))
+    if rows:
+        out["queue"] = rows
+    if not out.get("summary"):
+        out["summary"] = (
+            f"{out.get('pages_in_package', len(rows))} page(s) · "
+            f"mode {out.get('mode_effective') or out.get('mode_requested') or '—'} · "
+            f"CMS {out.get('cms_mode') or '—'}"
+        )
+    return out
+
+
 def _normalize_generic_lists(payload: dict[str, Any]) -> dict[str, Any]:
     """Alias common queue / roadmap field names used across phases."""
     out = dict(payload)
@@ -592,6 +787,9 @@ _NORMALIZERS: dict[str, Any] = {
     "technical_seo_report": _normalize_technical_seo,
     "content_audit_report": _normalize_content_audit,
     "content_planning_report": _normalize_content_planning,
+    "seo_audit_report": _normalize_seo_audit,
+    "content_production_report": _normalize_content_production,
+    "publishing_report": _normalize_publishing,
 }
 
 

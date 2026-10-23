@@ -114,6 +114,20 @@ def resolve_previous_design_page(
             return True
         return False
 
+    def _targets_this_draft(link: dict[str, Any]) -> bool:
+        """True when this linking-plan edge points at the draft being previewed."""
+        to_path = _norm_path(str(link.get("to") or link.get("target") or link.get("url") or ""))
+        anchor = _norm_label(link.get("anchor") or link.get("keyword") or "")
+        tail = to_path.strip("/").split("/")[-1] if to_path else ""
+        kw_slug = current_kw.replace(" ", "-")
+        if current_path and to_path and to_path == current_path:
+            return True
+        if current_kw and anchor and anchor == current_kw:
+            return True
+        if kw_slug and tail and tail == kw_slug:
+            return True
+        return False
+
     # --- 1) Internal linking plan (Phase 11) ---------------------------------
     linking = on_page.get("internal_linking") if isinstance(on_page.get("internal_linking"), dict) else {}
     links = list(linking.get("links") or on_page.get("internal_links") or [])
@@ -122,9 +136,8 @@ def resolve_previous_design_page(
     for link in links:
         if not isinstance(link, dict):
             continue
-        to_path = _norm_path(str(link.get("to") or ""))
         from_path = _norm_path(str(link.get("from") or ""))
-        if not current_path or to_path != current_path:
+        if not _targets_this_draft(link):
             continue
         reason = str(link.get("reason") or "").lower()
         if reason in {"parent_hub", "hub_to_spoke", "parent"} or "parent" in reason:
@@ -245,7 +258,19 @@ def resolve_previous_design_page(
                 "path": _norm_path(path),
             }
 
-    # --- 4) IA parent pillar -------------------------------------------------
+    # --- 4) This page's parent in the IA tree, then one site-wide pillar -----
+    for node in ia.get("target_url_tree") or []:
+        if not isinstance(node, dict):
+            continue
+        if not _match_row(node):
+            continue
+        parent = str(node.get("parent") or "").strip()
+        if parent and parent != "—":
+            return {
+                "url": _abs_url(parent, primary),
+                "reason": "ia_tree_parent",
+                "path": _norm_path(parent),
+            }
     parent_pillar = str(ia.get("parent_pillar_page_url") or "").strip()
     if parent_pillar.startswith("http"):
         return {
@@ -253,18 +278,6 @@ def resolve_previous_design_page(
             "reason": "ia_parent_pillar",
             "path": _norm_path(parent_pillar),
         }
-    for node in ia.get("target_url_tree") or []:
-        if not isinstance(node, dict):
-            continue
-        if not _match_row(node):
-            continue
-        parent = str(node.get("parent") or "").strip()
-        if parent:
-            return {
-                "url": _abs_url(parent, primary),
-                "reason": "ia_tree_parent",
-                "path": _norm_path(parent),
-            }
 
     return {"url": "", "reason": "", "path": ""}
 

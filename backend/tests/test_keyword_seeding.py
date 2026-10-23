@@ -55,9 +55,8 @@ async def test_expand_reports_the_outage_instead_of_padding(monkeypatch):
         min_keywords=20,
     )
     assert "provider_expansion_unavailable" in errors
-    assert len(rows) < 20
+    assert rows == []
     assert not [r for r in rows if r.get("provider_fallback")]
-    assert all(r.get("volume") is None for r in rows)
 
 
 def test_clean_provider_seed_strips_rejected_chars():
@@ -269,7 +268,7 @@ async def test_every_class_comes_from_its_dedicated_dataforseo_source(monkeypatc
     )
 
     classes = {r["match_class"] for r in rows}
-    assert classes == {"exact", "phrase", "related", "broad"}
+    assert classes == {"phrase", "related", "broad"}
     # All three sources are queried in a single pass — nothing is conditional
     # on another provider having failed first.
     assert set(called) == {"suggestions", "related", "ideas"}
@@ -280,9 +279,9 @@ async def test_every_class_comes_from_its_dedicated_dataforseo_source(monkeypatc
     )
 
 
-async def test_empty_class_filled_from_real_sub_threshold_keywords(monkeypatch):
-    """A class with no above-floor keyword is filled from real lower-volume
-    results rather than left blank — nothing is invented."""
+async def test_low_measured_volume_is_dropped_and_missing_volume_is_flagged(monkeypatch):
+    """A measured volume must be greater than 9 (9 and 4 stay out). A keyword with no
+    volume is kept and flagged volume_unverified, never silently dropped (2026-10-13)."""
     from app.config import get_settings
     from app.services import keyword_seeding
 
@@ -290,13 +289,18 @@ async def test_empty_class_filled_from_real_sub_threshold_keywords(monkeypatch):
     monkeypatch.setattr(settings, "use_mock_providers", False)
 
     async def _suggestions(seed, **kwargs):
-        return [{"keyword": "seo services melbourne", "volume": 400}], []
+        assert kwargs["min_volume"] == 10
+        assert kwargs["keep_null_volume"] is True
+        return [
+            {"keyword": "seo services melbourne", "volume": 10, "difficulty": 12},
+            {"keyword": "seo services brisbane", "volume": 9, "difficulty": 11},
+            {"keyword": "seo services sydney", "volume": None, "difficulty": 8},
+        ], []
 
     async def _related_kw(seed, **kwargs):
         return [{"keyword": "services for seo", "volume": 300}], []
 
     async def _ideas(seed, **kwargs):
-        # Only sub-threshold broad results exist
         return [{"keyword": "ppc management", "volume": 4}], []
 
     monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _suggestions)
@@ -306,13 +310,15 @@ async def test_empty_class_filled_from_real_sub_threshold_keywords(monkeypatch):
     rows, _ = await expand_seed(
         "seo services", country="au", min_volume=10, location_code=2036
     )
-
-    broad = [r for r in rows if r["match_class"] == "broad"]
-    assert broad, "broad class should be filled from sub-threshold results"
-    assert all(r.get("below_volume_floor") for r in broad)
-    assert broad[0]["keyword"] == "ppc management"
-    # Real provider rows, not fabricated coverage.
-    assert not any(r.get("provider_fallback") for r in broad)
+    by_kw = {r["keyword"]: r for r in rows}
+    assert "seo services melbourne" in by_kw and "services for seo" in by_kw
+    assert "seo services brisbane" not in by_kw  # measured 9
+    assert "ppc management" not in by_kw  # measured 4
+    missing = by_kw["seo services sydney"]
+    assert missing["volume"] is None
+    assert missing["volume_unverified"] is True and missing["volume_status"] == "unverified"
+    assert by_kw["seo services melbourne"]["volume_status"] == "measured"
+    assert by_kw["seo services melbourne"]["volume_unverified"] is False
 
 
 async def test_seeding_reports_per_seed_class_coverage(monkeypatch):
@@ -457,3 +463,129 @@ async def test_ahrefs_plan_failure_is_rechecked_after_the_window(monkeypatch):
     assert ahrefs.keywords_explorer_blocked() is None
     assert calls["n"] == 2
     ahrefs.reset_keywords_explorer_block()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_keywords_keep_measured_metrics(monkeypatch):
+    from app.config import get_settings
+    from app.services import keyword_seeding
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "use_mock_providers", False)
+
+    async def _suggestions(seed, **kwargs):
+        return [
+            {
+                "keyword": "Local SEO",
+                "volume": 400,
+                "difficulty": 22,
+                "cpc": None,
+                "sources": ["keyword_suggestions"],
+            },
+            {
+                "keyword": "local seo services",
+                "volume": 80,
+                "difficulty": 18,
+                "cpc": 1.2,
+                "sources": ["keyword_suggestions"],
+            },
+        ], []
+
+    async def _related_kw(seed, **kwargs):
+        return [
+            {
+                "keyword": "local seo",
+                "volume": None,
+                "difficulty": None,
+                "cpc": 3.5,
+                "sources": ["related_keywords"],
+            }
+        ], []
+
+    async def _ideas(seed, **kwargs):
+        return [{"keyword": "local seo", "volume": 150, "difficulty": 30, "cpc": None}], []
+
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _suggestions)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _related_kw)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_ideas", _ideas)
+
+    rows, errors = await expand_seed(
+        "local seo", country="au", min_volume=10, location_code=2036
+    )
+    assert errors == [] or "provider_expansion_unavailable" not in errors
+    match = next(r for r in rows if r["keyword"].lower() == "local seo")
+    assert match["volume"] == 400
+    assert match["difficulty"] == 22
+    assert match["cpc"] == 3.5
+    assert "keyword_suggestions" in match["sources"]
+    assert "related_keywords" in match["sources"]
+    assert match["seed"] == "local seo"
+
+
+@pytest.mark.asyncio
+async def test_failed_endpoint_keeps_the_others(monkeypatch):
+    from app.config import get_settings
+    from app.services import keyword_seeding
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "use_mock_providers", False)
+
+    async def _suggestions(seed, **kwargs):
+        raise TimeoutError("timed out")
+
+    async def _related_kw(seed, **kwargs):
+        return [{"keyword": "seo audit and services", "volume": 40, "difficulty": 11}], []
+
+    async def _ideas(seed, **kwargs):
+        return [], ["dataforseo_ideas_failed"]
+
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _suggestions)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _related_kw)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_ideas", _ideas)
+
+    rows, errors = await expand_seed(
+        "seo services", country="au", min_volume=10, location_code=2036
+    )
+    assert any("keyword_suggestions" in err for err in errors)
+    assert any("ideas" in err for err in errors)
+    assert [r["keyword"] for r in rows] == ["seo audit and services"]
+    assert rows[0]["volume"] == 40
+
+
+@pytest.mark.asyncio
+async def test_every_configured_seed_is_fetched(monkeypatch):
+    from app.config import get_settings
+    from app.services import keyword_seeding
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "use_mock_providers", False)
+    seen: list[str] = []
+
+    async def _rows(seed, **kwargs):
+        seen.append(seed)
+        return [{"keyword": f"{seed} agency", "volume": 25, "difficulty": 10}], []
+
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_suggestions", _rows)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "related_keywords", _rows)
+    monkeypatch.setattr(keyword_seeding.dataforseo, "keyword_ideas", _rows)
+
+    async def _no_volume(keywords, **kwargs):
+        return [], []
+
+    monkeypatch.setattr(keyword_seeding.dataforseo, "search_volume", _no_volume)
+
+    result = await run_multi_mode_seeding(
+        ["seo services", "content marketing", "google ads"],
+        country="au",
+        min_volume=10,
+        max_seeds=30,
+        location_code=2036,
+        language_code="en",
+    )
+    assert set(seen) == {"seo services", "content marketing", "google ads"}
+    assert {row["seed"] for row in result["keyword_dataset"]} == {
+        "seo services",
+        "content marketing",
+        "google ads",
+    }
+    assert all(int(row["volume"]) > 9 for row in result["keyword_dataset"])

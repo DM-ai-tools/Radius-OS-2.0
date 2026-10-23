@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,19 +34,29 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openrouter_api_key: str = ""
     # Skills always use Anthropic directly (see llm._skill_chat).
-    # OpenRouter remains for research (Perplexity) and image generation only.
+    # OpenRouter is for research (Perplexity), image generation, and the site preview layout.
     llm_provider: str = "anthropic"
     router_model: str = "claude-haiku-4-5"
     # Main reasoning for every skill — Claude Sonnet via ANTHROPIC_API_KEY
     skill_model: str = "claude-sonnet-5"
+    # Keyword analysis retries on this OpenRouter model when the direct Anthropic
+    # call fails or returns nothing. A different provider, so an Anthropic
+    # billing failure does not take the fallback with it.
+    keyword_analysis_fallback_model: str = "google/gemini-2.5-pro"
+    # Cheap first pass on the relevance gate. It may drop only an obvious miss.
+    # Everything else is still judged by skill_model.
+    keyword_screen_enabled: bool = True
+    keyword_screen_model: str = "claude-haiku-4-5"
     # Optional alias for SKILL_MODEL. When CLAUDE_MODEL is set it wins.
     claude_model: str = ""
-    # Legacy alias; competitor skills now use skill_model
-    competitor_model: str = "claude-sonnet-5"
+    # Phase 4 competitor discovery and scoring. OpenRouter chat, separate from the Anthropic skill model.
+    competitor_model: str = "google/gemini-2.5-pro"
     # OpenRouter Perplexity Pro for URL research / CDD extraction
     research_model: str = "perplexity/sonar-pro"
     # Nano Banana (Gemini 2.5 Flash Image) via OpenRouter Images API
     image_model: str = "google/gemini-2.5-flash-image"
+    # Site preview section layout. OpenRouter chat, separate from the Anthropic skill model.
+    preview_layout_model: str = "google/gemini-2.5-pro"
     # Legacy write-model id; Phase 10 drafts now use skill_model on Anthropic
     write_model: str = "claude-sonnet-5"
     # Legacy clustering model id; keyword LLM paths now use skill_model
@@ -54,23 +65,39 @@ class Settings(BaseSettings):
     keyword_relevance_max_input_per_seed: int = 80
     keyword_max_seeds: int = 50
     keyword_pool_target: int = 4500
-    keyword_relevance_max_tokens: int = 2048
+    # Rows requested from each DataForSEO Labs endpoint. Labs bills per row
+    # returned, and 1,000 is the API ceiling for one page.
+    keyword_labs_page_limit: int = 1000
+    # A full page used to trigger up to three more calls so each funnel could
+    # catch up. Those calls are off unless this is set; the first page stands.
+    keyword_labs_followups: bool = False
+    # Variant ideas and the informational top-up are extra keyword-ideas calls
+    # on every seed. Off unless set.
+    keyword_extra_idea_pulls: bool = False
+    # Stop starting new Search Demand calls once this run has committed this
+    # much. Headroom under $8 covers calls already in flight.
+    search_demand_budget_usd: float = 7.0
+    keyword_relevance_max_tokens: int = 8192
     keyword_cluster_use_llm: bool = False
     # Per-keyword LLM relevance gate (Phase 5). Judges every seeded keyword
     # against its own service + CDD + competitor context, and fails closed:
     # anything it could not judge is quarantined, never silently kept.
     keyword_validation_enabled: bool = True
-    # Must stay consistent with keyword_relevance_max_tokens: each verdict row
-    # costs ~40 output tokens, so 200 keywords needed ~8000 against a 2048
-    # budget and every reply was truncated mid-JSON. tokens_for_batch() now
-    # scales the budget too, but a smaller batch also keeps each judgement
-    # sharper and limits the blast radius of one bad reply.
-    keyword_validation_batch_size: int = 25
+    # Each verdict row costs ~40 output tokens. tokens_for_batch() raises the
+    # reply budget with the batch so a larger list is not cut off mid-JSON.
+    # 80 keywords is one call instead of three rounds of 25, and still fits
+    # inside the 8192-token floor.
+    keyword_validation_batch_size: int = 80
     keyword_validation_threshold: float = 0.6
-    # Hard ceiling on LLM calls per run — nothing else in the LLM path caps spend.
-    keyword_validation_max_calls: int = 120
-    keyword_validation_concurrency: int = 3
-    keyword_validation_call_timeout: int = 45
+    # Hard ceiling on LLM calls per run. Haiku's keep and drop are final, so
+    # this counts screens plus the few batches Sonnet still has to see.
+    keyword_validation_max_calls: int = 800
+    # Batches judged at once. At 3, a 40-batch run took 12+ minutes and Phase 5 hit
+    # its 20-minute kill. Measured on the live key (2026-10-09): 16 and 32 concurrent
+    # 80-keyword calls both finished without a rate-limit error (32 in 28 s), so a
+    # ~60-call run is two rounds. The Anthropic SDK retries a 429 on its own.
+    keyword_validation_concurrency: int = 32
+    keyword_validation_call_timeout: int = 90
     keyword_validation_cache_days: int = 14
     # Post-clustering LLM coherence gate (Phase 5). Judges each cluster as a
     # single-page topic; fails closed — unjudged / drop / review stay out of
@@ -79,7 +106,8 @@ class Settings(BaseSettings):
     cluster_validation_batch_size: int = 8
     cluster_validation_threshold: float = 0.6
     cluster_validation_max_calls: int = 40
-    cluster_validation_concurrency: int = 3
+    # 36 small calls at 3 at a time took ~2 minutes of Phase 5; same calls, more at once.
+    cluster_validation_concurrency: int = 16
     cluster_validation_call_timeout: int = 45
     cluster_validation_cache_days: int = 14
     use_mock_llm: bool = True
@@ -108,6 +136,10 @@ class Settings(BaseSettings):
     dataforseo_daily_budget_usd: float = 0.0
     # Expansion pushes this floor to Labs via filters. Default 50.
     keyword_expand_min_volume: int = 10
+    # Model-suggested sub-service seeds per selected service (specialisations, delivery
+    # formats, audience segments, topic verticals). They are fetched on top of the seed
+    # budget, so each one adds a keyword fetch and gate work to Phase 5. 0 turns it off.
+    subservice_expansion_max_seeds: int = 10
     # related_keywords depth is 0–4. Default 1 (the seed plus one hop).
     keyword_related_depth: int = 2
     # Ads volume vs clickstream volume. Flag when the larger is more than this
@@ -120,7 +152,8 @@ class Settings(BaseSettings):
     serp_clustering_enabled: bool = True
     serp_clustering_head_terms: int = 40
     serp_clustering_min_shared: int = 4
-    serp_clustering_concurrency: int = 10
+    # dataforseo._post caps the whole process at 25 simultaneous requests (limit 30).
+    serp_clustering_concurrency: int = 20
     moz_api_key: str = ""
     # Ahrefs Site Audit (Phase 7) — project resolved by URL when unset
     ahrefs_site_audit_project_id: int | None = None
@@ -144,6 +177,26 @@ class Settings(BaseSettings):
     # Blank means the local CSS walk still runs; paid readers are skipped.
     context_dev_api_key: str = ""
 
+    # --- Content Production site preview: built by the Manus agent ----------------
+    # The draft page is rebuilt in the client's own site design by a Manus task.
+    # Without a key the preview is unavailable (there is no other preview builder).
+    manus_api_key: str = ""
+    manus_api_base_url: str = "https://api.manus.ai"
+    # Manus project (folder) for preview tasks: an exact id wins, else a name matched
+    # loosely. Empty means no project. The project's own instruction applies to every
+    # task in it, so keep that instruction empty or in line with the brief.
+    manus_project_id: str = ""
+    manus_project_name: str = ""
+    # Connectors by name or id among those installed in the Manus account.
+    manus_connectors: str = "Firecrawl"
+    # standard | lite | max (standard balances quality and credits).
+    manus_agent_profile: str = "standard"
+    manus_timeout_minutes: int = 90
+    manus_poll_seconds: float = 10.0
+    # USD per Manus credit, for the cost tracker. 0 records credits only, no dollar
+    # amount (nothing is guessed).
+    manus_usd_per_credit: float = 0.0
+
     # Each client connects their own WordPress site + Application Password from the
     # app (stored encrypted per-client, see app.api.integrations) — there is no
     # deployment-wide WordPress site. These two remain global because they are safety
@@ -155,8 +208,13 @@ class Settings(BaseSettings):
     wordpress_allow_live_publish: bool = False
 
     competitor_cache_days: int = 14
+    # QA lessons. Empty uses backend/data/agent_memory. Project files are per client.
+    # System memory keeps the recurring failure, with no client name in it.
+    agent_memory_dir: str = ""
     client_memory_retention_days: int = 30
     client_memory_retention_enabled: bool = True
+    # QA lessons the next agent run reads. Empty uses backend/data/agent_memory.
+    agent_memory_dir: str = ""
     readiness_threshold: float = 90.0
     # 0 = no soft cap — take every page discovered (hard safety ceiling still applies)
     seo_audit_max_pages: int = 0
@@ -165,7 +223,11 @@ class Settings(BaseSettings):
     # Default chat-turn budget; heavy phases override below
     agent_timeout_seconds: int = 480
     technical_seo_agent_timeout_seconds: int = 900
-    search_demand_agent_timeout_seconds: int = 720
+    # Keyword research expands every selected seed, then checks SERPs and clusters.
+    # 12 minutes was cutting ClickTrends-sized runs off during the last Claude pass.
+    search_demand_agent_timeout_seconds: int = 1200
+    # Drafting one page also measures the live page and builds the site preview.
+    content_production_agent_timeout_seconds: int = 900
     # Phase 3 is intentionally bounded for interactive chat. A larger crawl can
     # be requested later through the dedicated crawl/audit tools.
     website_situation_max_pages: int = 40
@@ -334,3 +396,38 @@ def get_settings() -> Settings:
 
 def clear_settings_cache() -> None:
     get_settings.cache_clear()
+
+
+def asyncpg_engine_settings(url: str) -> tuple[str, dict]:
+    """URL and connect args that asyncpg can actually open.
+
+    Railway's public Postgres URL adds ``sslmode`` and ``channel_binding``.
+    asyncpg rejects both as connect keywords. A URL without those parameters
+    is returned unchanged, so local Postgres is unaffected.
+    """
+    if "postgresql" not in url or "?" not in url:
+        return url, {}
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    if not any(key in {"sslmode", "channel_binding"} for key, _value in query):
+        return url, {}
+    sslmode = None
+    kept: list[tuple[str, str]] = []
+    for key, value in query:
+        if key == "sslmode":
+            sslmode = value
+            continue
+        if key == "channel_binding":
+            continue
+        kept.append((key, value))
+    cleaned = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment))
+    connect: dict = {}
+    if sslmode in {"require", "prefer", "verify-ca", "verify-full"}:
+        import ssl
+
+        context = ssl.create_default_context()
+        if sslmode in {"require", "prefer"}:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        connect["ssl"] = context
+    return cleaned, connect

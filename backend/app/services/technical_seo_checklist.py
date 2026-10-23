@@ -118,8 +118,12 @@ def build_audit_coverage(
     sitemap_available: bool = False,
     homepage_checked: bool = False,
     sitemap_audit: dict[str, Any] | None = None,
+    explicit: dict[tuple[str, str], tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Coverage matrix for the 12 targeting groups. Does not invent measurements."""
+    """Coverage matrix for the 12 targeting groups. Does not invent measurements.
+
+    ``explicit`` holds statuses from checks that measured a field directly (the page
+    sample, PageSpeed); they win over the keyword heuristics below."""
     from app.services.sitemap_audit import sitemap_field_statuses
 
     sitemap_statuses = sitemap_field_statuses(sitemap_audit) if sitemap_audit else {}
@@ -152,6 +156,12 @@ def build_audit_coverage(
                 override = sitemap_statuses.get(field)
                 if override:
                     status, note = override
+            direct = (explicit or {}).get((group, field))
+            if direct and not (status == "issue" and direct[0] != "issue"):
+                # A direct check (including "could not measure, the site blocked us")
+                # beats the keyword heuristic for the same field, except that a real
+                # finding from the wider crawl is not hidden by a clean few-page sample.
+                status, note = direct
             if status == "issue":
                 issues_found += 1
                 measured += 1
@@ -197,6 +207,10 @@ def _field_status(
     homepage_checked: bool,
 ) -> tuple[str, str]:
     hints = _FIELD_HINTS.get(field, (field.lower(),))
+    if group == "Sitemap" and not sitemap_available:
+        # "XML sitemap not confirmed" is a Crawlability finding; with no sitemap read,
+        # none of its contents (status codes, canonicals, lastmod) were checked.
+        return "not_measured", "No XML sitemap was read this pass."
     if any(h in blob for h in hints):
         return "issue", "Matching finding in this audit."
 

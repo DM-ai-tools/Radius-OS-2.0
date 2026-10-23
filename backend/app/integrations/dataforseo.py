@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -122,6 +123,8 @@ def _labs_query_fields(
     limit: int,
     min_volume: int | None,
     volume_field: str = "keyword_info.search_volume",
+    keep_null_volume: bool = False,
+    extra_filters: list[list[Any]] | None = None,
 ) -> dict[str, Any]:
     """limit / filters / order_by, pushed to the provider rather than done here.
 
@@ -132,13 +135,28 @@ def _labs_query_fields(
     ``volume_field`` differs by endpoint. Suggestions and ideas use
     ``keyword_info.search_volume``. Related keywords and ranked keywords nest
     it under ``keyword_data.keyword_info.search_volume``.
+
+    ``keep_null_volume`` keeps keywords Labs has no volume for (the floor becomes
+    ``volume >= min OR volume = null``) so they can be flagged instead of silently
+    lost. ``extra_filters`` are AND-ed on. Both shapes, a nested OR group and
+    several AND-ed conditions, were accepted by the live API (2026-10-13).
     """
     fields: dict[str, Any] = {
         "limit": max(1, min(int(limit), MAX_LABS_LIMIT)),
         "order_by": [f"{volume_field},desc"],
     }
+    conditions: list[Any] = []
     if min_volume is not None:
-        fields["filters"] = [volume_field, ">=", int(min_volume)]
+        floor = [volume_field, ">=", int(min_volume)]
+        conditions.append([floor, "or", [volume_field, "=", None]] if keep_null_volume else floor)
+    conditions.extend(extra_filters or [])
+    if len(conditions) == 1:
+        fields["filters"] = conditions[0]
+    elif conditions:
+        joined: list[Any] = [conditions[0]]
+        for condition in conditions[1:]:
+            joined += ["and", condition]
+        fields["filters"] = joined
     return fields
 
 
@@ -177,6 +195,30 @@ def _task_error(body: dict[str, Any] | None) -> str | None:
 
 # Kept well under the per-agent turn budget so one slow endpoint cannot stall a phase.
 REQUEST_TIMEOUT = 35
+# Live SERP calls were timing out at 35s and then retrying twice, and the
+# advanced endpoint fell through to the regular one which timed out the same
+# way. One keyword could spend more than three minutes before a brief existed,
+# so the draft and preview never started. Fail that lookup quickly.
+SERP_TIMEOUT = 18
+SERP_ATTEMPTS = 1
+
+# DataForSEO allows 30 simultaneous requests per account (error 40209) and 2000 a
+# minute (40202). Every call goes through _post, so this one gate keeps the whole
+# process under the limit however many phase steps run concurrently.
+MAX_SIMULTANEOUS_REQUESTS = 25
+_request_gates: dict[int, Any] = {}
+
+
+def _request_gate():
+    """The simultaneous-request gate for the running event loop."""
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    gate = _request_gates.get(id(loop))
+    if gate is None:
+        gate = asyncio.Semaphore(MAX_SIMULTANEOUS_REQUESTS)
+        _request_gates[id(loop)] = gate
+    return gate
 
 
 def _auth_header() -> str | None:
@@ -218,100 +260,129 @@ def should_retry_dataforseo(
     return int(body_status) >= 50000
 
 
-async def _post(path: str, payload: list[dict[str, Any]]) -> dict[str, Any] | None:
+async def _post(
+    path: str,
+    payload: list[dict[str, Any]],
+    *,
+    timeout: float | None = None,
+    max_attempts: int = 3,
+) -> dict[str, Any] | None:
     import asyncio
     import time
 
-    from app.services.api_meter import record_api_call
+    from app.services.api_meter import begin_paid_call, end_paid_call, record_api_call
 
     auth = _auth_header()
     if not auth:
         return None
-    if await _over_daily_budget():
+    # A 100-row Labs page on this account is a few cents. Hold that before the
+    # request so parallel seed expansions cannot walk past the phase cap.
+    phase_reserve = 0.06
+    blocked = await _over_daily_budget() or not begin_paid_call(phase_reserve)
+    if blocked:
         await record_api_call(
             provider="dataforseo",
             operation=path,
             status="error",
-            error_detail="dataforseo_daily_budget_exceeded",
+            error_detail="dataforseo_daily_budget_exceeded" if await _over_daily_budget() else "phase_budget_exceeded",
             estimated_cost_usd=0,
             request_meta={"tasks": len(payload), "blocked": True},
         )
         return None
     url = f"{api_base()}{path}"
     delays = (0.4, 1.2)
+    client_timeout = REQUEST_TIMEOUT if timeout is None else timeout
+    attempts = max(1, min(int(max_attempts), 3))
     last_body: dict[str, Any] | None = None
-    for attempt in range(3):
-        t0 = time.perf_counter()
-        transport_error = False
-        http_status: int | None = None
-        body: dict[str, Any] | None = None
-        error_detail = ""
-        try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                resp = await client.post(
-                    url,
-                    headers={"Authorization": auth, "Content-Type": "application/json"},
-                    json=payload,
-                )
-        except httpx.HTTPError as exc:
-            transport_error = True
-            error_detail = str(exc)[:500]
-            log.warning("dataforseo_request_failed", path=path, error=error_detail[:240])
-        else:
-            http_status = resp.status_code
-            if resp.status_code >= 400:
-                error_detail = resp.text[:500]
-                log.warning(
-                    "dataforseo_http_error",
-                    path=path,
-                    status=resp.status_code,
-                    body=resp.text[:240],
-                )
+    try:
+        for attempt in range(attempts):
+            t0 = time.perf_counter()
+            transport_error = False
+            http_status: int | None = None
+            body: dict[str, Any] | None = None
+            error_detail = ""
+            try:
+                async with _request_gate():
+                    # Time the request itself, not the wait for a free slot.
+                    t0 = time.perf_counter()
+                    async with httpx.AsyncClient(timeout=client_timeout) as client:
+                        resp = await client.post(
+                            url,
+                            headers={"Authorization": auth, "Content-Type": "application/json"},
+                            json=payload,
+                        )
+            except httpx.HTTPError as exc:
+                transport_error = True
+                error_detail = (str(exc) or type(exc).__name__)[:500]
+                log.warning("dataforseo_request_failed", path=path, error=error_detail[:240])
             else:
-                body = resp.json()
-                last_body = body
-                status = body.get("status_code")
-                if status not in (20000, None) and not body.get("tasks"):
-                    error_detail = str(body.get("status_message") or status)[:500]
+                http_status = resp.status_code
+                if resp.status_code >= 400:
+                    error_detail = resp.text[:500]
                     log.warning(
-                        "dataforseo_status",
+                        "dataforseo_http_error",
                         path=path,
-                        status=status,
-                        message=body.get("status_message"),
+                        status=resp.status_code,
+                        body=resp.text[:240],
                     )
                 else:
-                    await record_api_call(
-                        provider="dataforseo",
-                        operation=path,
-                        latency_ms=int((time.perf_counter() - t0) * 1000),
-                        status="success",
-                        estimated_cost_usd=_response_cost(body),
-                        request_meta={"tasks": len(payload)},
-                    )
-                    return body
-        body_status = None
-        if isinstance(last_body, dict) and last_body.get("status_code") is not None:
-            try:
-                body_status = int(last_body.get("status_code"))
-            except (TypeError, ValueError):
-                body_status = None
-        retry = should_retry_dataforseo(
-            http_status=http_status,
-            body_status=body_status if body is not None or transport_error else body_status,
-            transport_error=transport_error,
-        )
-        await record_api_call(
-            provider="dataforseo",
-            operation=path,
-            latency_ms=int((time.perf_counter() - t0) * 1000),
-            status="error",
-            error_detail=error_detail,
-            request_meta={"tasks": len(payload), "attempt": attempt + 1},
-        )
-        if not retry or attempt >= 2:
-            return None
-        await asyncio.sleep(delays[attempt])
-    return None
+                    try:
+                        body = resp.json()
+                    except json.JSONDecodeError:
+                        error_detail = "DataForSEO returned an empty response"
+                        log.warning(
+                            "dataforseo_invalid_json",
+                            path=path,
+                            status=resp.status_code,
+                            body=resp.text[:240],
+                        )
+                        body = None
+                    if body is not None:
+                        last_body = body
+                        status = body.get("status_code")
+                        if status not in (20000, None) and not body.get("tasks"):
+                            error_detail = str(body.get("status_message") or status)[:500]
+                            log.warning(
+                                "dataforseo_status",
+                                path=path,
+                                status=status,
+                                message=body.get("status_message"),
+                            )
+                        else:
+                            await record_api_call(
+                                provider="dataforseo",
+                                operation=path,
+                                latency_ms=int((time.perf_counter() - t0) * 1000),
+                                status="success",
+                                estimated_cost_usd=_response_cost(body),
+                                request_meta={"tasks": len(payload)},
+                            )
+                            return body
+            body_status = None
+            if isinstance(last_body, dict) and last_body.get("status_code") is not None:
+                try:
+                    body_status = int(last_body.get("status_code"))
+                except (TypeError, ValueError):
+                    body_status = None
+            retry = should_retry_dataforseo(
+                http_status=http_status,
+                body_status=body_status if body is not None or transport_error else body_status,
+                transport_error=transport_error,
+            )
+            await record_api_call(
+                provider="dataforseo",
+                operation=path,
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+                status="error",
+                error_detail=error_detail,
+                request_meta={"tasks": len(payload), "attempt": attempt + 1},
+            )
+            if not retry or attempt >= attempts - 1:
+                return None
+            await asyncio.sleep(delays[min(attempt, len(delays) - 1)])
+        return None
+    finally:
+        end_paid_call(phase_reserve)
 
 
 # Assumed cost of the next Labs/SERP call. The real price arrives only after
@@ -431,16 +502,29 @@ def _successful_result_rows(body: dict[str, Any] | None) -> int:
     return count
 
 
-async def competitors_domain(domain: str, *, limit: int = 10) -> list[dict[str, str]]:
-    """Return organic SERP competitors for a domain via DataForSEO Labs."""
-    target = domain.lower().removeprefix("www.")
+async def competitors_domain(
+    domain: str,
+    *,
+    limit: int = 10,
+    location_code: int = DEFAULT_LOCATION,
+    language_code: str = DEFAULT_LANGUAGE,
+) -> list[dict[str, str]]:
+    """Return organic SERP competitors for a domain via DataForSEO Labs.
+
+    POST /v3/dataforseo_labs/google/competitors_domain/live
+    Required field is ``target`` (bare domain). Location and language follow the
+    client. Domains are not invented: an empty or failed response returns [].
+    """
+    target = normalize_target(domain)
+    if not target or not _auth_header():
+        return []
     body = await _post(
         "/dataforseo_labs/google/competitors_domain/live",
         [
             {
                 "target": target,
-                "location_code": DEFAULT_LOCATION,
-                "language_code": DEFAULT_LANGUAGE,
+                "location_code": coerce_labs_location(location_code),
+                "language_code": language_code,
                 "exclude_top_domains": True,
                 "exclude_domains": [target, f"www.{target}"],
                 "limit": limit,
@@ -459,6 +543,82 @@ async def competitors_domain(domain: str, *, limit: int = 10) -> list[dict[str, 
     return out
 
 
+def _dict_at(container: Any, key: str) -> dict[str, Any]:
+    """``container[key]`` when it is a dict, else an empty dict."""
+    if not isinstance(container, dict):
+        return {}
+    value = container.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _labs_keyword_metrics(kw_data: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """Every measured field a Labs keyword item carries, in one dict.
+
+    These all ride along in responses the pipeline already pays for, so
+    reading them costs no extra call. The measured-only rule still holds: a
+    field the provider omitted stays ``None`` rather than being derived or
+    defaulted.
+    """
+    info = _dict_at(kw_data, "keyword_info") or _dict_at(item, "keyword_info")
+    props = _dict_at(kw_data, "keyword_properties") or _dict_at(item, "keyword_properties")
+    intent_info = _dict_at(kw_data, "search_intent_info") or _dict_at(item, "search_intent_info")
+    backlinks = _dict_at(kw_data, "avg_backlinks_info") or _dict_at(item, "avg_backlinks_info")
+    serp_info = _dict_at(kw_data, "serp_info") or _dict_at(item, "serp_info")
+    clickstream = _dict_at(kw_data, "keyword_info_normalized_with_clickstream")
+
+    volume_trend = info.get("search_volume_trend")
+    # monthly_searches is the richer signal; the percentage object is the
+    # fallback for endpoints that ship one but not the other.
+    trend = _monthly_trend(info.get("monthly_searches")) or _trend_from_volume_trend(volume_trend)
+
+    main_intent = str(intent_info.get("main_intent") or "").strip() or None
+    foreign = [
+        str(label).strip()
+        for label in (intent_info.get("foreign_intent") or [])
+        if str(label or "").strip()
+    ]
+    categories = [c for c in (info.get("categories") or []) if isinstance(c, int)]
+    serp_types = [
+        str(t).strip() for t in (serp_info.get("serp_item_types") or []) if str(t or "").strip()
+    ]
+
+    return {
+        "volume": _int_or_none(info.get("search_volume")),
+        "competition": _float_or_none(info.get("competition")),
+        # Google Ads bands (LOW/MEDIUM/HIGH) are kept verbatim. Turning a band
+        # into a midpoint float would be an invented number.
+        "competition_level": str(info.get("competition_level") or "").strip().upper() or None,
+        "cpc": _float_or_none(info.get("cpc")),
+        "bid_low": _float_or_none(info.get("low_top_of_page_bid")),
+        "bid_high": _float_or_none(info.get("high_top_of_page_bid")),
+        "trend": trend,
+        "volume_trend_pct": {
+            period: _float_or_none(volume_trend.get(period))
+            for period in ("monthly", "quarterly", "yearly")
+            if isinstance(volume_trend, dict) and volume_trend.get(period) is not None
+        }
+        or None,
+        "volume_clickstream": _int_or_none(clickstream.get("search_volume")),
+        "difficulty": _int_or_none(props.get("keyword_difficulty")),
+        # Provider-labelled intent. Downstream treats this as measured, so it
+        # must never be filled in from the keyword text here.
+        "intent": main_intent,
+        "secondary_intents": [{"label": label, "probability": None} for label in foreign] or None,
+        "detected_language": str(props.get("detected_language") or "").strip() or None,
+        "is_another_language": (
+            bool(props.get("is_another_language"))
+            if props.get("is_another_language") is not None
+            else None
+        ),
+        "categories": categories or None,
+        "serp_backlinks": _float_or_none(backlinks.get("backlinks")),
+        "serp_referring_domains": _float_or_none(backlinks.get("referring_domains")),
+        "serp_domain_rank": _float_or_none(backlinks.get("main_domain_rank")),
+        "serp_results_count": _int_or_none(serp_info.get("se_results_count")),
+        "serp_item_types": serp_types or None,
+    }
+
+
 def _keyword_rows(body: dict[str, Any] | None, *, endpoint: str) -> list[dict[str, Any]]:
     """Parse DataForSEO Labs keyword items.
 
@@ -472,21 +632,12 @@ def _keyword_rows(body: dict[str, Any] | None, *, endpoint: str) -> list[dict[st
         kw = str(kw_data.get("keyword") or item.get("keyword") or "").strip()
         if not kw:
             continue
-        info = kw_data.get("keyword_info")
-        if not isinstance(info, dict):
-            info = {}
-        props = kw_data.get("keyword_properties")
-        if not isinstance(props, dict):
-            props = item.get("keyword_properties") or {}
         out.append(
             {
                 "keyword": kw,
-                "volume": _int_or_none(info.get("search_volume")),
-                "competition": _float_or_none(info.get("competition")),
-                "cpc": _float_or_none(info.get("cpc")),
-                "difficulty": _int_or_none(
-                    props.get("keyword_difficulty") if isinstance(props, dict) else None
-                ),
+                # Always the same key set, so a caller reading an unmeasured
+                # field gets None rather than a KeyError.
+                **_labs_keyword_metrics(kw_data, item),
                 "source": "dataforseo",
                 "dataforseo_endpoint": endpoint,
             }
@@ -502,6 +653,8 @@ async def related_keywords(
     limit: int = 50,
     min_volume: int | None = None,
     depth: int = 1,
+    keep_null_volume: bool = False,
+    extra_filters: list[list[Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Google 'searches related to' expansion — the RELATED match source.
 
@@ -531,6 +684,8 @@ async def related_keywords(
                     limit=limit,
                     min_volume=min_volume,
                     volume_field="keyword_data.keyword_info.search_volume",
+                    keep_null_volume=keep_null_volume,
+                    extra_filters=extra_filters,
                 ),
             }
         ],
@@ -538,6 +693,12 @@ async def related_keywords(
     if body is None:
         errors.append("dataforseo_related_failed")
         return [], errors
+    task_error = _task_error(body)
+    if task_error:
+        # A rejected request (e.g. an invalid filter) returns no rows; say so instead
+        # of looking like a seed with no keywords.
+        errors.append(f"dataforseo_related_task_error:{task_error[:120]}")
+        log.warning("dataforseo_task_error", endpoint="related_keywords", seed=seed, error=task_error[:200])
 
     out = _keyword_rows(body, endpoint="related_keywords")
     log.info("related_keywords_ok", seed=seed, count=len(out))
@@ -551,6 +712,8 @@ async def keyword_suggestions(
     language_code: str = DEFAULT_LANGUAGE,
     limit: int = 50,
     min_volume: int | None = None,
+    keep_null_volume: bool = False,
+    extra_filters: list[list[Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Full-text search for queries CONTAINING the seed — the PHRASE match source."""
     errors: list[str] = []
@@ -569,13 +732,24 @@ async def keyword_suggestions(
                 "language_code": language_code,
                 "include_seed_keyword": True,
                 "include_serp_info": False,
-                **_labs_query_fields(limit=limit, min_volume=min_volume),
+                **_labs_query_fields(
+                    limit=limit,
+                    min_volume=min_volume,
+                    keep_null_volume=keep_null_volume,
+                    extra_filters=extra_filters,
+                ),
             }
         ],
     )
     if body is None:
         errors.append("dataforseo_suggestions_failed")
         return [], errors
+    task_error = _task_error(body)
+    if task_error:
+        # A rejected request (e.g. an invalid filter) returns no rows; say so instead
+        # of looking like a seed with no keywords.
+        errors.append(f"dataforseo_suggestions_task_error:{task_error[:120]}")
+        log.warning("dataforseo_task_error", endpoint="keyword_suggestions", seed=seed, error=task_error[:200])
 
     out = _keyword_rows(body, endpoint="keyword_suggestions")
     log.info("keyword_suggestions_ok", seed=seed, count=len(out))
@@ -589,10 +763,18 @@ async def keyword_ideas(
     language_code: str = DEFAULT_LANGUAGE,
     limit: int = 50,
     min_volume: int | None = None,
+    keep_null_volume: bool = False,
+    keywords: list[str] | None = None,
+    extra_filters: list[list[Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Category-based ideas that need NOT contain the seed — the BROAD match source."""
+    """Category-based ideas that need NOT contain the seed — the BROAD match source.
+
+    ``keywords`` sends several queries in one task (Labs takes up to 200) instead of
+    just ``seed``; ``extra_filters`` narrow the result (e.g. informational intent).
+    """
     errors: list[str] = []
-    if not seed.strip():
+    queries = [sanitize_keyword(k) or k.strip() for k in (keywords or [seed]) if str(k or "").strip()]
+    if not queries:
         return [], errors
     if not _auth_header():
         errors.append("dataforseo_unavailable")
@@ -602,17 +784,28 @@ async def keyword_ideas(
         "/dataforseo_labs/google/keyword_ideas/live",
         [
             {
-                "keywords": [sanitize_keyword(seed) or seed.strip()],
+                "keywords": queries[:200],
                 "location_code": coerce_labs_location(location_code),
                 "language_code": language_code,
                 "include_serp_info": False,
-                **_labs_query_fields(limit=limit, min_volume=min_volume),
+                **_labs_query_fields(
+                    limit=limit,
+                    min_volume=min_volume,
+                    keep_null_volume=keep_null_volume,
+                    extra_filters=extra_filters,
+                ),
             }
         ],
     )
     if body is None:
         errors.append("dataforseo_ideas_failed")
         return [], errors
+    task_error = _task_error(body)
+    if task_error:
+        # A rejected request (e.g. an invalid filter) returns no rows; say so instead
+        # of looking like a seed with no keywords.
+        errors.append(f"dataforseo_ideas_task_error:{task_error[:120]}")
+        log.warning("dataforseo_task_error", endpoint="keyword_ideas", seed=seed, error=task_error[:200])
 
     out = _keyword_rows(body, endpoint="keyword_ideas")
     log.info("keyword_ideas_ok", seed=seed, count=len(out))
@@ -687,13 +880,34 @@ async def search_volume(
                 continue
             monthly = item.get("monthly_searches") or []
             trend = _trend_from_monthly(monthly)
+            # Google Ads returns competition as a band on some plans and as a
+            # float on others. Keep whichever arrived rather than converting.
+            level = str(
+                item.get("competition_level") or item.get("competition") or ""
+            ).strip().upper()
             out.append(
                 {
                     "keyword": kw,
                     "volume": _int_or_none(item.get("search_volume")),
                     "competition": _float_or_none(item.get("competition")),
+                    "competition_level": (
+                        level if level in ("LOW", "MEDIUM", "HIGH") else None
+                    ),
+                    "competition_index": _int_or_none(item.get("competition_index")),
                     "cpc": _float_or_none(item.get("cpc")),
+                    "bid_low": _float_or_none(item.get("low_top_of_page_bid")),
+                    "bid_high": _float_or_none(item.get("high_top_of_page_bid")),
                     "trend": trend,
+                    "monthly_searches": [
+                        {
+                            "year": _int_or_none(m.get("year")),
+                            "month": _int_or_none(m.get("month")),
+                            "search_volume": _int_or_none(m.get("search_volume")),
+                        }
+                        for m in monthly
+                        if isinstance(m, dict)
+                    ]
+                    or None,
                     "source": "dataforseo",
                 }
             )
@@ -820,6 +1034,8 @@ async def serp_overview(
                 "depth": depth,
             }
         ],
+        timeout=SERP_TIMEOUT,
+        max_attempts=SERP_ATTEMPTS,
     )
     if body is None:
         errors.append("dataforseo_serp_failed")
@@ -876,7 +1092,14 @@ async def serp_advanced(
                 "depth": depth,
             }
         ],
+        timeout=SERP_TIMEOUT,
+        max_attempts=SERP_ATTEMPTS,
     )
+    # A timeout already spent the budget. The regular endpoint times out the
+    # same way, so falling through would delay the draft a second time.
+    if body is None:
+        errors.append("dataforseo_serp_failed")
+        return empty, errors
     items = _task_items(body)
     if not items:
         organic, err = await serp_overview(
@@ -990,21 +1213,22 @@ async def ranked_keywords(
         kw = str(kw_data.get("keyword") or item.get("keyword") or "").strip()
         if not kw:
             continue
-        info = kw_data.get("keyword_info")
-        info = info if isinstance(info, dict) else {}
         serp = item.get("ranked_serp_element")
         serp_item = (serp or {}).get("serp_item") if isinstance(serp, dict) else None
         serp_item = serp_item if isinstance(serp_item, dict) else {}
         out.append(
             {
                 "keyword": kw,
-                "volume": _int_or_none(info.get("search_volume")),
-                "cpc": _float_or_none(info.get("cpc")),
-                "competition": _float_or_none(info.get("competition")),
+                **_labs_keyword_metrics(kw_data, item),
                 "position": _int_or_none(serp_item.get("rank_absolute")),
                 "traffic": _int_or_none(serp_item.get("etv")),
+                # The ranking URL makes a row actionable: it says which page is
+                # already competing, so an audit can fetch it instead of guessing.
+                "url": str(serp_item.get("url") or "").strip() or None,
+                "title": str(serp_item.get("title") or "").strip() or None,
                 "domain": target,
                 "source": "dataforseo",
+                "dataforseo_endpoint": "ranked_keywords",
             }
         )
     log.info("dataforseo_ranked_keywords_ok", domain=target, count=len(out))
@@ -1022,13 +1246,16 @@ async def keyword_gap(
     """Keywords competitors rank for that target may miss (intersection / gap)."""
     errors: list[str] = []
     t = target.lower().removeprefix("www.")
-    comps = [c.lower().removeprefix("www.") for c in competitors if c][:3]
+    # The research set is up to 10. Using only the first three meant every
+    # competitor after that never contributed a keyword gap.
+    comps = [c.lower().removeprefix("www.") for c in competitors if c][:8]
     if not t or not comps:
         return [], errors
     if not _auth_header():
         errors.append("dataforseo_unavailable")
         return [], errors
 
+    page_limit = max(1, min(int(limit), MAX_LABS_LIMIT))
     body = await _post(
         "/dataforseo_labs/google/domain_intersection/live",
         [
@@ -1038,12 +1265,17 @@ async def keyword_gap(
                 "location_code": coerce_labs_location(location_code),
                 "language_code": language_code,
                 "intersections": True,
-                "limit": max(1, min(int(limit), MAX_LABS_LIMIT)),
+                "limit": page_limit,
                 "item_types": ["organic"],
             }
         ],
     )
-    # Fallback: ranked keywords for first competitor
+    # Intersection covers the first two domains. A one-domain set is already
+    # covered by that call. Everyone after the pair still needs their own
+    # ranked-keyword pull, or they never enter the gap.
+    ranked_from = len(comps) if body is not None else 0
+    if body is not None and len(comps) > 1:
+        ranked_from = 2
     if body is None:
         body = await _post(
             "/dataforseo_labs/google/ranked_keywords/live",
@@ -1052,7 +1284,7 @@ async def keyword_gap(
                     "target": comps[0],
                     "location_code": coerce_labs_location(location_code),
                     "language_code": language_code,
-                    "limit": max(1, min(int(limit), MAX_LABS_LIMIT)),
+                    "limit": page_limit,
                     "item_types": ["organic"],
                 }
             ],
@@ -1060,41 +1292,103 @@ async def keyword_gap(
         if body is None:
             errors.append("dataforseo_gap_failed")
             return [], errors
+        ranked_from = 1
 
-    out: list[dict[str, Any]] = []
-    for item in _task_items(body):
-        kw_data = item.get("keyword_data") or {}
-        kw = str(
-            (kw_data.get("keyword") if isinstance(kw_data, dict) else None)
-            or item.get("keyword")
-            or ""
-        ).strip()
-        if not kw:
-            continue
-        info = (kw_data.get("keyword_info") if isinstance(kw_data, dict) else None) or {}
-        out.append(
-            {
-                "keyword": kw,
-                "volume": _int_or_none(info.get("search_volume") if isinstance(info, dict) else None),
-                "competitor_domain": comps[0],
-                "gap_flag": True,
-                "source": "dataforseo",
-            }
+    def _rows_from(payload: dict[str, Any] | None, domain: str, endpoint: str) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        for item in _task_items(payload):
+            nested = item.get("keyword_data")
+            kw_data = nested if isinstance(nested, dict) else item
+            kw = str(kw_data.get("keyword") or item.get("keyword") or "").strip()
+            if not kw:
+                continue
+            found.append(
+                {
+                    "keyword": kw,
+                    **_labs_keyword_metrics(kw_data, item),
+                    "competitor_domain": domain,
+                    "gap_flag": True,
+                    "source": "dataforseo",
+                    "dataforseo_endpoint": endpoint,
+                }
+            )
+        return found
+
+    out = _rows_from(body, comps[0], "domain_intersection")
+    seen = {row["keyword"].lower() for row in out}
+    for domain in comps[ranked_from:]:
+        extra = await _post(
+            "/dataforseo_labs/google/ranked_keywords/live",
+            [
+                {
+                    "target": domain,
+                    "location_code": coerce_labs_location(location_code),
+                    "language_code": language_code,
+                    "limit": page_limit,
+                    "item_types": ["organic"],
+                }
+            ],
         )
-    log.info("keyword_gap_ok", target=t, count=len(out))
+        if extra is None:
+            errors.append(f"dataforseo_gap_failed:{domain}")
+            continue
+        for row in _rows_from(extra, domain, "ranked_keywords"):
+            key = row["keyword"].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+    log.info("keyword_gap_ok", target=t, count=len(out), competitors=len(comps))
     return out, errors
 
 
-def _trend_from_monthly(monthly: list[Any]) -> str:
-    """rising | stable | declining from Google Ads monthly_searches."""
-    if not isinstance(monthly, list) or len(monthly) < 3:
-        return "stable"
+def _monthly_volumes(monthly: Any) -> list[int]:
+    """The last six measured months of a monthly_searches series."""
+    if not isinstance(monthly, list):
+        return []
     vols: list[int] = []
     for row in monthly[-6:]:
         if isinstance(row, dict):
             v = _int_or_none(row.get("search_volume"))
             if v is not None:
                 vols.append(v)
+    return vols
+
+
+def _monthly_trend(monthly: Any) -> str | None:
+    """Trend, or None when the provider sent no usable series.
+
+    Unlike ``_trend_from_monthly`` this never answers "stable" for missing
+    data. Labs items often omit monthly_searches entirely, and a fabricated
+    "stable" would hand the blog virality gate evidence it does not have.
+    """
+    if len(_monthly_volumes(monthly)) < 3:
+        return None
+    return _trend_from_monthly(monthly)
+
+
+def _trend_from_volume_trend(trend: Any) -> str | None:
+    """Direction from keyword_info.search_volume_trend percentages.
+
+    Same +/-20% band as the monthly series so the two sources agree.
+    """
+    if not isinstance(trend, dict):
+        return None
+    for period in ("monthly", "quarterly", "yearly"):
+        pct = _float_or_none(trend.get(period))
+        if pct is None:
+            continue
+        if pct >= 20:
+            return "rising"
+        if pct <= -20:
+            return "declining"
+        return "stable"
+    return None
+
+
+def _trend_from_monthly(monthly: list[Any]) -> str:
+    """rising | stable | declining from Google Ads monthly_searches."""
+    vols = _monthly_volumes(monthly)
     if len(vols) < 3:
         return "stable"
     early = sum(vols[: len(vols) // 2]) / max(1, len(vols) // 2)
@@ -1394,17 +1688,17 @@ async def top_searches(
         kw = str(kw_data.get("keyword") or item.get("keyword") or "").strip()
         if not kw:
             continue
-        info = kw_data.get("keyword_info") if isinstance(kw_data.get("keyword_info"), dict) else {}
         serp = item.get("ranked_serp_element") if isinstance(item.get("ranked_serp_element"), dict) else {}
         serp_item = serp.get("serp_item") if isinstance(serp.get("serp_item"), dict) else {}
         out.append(
             {
                 "keyword": kw,
+                **_labs_keyword_metrics(kw_data, item),
                 "url": str(serp_item.get("url") or serp_item.get("relative_url") or "").strip() or None,
                 "position": _int_or_none(serp_item.get("rank_absolute") or serp_item.get("rank_group")),
-                "volume": _int_or_none(info.get("search_volume")),
                 "domain": target,
                 "source": "dataforseo",
+                "dataforseo_endpoint": "top_searches",
             }
         )
     return out, errors

@@ -22,6 +22,7 @@ log = get_logger("api_meter")
 # USD per 1M tokens — (input, output). Rough OpenRouter/Anthropic list prices.
 _LLM_PRICE_PER_M: dict[str, tuple[float, float]] = {
     "claude-sonnet-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
     "claude-3-5-sonnet-20241022": (3.0, 15.0),
     "claude-3-5-haiku-20241022": (0.8, 4.0),
     "google/gemini-2.5-pro": (1.25, 5.0),
@@ -41,7 +42,7 @@ _PROVIDER_FLAT_USD: dict[str, float] = {
 
 
 class _MeterContext:
-    __slots__ = ("agent_key", "client_id", "session_id")
+    __slots__ = ("agent_key", "client_id", "session_id", "phase_budget_usd", "phase_spent", "phase_reserved")
 
     def __init__(
         self,
@@ -49,10 +50,14 @@ class _MeterContext:
         client_id: UUID | None = None,
         session_id: UUID | None = None,
         agent_key: str | None = None,
+        phase_budget_usd: float | None = None,
     ) -> None:
         self.client_id = client_id
         self.session_id = session_id
         self.agent_key = agent_key
+        self.phase_budget_usd = phase_budget_usd
+        self.phase_spent = 0.0
+        self.phase_reserved = 0.0
 
 
 _meter_ctx: ContextVar[_MeterContext] = ContextVar(
@@ -66,18 +71,51 @@ async def api_meter_context(
     client_id: UUID | None = None,
     session_id: UUID | None = None,
     agent_key: str | None = None,
+    phase_budget_usd: float | None = None,
 ):
     token: Token = _meter_ctx.set(
         _MeterContext(
             client_id=client_id,
             session_id=session_id,
             agent_key=agent_key,
+            phase_budget_usd=phase_budget_usd,
         )
     )
     try:
         yield
     finally:
         _meter_ctx.reset(token)
+
+
+def begin_paid_call(reserve: float) -> bool:
+    """Hold ``reserve`` dollars against the phase cap. True when the call may start.
+
+    No cap means every call may start. The reserve is released by ``end_paid_call``
+    once the real cost is known, so concurrent calls cannot all slip under the cap.
+    """
+    ctx = _meter_ctx.get()
+    cap = ctx.phase_budget_usd
+    if not cap or cap <= 0:
+        return True
+    if ctx.phase_spent + ctx.phase_reserved + reserve > cap:
+        log.warning(
+            "phase_budget_blocked",
+            agent_key=ctx.agent_key,
+            spent_usd=round(ctx.phase_spent, 4),
+            reserved_usd=round(ctx.phase_reserved, 4),
+            cap_usd=cap,
+        )
+        return False
+    ctx.phase_reserved += reserve
+    return True
+
+
+def end_paid_call(reserve: float) -> None:
+    """Release the hold taken by ``begin_paid_call``. The logged cost stays in ``phase_spent``."""
+    ctx = _meter_ctx.get()
+    if not ctx.phase_budget_usd:
+        return
+    ctx.phase_reserved = max(0.0, ctx.phase_reserved - reserve)
 
 
 def estimate_llm_cost_usd(
@@ -107,6 +145,74 @@ def estimate_llm_cost_usd(
 def estimate_provider_cost_usd(provider: str, *, units: int = 1) -> Decimal:
     unit = _PROVIDER_FLAT_USD.get(provider.lower(), 0.0)
     return Decimal(str(round(unit * max(1, units), 6)))
+
+
+def anthropic_call_cost(
+    model: str | None,
+    *,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cache_write_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+) -> Decimal | None:
+    """Token price plus Anthropic cache write (1.25×) and cache read (0.1×)."""
+    base = estimate_llm_cost_usd(
+        model, prompt_tokens=input_tokens, completion_tokens=output_tokens
+    )
+    if base is None and not cache_write_tokens and not cache_read_tokens:
+        return None
+    key = (model or "").strip().lower()
+    rates = _LLM_PRICE_PER_M.get(key)
+    if not rates:
+        for partial, price in _LLM_PRICE_PER_M.items():
+            if partial in key or key in partial:
+                rates = price
+                break
+    input_rate = rates[0] if rates else 2.0
+    extra = (int(cache_write_tokens or 0) / 1_000_000) * input_rate * 1.25
+    extra += (int(cache_read_tokens or 0) / 1_000_000) * input_rate * 0.1
+    return Decimal(str(round(float(base or 0) + extra, 6)))
+
+
+def reported_usage_cost(usage: dict[str, Any] | None) -> float | None:
+    """Dollar amount the provider put on the response. None when it didn't."""
+    if not isinstance(usage, dict):
+        return None
+    raw = usage.get("cost")
+    if raw is None and isinstance(usage.get("cost_details"), dict):
+        raw = usage["cost_details"].get("upstream_inference_cost")
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_recorded_cost(
+    *,
+    provider: str,
+    status: str,
+    estimated_cost_usd: Decimal | float | None,
+    model: str | None,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    apply_flat_estimate: bool = True,
+) -> Decimal | None:
+    """Use a reported dollar amount, then token rates, then a known flat price.
+
+    ``apply_flat_estimate`` stays off when a flat price would invent a charge
+    the provider did not report (Ahrefs bills in units, not $0.01 a call).
+    """
+    if estimated_cost_usd is not None:
+        return Decimal(str(estimated_cost_usd))
+    if provider.lower() in ("openrouter", "anthropic", "llm"):
+        cost = estimate_llm_cost_usd(
+            model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
+        )
+        if cost is not None:
+            return cost
+    if status == "success" and apply_flat_estimate and provider.lower() in _PROVIDER_FLAT_USD:
+        return estimate_provider_cost_usd(provider)
+    return None
 
 
 async def provider_spend_today_usd(provider: str) -> float | None:
@@ -152,6 +258,7 @@ async def record_api_call(
     client_id: UUID | None = None,
     session_id: UUID | None = None,
     agent_key: str | None = None,
+    apply_flat_estimate: bool = True,
 ) -> None:
     ctx = _meter_ctx.get()
     cid = client_id if client_id is not None else ctx.client_id
@@ -164,11 +271,18 @@ async def record_api_call(
     if pt is not None or ct is not None:
         total = int(pt or 0) + int(ct or 0)
 
-    cost = estimated_cost_usd
-    if cost is None and provider.lower() in ("openrouter", "anthropic", "llm"):
-        cost = estimate_llm_cost_usd(model, prompt_tokens=pt, completion_tokens=ct)
-    if cost is None and status == "success":
-        cost = estimate_provider_cost_usd(provider)
+    # A reported amount or token price wins. A flat price is only applied for
+    # providers whose call has a known dollar rate. Manus credits, Ahrefs units,
+    # and other unpriced calls stay null rather than being stored as $0.
+    cost = resolve_recorded_cost(
+        provider=provider,
+        status=status,
+        estimated_cost_usd=estimated_cost_usd,
+        model=model,
+        prompt_tokens=pt,
+        completion_tokens=ct,
+        apply_flat_estimate=apply_flat_estimate,
+    )
 
     row = ApiUsageLog(
         client_id=cid,
@@ -186,6 +300,8 @@ async def record_api_call(
         error_detail=(error_detail or "")[:500] or None,
         request_meta=request_meta,
     )
+    if ctx.phase_budget_usd:
+        ctx.phase_spent += float(cost or 0)
     try:
         async with AsyncSessionLocal() as db:
             db.add(row)

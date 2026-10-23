@@ -95,13 +95,14 @@ def test_seed_clusters_and_service_clusters_carry_intent():
     ]
     clusters = build_seed_clusters(rows, ["seo services"])
     assert clusters[0]["exact"][0]["intent"] == "commercial"
-    assert clusters[0]["phrase"][0]["intent"] == "informational"
+    # Choosing between providers is consideration, not education (2026-10-19 brief).
+    assert clusters[0]["phrase"][0]["intent"] == "commercial"
     assert clusters[0]["broad"][0]["intent"] == "transactional"
 
     groups = build_service_seed_clusters(clusters, ["SEO Services"])
     kws = {row["keyword"]: row["intent"] for row in groups[0]["seeds"][0]["keywords"]}
     assert kws["seo services"] == "commercial"
-    assert kws["how to choose seo services"] == "informational"
+    assert kws["how to choose seo services"] == "commercial"
     assert kws["seo pricing"] == "transactional"
 
 

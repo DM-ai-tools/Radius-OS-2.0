@@ -30,7 +30,7 @@ export default function ContentAuditCard({ payload, canAct, onAction }: Props) {
   const quickWins = asRows(payload.quick_wins);
   const reviewQueue = asRows(payload.review_queue);
   const handoffs = asRows(payload.handoffs);
-  const combinedQueue = asRows(payload.combined_priority_queue);
+  const combinedQueue = asRows(payload.content_plan || payload.combined_priority_queue);
   const couldNot = Array.isArray(payload.could_not_assess)
     ? (payload.could_not_assess as string[])
     : [];
@@ -188,7 +188,7 @@ export default function ContentAuditCard({ payload, canAct, onAction }: Props) {
       {combinedQueue.length > 0 ? (
         <>
           <h4 style={{ marginBottom: 8 }}>
-            Combined priority queue
+            Content plan
             {payload.both_skills_present ? " (audit + strategy)" : " (audit-led)"}
           </h4>
           <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>

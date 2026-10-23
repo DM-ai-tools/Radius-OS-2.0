@@ -93,6 +93,15 @@ _OTHER_FIRST = {
     "author",
     "tag",
     "category",
+    "thank-you",
+    "thanks",
+    "results",
+    "client-feedback",
+    "testimonials",
+    "case-studies",
+    "case-studies-and-success-stories",
+    "booking",
+    "booking-consultation",
 }
 
 
@@ -348,6 +357,62 @@ def _audit_select_score(url: str, terms: dict[str, list[str]]) -> tuple[int, dic
     return base, {**meta, **cdd}
 
 
+def _url_key(url: str) -> str:
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    path = parsed.path or "/"
+    if len(path) > 1 and path.endswith("/"):
+        path = path[:-1]
+    host = (parsed.netloc or "").lower().removeprefix("www.")
+    return f"{host}{path or '/'}"
+
+
+def merge_known_sitemap_urls(
+    discovered: list[str],
+    sections: dict[str, str],
+    known: list[dict[str, Any]] | None,
+    *,
+    max_pages: int,
+    live_sitemap: bool = False,
+) -> list[str]:
+    """Keep a previously read sitemap when this run cannot fetch sitemap.xml.
+
+    A captcha blocks this server from the XML file. The last sitemap inventory
+    is still the page list the chips should count, so those URLs are added
+    back with their page/post section. A sitemap read on this run wins.
+    """
+    if live_sitemap or not known:
+        return discovered
+    out = list(discovered)
+    by_key = {_url_key(u): u for u in out}
+    limit = max(1, int(max_pages or 1))
+    for row in known:
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url") or "").strip()
+        key = _url_key(url)
+        section = str(row.get("sitemap_section") or "")
+        if not key:
+            continue
+        existing = by_key.get(key)
+        if existing:
+            if section and not sections.get(existing):
+                sections[existing] = section
+            continue
+        if len(out) >= limit:
+            continue
+        full = url if url.startswith("http") else "https://" + url.lstrip("/")
+        by_key[key] = full
+        out.append(full)
+        if section:
+            sections[full] = section
+    return out
+
+
 def prioritize_urls_for_audit(
     urls: list[str],
     *,
@@ -377,6 +442,36 @@ def prioritize_urls_for_audit(
     return [u for _, u in scored[:limit]]
 
 
+def _meta(cluster: str, page_type: str, parent: str) -> dict[str, str]:
+    return {
+        "cluster": cluster,
+        "cluster_label": CLUSTER_LABELS[cluster],
+        "page_type": page_type,
+        "hierarchy_level": str(HIERARCHY_LEVEL[cluster]),
+        "parent_type": parent,
+    }
+
+
+def apply_sitemap_section(meta: dict[str, str], url: str, section: str) -> dict[str, str]:
+    """WordPress splits pages and posts into different sitemaps.
+
+    Root permalinks look the same either way (`/seo` vs `/why-hire-a-writer`),
+    so the sitemap file is the signal: post-sitemap URLs are blog posts, and
+    page-sitemap URLs that are not utility pages are service pages.
+    """
+    kind = (section or "").strip().lower()
+    segs = _segments(url)
+    if kind == "post":
+        if segs and segs[0] in _BLOG and len(segs) == 1:
+            return _meta("blog", "hub", "Home")
+        if segs:
+            return _meta("blog", "post", "Blog hub")
+        return meta
+    if kind == "page" and meta.get("cluster") == "other" and segs and segs[0] not in _OTHER_FIRST:
+        return _meta("services", "service", "Home")
+    return meta
+
+
 def attach_page_clusters(
     pages: list[dict[str, Any]],
     *,
@@ -389,6 +484,7 @@ def attach_page_clusters(
         url = str(page.get("url") or page.get("path") or "")
         title = str(page.get("title") or "")
         meta = classify_audit_page(url, title)
+        meta = apply_sitemap_section(meta, url, str(page.get("sitemap_section") or ""))
         cdd = match_cdd_page(url, title, terms)
         page["cluster"] = meta["cluster"]
         page["cluster_label"] = meta["cluster_label"]
@@ -437,16 +533,17 @@ def page_cluster_summary(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         row["count"] += 1
         if page.get("cdd_focus"):
             row["cdd_count"] += 1
-        score = page.get("overall_score")
-        if isinstance(score, (int, float)):
-            row["scores"].append(float(score))
+        score = measured_page_score(page)
+        if score is not None:
+            row["scores"].append(score)
         row["pages"].append(
             {
                 "url": page.get("url"),
                 "path": page.get("path"),
                 "title": page.get("title"),
                 "page_type": page.get("page_type"),
-                "overall_score": page.get("overall_score"),
+                    "overall_score": measured_page_score(page),
+                    "score_band": page.get("score_band"),
                 "cdd_focus": page.get("cdd_focus"),
                 "cdd_terms": page.get("cdd_terms") or [],
             }
@@ -506,7 +603,8 @@ def build_page_hierarchy(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "path": page.get("path"),
                     "url": page.get("url"),
                     "title": page.get("title"),
-                    "overall_score": page.get("overall_score"),
+                    "overall_score": measured_page_score(page),
+                    "score_band": page.get("score_band"),
                     "cdd_focus": bool(page.get("cdd_focus")),
                     "cdd_terms": list(page.get("cdd_terms") or []),
                 }
@@ -549,17 +647,28 @@ def cdd_coverage_gaps(
     return gaps[:15]
 
 
+def measured_page_score(page: dict[str, Any]) -> float | None:
+    """A real on-page score. A WAF placeholder of 0 is not a measurement."""
+    band = str(page.get("score_band") or "").strip().lower()
+    if band.startswith("not measured"):
+        return None
+    score = page.get("overall_score")
+    if isinstance(score, (int, float)):
+        return float(score)
+    return None
+
+
 def weighted_business_score(pages: list[dict[str, Any]]) -> int | None:
     """Weight home + CDD money pages higher than blog/other for site score."""
     weighted: list[tuple[float, float]] = []
     for page in pages:
         if not isinstance(page, dict):
             continue
-        score = page.get("overall_score")
-        if not isinstance(score, (int, float)):
+        score = measured_page_score(page)
+        if score is None:
             continue
         w = float(page.get("business_weight") or 1.0)
-        weighted.append((float(score), w))
+        weighted.append((score, w))
     if not weighted:
         return None
     return round(sum(s * w for s, w in weighted) / sum(w for _, w in weighted))
@@ -586,7 +695,13 @@ def finalize_seo_audit_clusters(
             opps.append({"issue": g["issue"], "ref": g["ref"]})
         report["opportunities"] = opps
     biz = weighted_business_score(pages)
-    if biz is not None:
+    if biz is None and pages and all(measured_page_score(p) is None for p in pages):
+        report["overall_score"] = None
+        report["business_weighted_score"] = None
+        band = str(report.get("score_band") or "")
+        if not band.lower().startswith("not measured"):
+            report["score_band"] = "Not measured"
+    elif biz is not None:
         report["business_weighted_score"] = biz
         # Prefer business-weighted as overall when CDD context exists
         if any(cdd_terms_from_commercial(commercial).values()):

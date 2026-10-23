@@ -13,6 +13,9 @@
   --lp-surface: var(--bg);
   --lp-font-display: var(--font-display);
   --lp-font-body: var(--font-body);
+  /* index.html declares "dark light", so on a dark-mode OS Chrome would draw
+     unstyled controls and autofill dark inside this light page. */
+  color-scheme: light;
   min-height: 100%;
   background: var(--lp-surface);
   color: var(--lp-ink);
@@ -580,5 +583,244 @@
     transition: none !important;
     opacity: 1 !important;
     transform: none !important;
+  }
+}
+
+/* ---------------------------------------------------------------- Log in / Sign up
+   A light sheet over the hero. Every colour is set here: the page is pinned to the
+   light scheme, but nothing in this sheet relies on browser defaults either. */
+.login-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 20px 16px;
+  overflow-y: auto;
+  background: rgba(7, 28, 31, 0.58);
+  backdrop-filter: blur(3px);
+  color-scheme: light;
+}
+.login-sheet {
+  width: min(420px, 100%);
+  padding: 22px 28px 28px;
+  border-radius: 18px;
+  background: #fff;
+  color: var(--lp-ink);
+  font-family: var(--lp-font-body);
+  box-shadow: 0 1px 0 rgba(7, 28, 31, 0.04), 0 28px 70px rgba(3, 30, 34, 0.35);
+  animation: login-in 180ms ease-out;
+}
+@keyframes login-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+}
+.login-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.login-brand {
+  font-family: var(--lp-font-display);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--lp-teal-deep);
+}
+.login-close {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin-right: -8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--lp-muted);
+  cursor: pointer;
+}
+.login-close:hover {
+  background: var(--gray-bg);
+  color: var(--lp-ink);
+}
+.login-title {
+  margin: 0;
+  font-family: var(--lp-font-display);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  color: var(--lp-ink);
+}
+.login-sub {
+  margin: 8px 0 20px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--lp-muted);
+}
+
+/* One track, one raised pill: reads as a choice between two modes, not two buttons. */
+.login-switch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 22px;
+  border-radius: 12px;
+  background: var(--gray-bg);
+}
+.login-switch button {
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--lp-muted);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+.login-switch button:hover {
+  color: var(--lp-ink);
+}
+.login-switch button.is-active {
+  background: #fff;
+  color: var(--lp-teal-deep);
+  box-shadow: 0 1px 2px rgba(7, 28, 31, 0.12), 0 0 0 1px rgba(7, 28, 31, 0.04);
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.login-field label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lp-ink);
+}
+.login-field input,
+.login-select select {
+  width: 100%;
+  padding: 11px 13px;
+  border: 1.5px solid rgba(7, 28, 31, 0.14);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--lp-ink);
+  font: inherit;
+  font-size: 15px;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.login-field input:hover,
+.login-select select:hover {
+  border-color: rgba(7, 28, 31, 0.26);
+}
+.login-field input:focus,
+.login-select select:focus {
+  outline: none;
+  border-color: var(--lp-teal);
+  box-shadow: 0 0 0 3px rgba(2, 128, 144, 0.16);
+}
+/* Browser autofill paints its own fill; keep the field white with dark text. */
+.login-field input:-webkit-autofill,
+.login-field input:-webkit-autofill:hover,
+.login-field input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--lp-ink);
+  caret-color: var(--lp-ink);
+  box-shadow: 0 0 0 40px #fff inset;
+  transition: background-color 9999s ease-out;
+}
+.login-field input:-webkit-autofill:focus {
+  box-shadow: 0 0 0 40px #fff inset, 0 0 0 3px rgba(2, 128, 144, 0.16);
+}
+.login-select {
+  position: relative;
+}
+.login-select select {
+  appearance: none;
+  padding-right: 38px;
+  cursor: pointer;
+}
+.login-select::after {
+  content: "";
+  position: absolute;
+  right: 15px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -6px;
+  border-right: 1.5px solid var(--lp-muted);
+  border-bottom: 1.5px solid var(--lp-muted);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+.login-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--lp-muted);
+}
+.login-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--coral-bg);
+  color: var(--coral);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.login-submit {
+  margin-top: 6px;
+  padding: 13px 16px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--lp-teal-deep);
+  color: #fff;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+.login-submit:hover:not(:disabled) {
+  background: #024a52;
+}
+.login-submit:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+.login-close:focus-visible,
+.login-switch button:focus-visible,
+.login-submit:focus-visible {
+  outline: 2px solid var(--lp-teal);
+  outline-offset: 2px;
+}
+@media (max-width: 480px) {
+  .login-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+  .login-sheet {
+    width: 100%;
+    padding: 18px 20px 24px;
+    border-radius: 18px 18px 0 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .login-sheet {
+    animation: none;
+  }
+  .login-switch button,
+  .login-field input,
+  .login-submit {
+    transition: none;
   }
 }

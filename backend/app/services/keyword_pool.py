@@ -79,23 +79,32 @@ def resolve_keyword_pool_limits(
     seed_count: int,
     settings: Settings,
 ) -> dict[str, int]:
-    """Derive seeding + relevance limits from a target post-filter pool size."""
+    """Derive seeding limits from a target post-filter pool size.
+
+    Each DataForSEO call asks for the Labs ceiling of 1,000 keywords. The
+    seed count still sizes how many roots a run may expand.
+    """
     target = max(500, min(10000, int(pool_target)))
-    seeds = seed_count or int(getattr(settings, "keyword_max_seeds", 50))
-    seeds = max(20, min(80, seeds, max(20, target // 80)))
-    # ~4 match classes per seed; expect heavy overlap → aim ~2.5× raw expansion
-    per_mode = max(35, min(100, target // max(seeds, 1) // 3))
+    expanding = max(
+        1,
+        int(seed_count) if seed_count else int(getattr(settings, "keyword_max_seeds", 50)),
+    )
+    # Room for extra roots when the caller has them. Do not invent a minimum
+    # that is larger than the roots on hand — that only dilutes the per-call ask.
+    max_seeds = min(80, max(expanding, min(80, target // 120)))
+    # One page per endpoint, capped at the Labs maximum of 1,000 rows.
+    per_mode = max(20, min(1000, int(getattr(settings, "keyword_labs_page_limit", 1000) or 1000)))
     per_seed = max(
         int(getattr(settings, "keyword_relevance_max_per_seed", 60)),
-        min(100, target // max(seeds, 1) // 2),
+        min(250, target // expanding),
     )
     max_input = max(
         int(getattr(settings, "keyword_relevance_max_input_per_seed", 80)),
-        min(120, per_mode + 20),
+        min(300, per_mode + 40),
     )
     return {
         "keyword_pool_target": target,
-        "max_seeds": seeds,
+        "max_seeds": max_seeds,
         "limit_per_mode": per_mode,
         "keyword_relevance_max_per_seed": per_seed,
         "keyword_relevance_max_input_per_seed": max_input,

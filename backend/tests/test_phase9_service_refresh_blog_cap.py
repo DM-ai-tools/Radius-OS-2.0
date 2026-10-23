@@ -208,15 +208,15 @@ def test_only_selected_service_pages_are_optimized():
     assert "/services/email-marketing" in urls
     assert all("/services/seo" not in str(r.get("url_n")) for r in refresh)
     assert any("unselected_service" in str(e.get("reason") or "") for e in report["excluded"])
-    blogs = [
+    invented = [
         r
         for r in report["pages"]
         if r["action"] == "create" and r.get("supports_service_id") == "email marketing"
     ]
-    assert len(blogs) >= 2
+    assert invented == []
 
 
-def test_each_selected_service_gets_two_blog_creates():
+def test_selected_services_get_cluster_pages_instead_of_a_fixed_set():
     report = build_roadmap(
         _strategy(),
         _arch(
@@ -227,10 +227,21 @@ def test_each_selected_service_gets_two_blog_creates():
             ),
         ),
         {},
+        search_demand={
+            "cluster_report": {
+                "clusters": [
+                    {"primary_keyword": "email marketing pricing", "intent": "transactional", "funnel": "BOFU"},
+                    {"primary_keyword": "what is ppc", "intent": "informational", "funnel": "TOFU"},
+                ]
+            }
+        },
     )
-    by_service = report["summary"]["blogs_per_selected_service"]
-    assert by_service["Email Marketing"] >= 2
-    assert by_service["PPC"] >= 2
+    keywords = {str(r.get("keyword") or "").lower() for r in report["pages"]}
+    assert "email marketing pricing" in keywords
+    assert "what is ppc" in keywords
+    assert "email marketing guide" not in keywords
+    assert "ppc pricing" not in keywords
+    assert "ppc faq" not in keywords
     refresh = [r for r in report["pages"] if r["action"] == "refresh"]
     assert {r["supports_service_id"] for r in refresh} == {"email marketing", "ppc"}
 
@@ -257,7 +268,7 @@ def test_search_demand_selection_drives_the_blog_floor():
         },
     )
     assert any(r["url_n"] == "/services/cro" and r["action"] == "refresh" for r in report["pages"])
-    assert report["summary"]["blogs_per_selected_service"]["CRO"] >= 2
+    assert report["summary"]["blogs_per_selected_service"]["CRO"] == 0
 
 
 def test_selected_service_blogs_are_not_cut_by_the_global_cap():

@@ -54,6 +54,27 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
+_CREDITS = {
+    "extract_styleguide": STYLEGUIDE_CREDITS,
+    "extract_fonts": FONTS_CREDITS,
+    "screenshot": SCREENSHOT_CREDITS,
+    "web_scrape_md": MARKDOWN_CREDITS,
+}
+
+
+async def _record(method: str, *, status: str, error: str | None = None) -> None:
+    from app.services.api_meter import record_api_call
+
+    credits = _CREDITS.get(method)
+    await record_api_call(
+        provider="context_dev",
+        operation=method,
+        status=status,
+        error_detail=error,
+        request_meta={"credits": credits} if credits is not None else None,
+    )
+
+
 async def _call(method: str, **kwargs: Any) -> tuple[Any, str | None]:
     if not configured():
         return None, "context_dev_not_configured"
@@ -69,12 +90,15 @@ async def _call(method: str, **kwargs: Any) -> tuple[Any, str | None]:
         # SDK already honored Retry-After on 429 and backed off 408/5xx.
         # Validation errors (400) are not retried here.
         log.warning("context_dev_http_error", method=method, status=exc.status_code)
+        await _record(method, status="error", error=f"context_dev_http_{exc.status_code}")
         return None, f"context_dev_http_{exc.status_code}"
     except (APITimeoutError, APIConnectionError) as exc:
         log.warning("context_dev_request_failed", method=method, error=type(exc).__name__)
+        await _record(method, status="error", error="context_dev_request_failed")
         return None, "context_dev_request_failed"
     finally:
         await client.close()
+    await _record(method, status="success")
     return response, None
 
 

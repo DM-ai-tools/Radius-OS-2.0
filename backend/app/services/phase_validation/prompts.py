@@ -116,7 +116,9 @@ def build_revision_message(
         "",
         "--- VALIDATION FEEDBACK (revision attempt) ---",
         "Your previous output failed independent validation. Keep the same phase objective.",
-        "Correct the issues below. Do not invent a new scope.",
+        "Correct the failing items in place. Do not invent a new scope.",
+        "Do not delete keywords, pages, services, sections, or other valid items to make a check pass.",
+        "The next output must be at least as complete as the previous one. It may fix or add. It may not be smaller.",
         f"Decision: {validation.get('decision')}",
         f"Summary: {validation.get('summary') or ''}",
     ]

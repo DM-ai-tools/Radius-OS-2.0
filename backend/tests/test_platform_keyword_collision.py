@@ -37,14 +37,15 @@ def test_meta_seed_rejects_google_platform_expansions(keyword, match_class):
         seed="Meta Ads",
     )
     assert keep is False
-    assert reason == "platform_mismatch"
+    # A bare platform name is caught earlier as platform navigation (2026-10-22).
+    assert reason in {"platform_mismatch", "platform_navigation"}
 
 
 @pytest.mark.parametrize(
     "keyword,match_class",
     [
         ("meta ads", "exact"),
-        ("meta ads manager", "phrase"),
+        ("meta ads specialist", "phrase"),
         ("facebook ads library", "related"),
         ("instagram ads agency", "broad"),
     ],
@@ -57,6 +58,14 @@ def test_meta_seed_keeps_meta_family_expansions(keyword, match_class):
         seed="Meta Ads",
     )
     assert keep is True, (keyword, reason)
+
+
+def test_meta_ads_manager_is_the_platform_not_a_buyer_search():
+    # The advertiser's own tool. Changed from a keep on 2026-10-22 (buyer fit).
+    keep, reason, _ = evaluate_keyword(
+        "meta ads manager", meta_only_ctx(), match_class="phrase", seed="Meta Ads"
+    )
+    assert keep is False and reason == "platform_navigation"
 
 
 def test_ads_alone_is_not_service_fit_between_google_and_meta():

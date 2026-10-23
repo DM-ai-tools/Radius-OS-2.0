@@ -118,6 +118,14 @@ def _problem_from_keyword(keyword: str) -> str:
 
 def _audience_label(audience: str | None, industry: str | None) -> str | None:
     raw = (audience or industry or "").strip()
+    # Client memory stores audiences as "Primary: founders, owners; Secondary: ...".
+    # The label is not part of the audience ("...Path for Primary: Founders").
+    raw = re.sub(
+        r"^\s*(primary|secondary|target|main|core)?\s*(audience|buyers?|customers?)?\s*:\s*",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
     if not raw:
         return None
     # Keep short for headlines

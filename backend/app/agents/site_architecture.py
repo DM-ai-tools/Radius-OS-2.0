@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.prompts import load_skill
@@ -14,7 +15,7 @@ from app.services.agent_handoff import blocked_events, consume_events, handoff_e
 from app.services.agent_runtime import get_profile, supersede_pending_findings
 from app.services.audit import log_event
 from app.services.role_skills import required_role_for
-from app.services.site_architecture import run_site_architecture_plan
+from app.services.site_architecture import run_site_architecture_plan, use_full_cluster_list
 
 
 async def run_site_architecture(
@@ -44,6 +45,28 @@ async def run_site_architecture(
     )
 
     demand = dict(profile.search_demand_summary or {})
+    full_row = (
+        await db.execute(
+            text(
+                """
+                select m.structured_payload
+                from chat_messages m
+                join chat_sessions s on s.id = m.session_id
+                where s.client_id = cast(:cid as uuid)
+                  and m.structured_payload->>'card_type' = 'search_demand_report'
+                  and m.archived_at is null
+                order by m.created_at desc
+                limit 1
+                """
+            ),
+            {"cid": str(client.id)},
+        )
+    ).scalar()
+    if isinstance(full_row, dict):
+        demand = use_full_cluster_list(
+            demand,
+            list(full_row.get("clusters") or (full_row.get("cluster_report") or {}).get("clusters") or []),
+        )
     if profile.search_demand_status != "complete" and not (
         demand.get("cluster_report") or demand.get("clusters") or demand.get("topics")
     ):

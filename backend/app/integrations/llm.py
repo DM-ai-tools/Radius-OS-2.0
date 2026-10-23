@@ -95,6 +95,7 @@ async def _openrouter_chat(
     user: str,
     model: str,
     max_tokens: int = 2500,
+    reasoning_max_tokens: int | None = None,
 ) -> str | None:
     from app.services.api_meter import _usage_tokens, record_api_call
 
@@ -116,7 +117,12 @@ async def _openrouter_chat(
         ],
     }
     if "gemini" in model.lower():
-        body["reasoning"] = {"max_tokens": _gemini_reasoning_budget(max_tokens)}
+        budget = (
+            reasoning_max_tokens
+            if reasoning_max_tokens is not None
+            else _gemini_reasoning_budget(max_tokens)
+        )
+        body["reasoning"] = {"max_tokens": budget}
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=120) as client:
@@ -140,12 +146,15 @@ async def _openrouter_chat(
                 )
             usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
             pt, ct = _usage_tokens(usage)
+            from app.services.api_meter import reported_usage_cost
+
             await record_api_call(
                 provider="openrouter",
                 operation="chat.completions",
                 model=model,
                 prompt_tokens=pt,
                 completion_tokens=ct,
+                estimated_cost_usd=reported_usage_cost(usage),
                 latency_ms=int((time.perf_counter() - t0) * 1000),
                 status="success",
             )
@@ -211,12 +220,21 @@ async def _anthropic_chat(
         usage = getattr(resp, "usage", None)
         pt = getattr(usage, "input_tokens", None) if usage else None
         ct = getattr(usage, "output_tokens", None) if usage else None
+        from app.services.api_meter import anthropic_call_cost
+
         await record_api_call(
             provider="anthropic",
             operation="messages.create",
             model=anthropic_model,
             prompt_tokens=int(pt) if pt is not None else None,
             completion_tokens=int(ct) if ct is not None else None,
+            estimated_cost_usd=anthropic_call_cost(
+                anthropic_model,
+                input_tokens=int(pt) if pt is not None else None,
+                output_tokens=int(ct) if ct is not None else None,
+                cache_write_tokens=getattr(usage, "cache_creation_input_tokens", None) if usage else None,
+                cache_read_tokens=getattr(usage, "cache_read_input_tokens", None) if usage else None,
+            ),
             latency_ms=int((time.perf_counter() - t0) * 1000),
             status="success",
         )
@@ -252,6 +270,83 @@ async def _skill_chat(
         model=chosen,
         max_tokens=max_tokens,
     )
+
+
+def keyword_analysis_ready() -> bool:
+    """True when keyword analysis can call Anthropic or its OpenRouter fallback."""
+    settings = get_settings()
+    if settings.use_mock_llm:
+        return False
+    return bool(
+        (settings.anthropic_api_key or "").strip()
+        or (settings.openrouter_api_key or "").strip()
+    )
+
+
+async def keyword_analysis_chat(
+    *,
+    system: str,
+    user: str,
+    max_tokens: int = 2500,
+    model: str | None = None,
+    allow_fallback: bool = True,
+) -> str | None:
+    """Keyword analysis on Anthropic, then Gemini 2.5 Pro on OpenRouter.
+
+    The direct Anthropic call stays first. A failure or an empty reply retries
+    once on ``keyword_analysis_fallback_model`` (Gemini 2.5 Pro via OpenRouter).
+
+    ``allow_fallback`` is off for the cheap relevance screen. A failed screen
+    must hand the batch to the Sonnet judge, not spend a second model on it.
+    """
+    settings = get_settings()
+    if settings.use_mock_llm:
+        return None
+    from app.services.api_meter import begin_paid_call, end_paid_call
+
+    # Haiku batches are about two cents; a Sonnet batch on this phase was about
+    # five. Hold the larger figure so a burst of judges cannot cross the cap.
+    chosen = (model or settings.skill_model or "").lower()
+    reserve = 0.03 if "haiku" in chosen else 0.12
+    if not begin_paid_call(reserve):
+        log.warning("keyword_analysis_budget_blocked", model=chosen)
+        return None
+    try:
+        text: str | None = None
+        primary_exc: Exception | None = None
+        if (settings.anthropic_api_key or "").strip():
+            try:
+                text = await _skill_chat(
+                    system=system,
+                    user=user,
+                    model=model,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                primary_exc = exc
+                log.warning("keyword_analysis_primary_failed", error=str(exc)[:300])
+            else:
+                if text and str(text).strip():
+                    return text
+                log.warning("keyword_analysis_primary_empty")
+        if allow_fallback and (settings.openrouter_api_key or "").strip():
+            fallback = (
+                settings.keyword_analysis_fallback_model or "google/gemini-2.5-pro"
+            ).strip() or "google/gemini-2.5-pro"
+            log.warning("keyword_analysis_fallback", model=fallback)
+            return await _openrouter_chat(
+                system=system,
+                user=user,
+                model=fallback,
+                max_tokens=max_tokens,
+            )
+        if primary_exc is not None:
+            if not allow_fallback:
+                return None
+            raise primary_exc
+        return text
+    finally:
+        end_paid_call(reserve)
 
 
 async def route_agent(message: str, profile_statuses: dict[str, str]) -> str:
@@ -520,10 +615,32 @@ async def _claude_route(message: str, profile_statuses: dict[str, str]) -> str:
             f"User message: {message}\n"
             "Reply with only the agent_key."
         )
+        t0 = time.perf_counter()
         resp = await client.messages.create(
             model=settings.router_model,
             max_tokens=40,
             messages=[{"role": "user", "content": prompt}],
+        )
+        usage = getattr(resp, "usage", None)
+        pt = getattr(usage, "input_tokens", None) if usage else None
+        ct = getattr(usage, "output_tokens", None) if usage else None
+        from app.services.api_meter import anthropic_call_cost, record_api_call
+
+        await record_api_call(
+            provider="anthropic",
+            operation="messages.create",
+            model=settings.router_model,
+            prompt_tokens=int(pt) if pt is not None else None,
+            completion_tokens=int(ct) if ct is not None else None,
+            estimated_cost_usd=anthropic_call_cost(
+                settings.router_model,
+                input_tokens=int(pt) if pt is not None else None,
+                output_tokens=int(ct) if ct is not None else None,
+                cache_write_tokens=getattr(usage, "cache_creation_input_tokens", None) if usage else None,
+                cache_read_tokens=getattr(usage, "cache_read_input_tokens", None) if usage else None,
+            ),
+            latency_ms=int((time.perf_counter() - t0) * 1000),
+            status="success",
         )
         text = (_anthropic_message_text(resp) or "").strip()
         for key in (
@@ -546,6 +663,15 @@ async def _claude_route(message: str, profile_statuses: dict[str, str]) -> str:
                 return key
     except Exception as exc:  # noqa: BLE001
         log.warning("claude_route_failed", error=str(exc))
+        from app.services.api_meter import record_api_call
+
+        await record_api_call(
+            provider="anthropic",
+            operation="messages.create",
+            model=settings.router_model,
+            status="error",
+            error_detail=str(exc)[:500],
+        )
     return "discovery_agent"
 
 
@@ -703,6 +829,8 @@ def _parse_json_content(text: str) -> dict[str, Any] | None:
         match = re.search(r"\{[\s\S]*\}", text)
         if match:
             text = match.group(0)
+    if not text:
+        return None
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
@@ -715,6 +843,15 @@ def _parse_json_content(text: str) -> dict[str, Any] | None:
     return parsed
 
 
+def _openrouter_model(model: str | None) -> str | None:
+    """Non-Claude override (Gemini Pro for competitor research) goes to OpenRouter."""
+    raw = (model or "").strip()
+    lowered = raw.lower()
+    if not lowered or lowered.startswith("claude") or lowered.startswith("anthropic/"):
+        return None
+    return raw
+
+
 async def synthesize_json(
     system: str,
     user: str,
@@ -723,25 +860,42 @@ async def synthesize_json(
     max_tokens: int = 4096,
     raise_on_error: bool = False,
 ) -> dict[str, Any] | None:
-    """Ask skill model for JSON only; returns parsed dict or None.
+    """Ask the skill model for JSON only; returns parsed dict or None.
 
-    Pass ``model`` to override (e.g. competitor_model / Gemini for P4).
+    A non-Claude ``model`` (Gemini Pro for competitor research) is sent to
+    OpenRouter. Claude stays on Anthropic.
     Retries once when the first reply is empty or unparseable (truncated JSON
     is repaired in-place; a second call covers hard truncations past salvage).
     """
-    if not _skill_provider_ready():
+    routed = _openrouter_model(model)
+    settings = get_settings()
+    if routed:
+        if settings.use_mock_llm or not settings.openrouter_api_key:
+            if raise_on_error:
+                raise RuntimeError("OpenRouter is not ready (mock mode or missing API key)")
+            return None
+    elif not _skill_provider_ready():
         if raise_on_error:
             raise RuntimeError("LLM provider not ready (mock mode or missing API key)")
         return None
     last_exc: Exception | None = None
     for attempt in range(2):
         try:
-            text = await _skill_chat(
-                system=system + "\nRespond with valid JSON only. No markdown fences.",
-                user=user,
-                max_tokens=max_tokens,
-                model=model,
-            )
+            prompt = system + "\nRespond with valid JSON only. No markdown fences."
+            if routed:
+                text = await _openrouter_chat(
+                    system=prompt,
+                    user=user,
+                    model=routed,
+                    max_tokens=max_tokens,
+                )
+            else:
+                text = await _skill_chat(
+                    system=prompt,
+                    user=user,
+                    max_tokens=max_tokens,
+                    model=model,
+                )
             if not text:
                 last_exc = RuntimeError("LLM returned empty content")
                 continue
@@ -1094,6 +1248,23 @@ async def generate_openrouter_image(
     url: str | None = None
     b64: str | None = None
     last_error = ""
+
+    async def _meter_image(payload: dict[str, Any], *, ok: bool, error: str = "") -> None:
+        from app.services.api_meter import _usage_tokens, record_api_call, reported_usage_cost
+
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        pt, ct = _usage_tokens(usage)
+        await record_api_call(
+            provider="openrouter",
+            operation="images.generate",
+            model=model,
+            prompt_tokens=pt,
+            completion_tokens=ct,
+            estimated_cost_usd=reported_usage_cost(usage) if ok else None,
+            status="success" if ok else "error",
+            error_detail=error[:500] or None,
+        )
+
     async with httpx.AsyncClient(timeout=90) as client:
         try:
             resp = await client.post(
@@ -1108,11 +1279,15 @@ async def generate_openrouter_image(
                 },
             )
             if resp.status_code < 400:
-                url, b64 = _extract_image_payload(resp.json())
+                body = resp.json()
+                url, b64 = _extract_image_payload(body)
+                await _meter_image(body, ok=True)
             else:
                 last_error = f"images HTTP {resp.status_code}: {resp.text[:220]}"
+                await _meter_image({}, ok=False, error=last_error)
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)[:220]
+            await _meter_image({}, ok=False, error=last_error)
         if not url and not b64:
             try:
                 resp = await client.post(
@@ -1130,10 +1305,14 @@ async def generate_openrouter_image(
                 )
                 if resp.status_code >= 400:
                     last_error = f"chat HTTP {resp.status_code}: {resp.text[:220]}"
+                    await _meter_image({}, ok=False, error=last_error)
                 else:
-                    url, b64 = _extract_image_payload(resp.json())
+                    body = resp.json()
+                    url, b64 = _extract_image_payload(body)
+                    await _meter_image(body, ok=bool(url or b64), error="" if url or b64 else "no_image_in_response")
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)[:220]
+                await _meter_image({}, ok=False, error=last_error)
         if b64 and not url:
             try:
                 raw = base64.b64decode(b64, validate=False)

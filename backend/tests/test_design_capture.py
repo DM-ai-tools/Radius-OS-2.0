@@ -57,6 +57,29 @@ def test_resolve_previous_design_page_from_internal_linking():
     assert found["reason"] == "internal_linking_parent"
 
 
+def test_resolve_previous_design_page_matches_linking_plan_by_keyword():
+    from app.services.design_capture import resolve_previous_design_page
+
+    found = resolve_previous_design_page(
+        page_url="/drafts/new-local-page",
+        page_keyword="local seo",
+        primary_url="https://client.example",
+        on_page_seo={
+            "internal_linking": {
+                "links": [
+                    {
+                        "from": "/services/seo",
+                        "to": "/services/local-seo",
+                        "anchor": "Local SEO",
+                        "reason": "hub_to_spoke",
+                    }
+                ]
+            }
+        },
+    )
+    assert found["url"] == "https://client.example/services/seo"
+
+
 def test_resolve_previous_design_page_from_publishing_order():
     from app.services.design_capture import resolve_previous_design_page
 
@@ -179,7 +202,13 @@ async def test_context_dev_sends_key_to_sdk_not_query(monkeypatch):
         async def close(self):
             return None
 
+    recorded: list[dict] = []
+
+    async def _record(**kwargs):
+        recorded.append(kwargs)
+
     monkeypatch.setattr(context_dev, "AsyncContextDev", _Client)
+    monkeypatch.setattr("app.services.api_meter.record_api_call", _record)
     guide, err = await context_dev.extract_styleguide("https://client.example")
     assert err is None
     assert guide["colors"]["accent"] == "#112233"
@@ -187,3 +216,6 @@ async def test_context_dev_sends_key_to_sdk_not_query(monkeypatch):
     assert seen["kwargs"]["direct_url"] == "https://client.example"
     assert "key" not in seen["kwargs"]
     assert "ctxt_secret_test" not in str(seen["kwargs"])
+    assert recorded[0]["provider"] == "context_dev"
+    assert recorded[0]["operation"] == "extract_styleguide"
+    assert recorded[0]["request_meta"]["credits"] == 10

@@ -235,7 +235,10 @@ def direct_answer(question: str, brief: dict[str, Any]) -> str | None:
             return _missing("Phase 6 Content Strategy")
         parts = [
             _list_block("Core topics / pillars", list(strategy.get("core_topics") or strategy.get("pillars") or [])),
-            _list_block("Priority queue", list(strategy.get("priority_queue") or [])),
+            _list_block(
+                "Content plan",
+                list(strategy.get("content_plan") or strategy.get("priority_queue") or []),
+            ),
         ]
         body = "\n\n".join(p for p in parts if p)
         return body or _missing("Phase 6 Content Strategy")

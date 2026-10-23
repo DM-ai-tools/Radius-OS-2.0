@@ -61,7 +61,6 @@ _ACRONYM_FORCE = {
     "crm": "CRM",
     "erp": "ERP",
     "hr": "HR",
-    "it": "IT",
     "ux": "UX",
     "ui": "UI",
     "api": "API",
@@ -81,6 +80,9 @@ _ACRONYM_FORCE = {
 _ACRONYM_SKIP = {
     "a", "an", "the", "or", "of", "to", "in", "on", "by", "is", "be", "as",
     "at", "for", "and", "with", "from", "this", "that", "page", "blog",
+    # Ordinary words that are also acronyms. "How it works" must never become
+    # "How IT works"; the writer spells IT itself where it means IT.
+    "it", "us",
 }
 
 
@@ -93,7 +95,30 @@ def _differentiation(brief: dict[str, Any]) -> str:
     raw = brief.get("differentiation") or brief.get("differentiation_angle") or ""
     if isinstance(raw, list):
         raw = "; ".join(str(x) for x in raw if x)
-    return str(raw or "").strip()
+    return _clean_differentiation(str(raw or "").strip())
+
+
+# Ranking pages reach briefs by their titles ("Best 20+ AI Marketing Tools to Grow Your
+# Business - Digifix"). The writer may cover the topic, never the competitor's brand or
+# its article title, so the site-name suffix is cut and the prompt says not to quote them.
+_TITLE_SUFFIX = re.compile(r"\s+[-|–—]\s+[^-|–—]{1,40}$")
+
+
+def competitor_topic(title: Any) -> str:
+    """A ranking page's title as a topic: without the " - Brand" / " | Site" suffix."""
+    text = " ".join(str(title or "").split())
+    for _ in range(2):
+        stripped = _TITLE_SUFFIX.sub("", text).strip()
+        if stripped == text or len(stripped) < 12:
+            break
+        text = stripped
+    return text
+
+
+def _clean_differentiation(text: str) -> str:
+    """Older briefs quote a competitor's title and say the client "publishes from"."""
+    text = re.sub(r"\s*such as “[^”]*”", "", text)
+    return re.sub(r"\bpublishes from\b", "works from", text)
 
 
 def _author(brief: dict[str, Any]) -> tuple[str | None, str | None, bool]:
@@ -354,16 +379,16 @@ _INFORMATIONAL_KW = re.compile(
     r"^(?:how to|how do|how does|what is|what are|why |when to|should i)\b"
     r"|\b(?:step by step|tutorial|checklist|walkthrough|explained|examples?"
     r"|templates?|best practices|tips|ideas|guide to|guides? for"
-    r"|beginners? guide)\b"
+    r"|beginners? guide|meaning|definition|defined)\b"
 )
 _LISTICLE_KW = re.compile(r"^\d+\s|\b(?:alternatives?|examples of)\b")
 _PRICING_KW = re.compile(
-    r"\b(?:pricing|price|prices|cost|costs|how much|quote|rates?)\b"
+    r"\b(?:pricing|price|prices|cost|costs|how much|quote|rates?|buy|buying|purchase)\b"
 )
 _SERVICE_KW = re.compile(
     r"\b(?:services?|agency|agencies|company|companies|consultant|consultants"
     r"|consultancy|firm|specialists?|experts?|provider|providers|hire|near me"
-    r"|freelancer|management)\b"
+    r"|freelancer|management|business)\b"
 )
 
 
@@ -386,15 +411,19 @@ def resolve_page_type(src: dict[str, Any] | None) -> str:
 
     strong: list[str] = []
     weak: list[str] = []
-    for raw in (
-        pre.get("page_type"),
-        src.get("page_type"),
-        src.get("type"),
-        src.get("content_type"),
-        src.get("content_type_label"),
+    for source, raw in (
+        ("preflight", pre.get("page_type")),
+        ("field", src.get("page_type")),
+        ("field", src.get("type")),
+        ("field", src.get("content_type")),
+        ("field", src.get("content_type_label")),
     ):
         key = _alias(raw)
         if not key:
+            continue
+        # A stored "landing" label is how non-price queries were forced onto
+        # /pricing/. A brief that names the page type on purpose still wins.
+        if key == "landing" and source != "preflight" and kw and not _PRICING_KW.search(kw):
             continue
         (weak if key in ("article", "blog", "guide", "listicle", "page") else strong).append(key)
     if strong:
@@ -414,7 +443,9 @@ def resolve_page_type(src: dict[str, Any] | None) -> str:
         if depth >= 2:
             return "sub_service"
         return "service"
-    if "/pricing/" in url or url.rstrip("/").endswith("/pricing"):
+    if ("/pricing/" in url or url.rstrip("/").endswith("/pricing")) and (
+        not kw or _PRICING_KW.search(kw)
+    ):
         return "landing"
     if "/compare/" in url or " vs " in kw or " versus " in kw:
         return "comparison"
@@ -451,7 +482,9 @@ def resolve_page_type(src: dict[str, Any] | None) -> str:
         return "service"
 
     if intent == "transactional":
-        return "landing"
+        # Price and buy queries already returned above. A near-me, company, or
+        # city query with a transactional label is a service page.
+        return "service"
     if intent == "commercial":
         return "service"
     if intent == "informational":
@@ -754,7 +787,8 @@ def _topic_context(
         "title": _normalize_acronyms(title_raw, kw, title_raw),
         "audience": _short_audience(audience, industry=ind),
         "industry": ind,
-        "geo": str(geo or "").strip(),
+        # Stored geography often ends with "."; sentences add their own.
+        "geo": str(geo or "").strip().rstrip(".").strip(),
         "products": _scoped_products(products_raw, kw),
         "intent": str(brief.get("search_intent") or brief.get("intent") or "").strip(),
         "format": str(brief.get("content_type") or "").strip(),
@@ -842,7 +876,7 @@ def collect_image_specs(
     kw = _norm_topic(brief.get("keyword") or brief.get("title"))
     brief_url = _url_path(brief.get("url") or brief.get("path"))
     strategy = dict(seo_strategy or {})
-    for key in ("priority_queue", "combined_priority_queue", "priority_pages"):
+    for key in ("content_plan", "priority_queue", "combined_priority_queue", "priority_pages"):
         for item in strategy.get(key) or []:
             if not isinstance(item, dict):
                 continue
@@ -1194,9 +1228,17 @@ def score_draft_accuracy(
     related: list[str] | None = None,
 ) -> dict[str, Any]:
     """Heuristic accuracy score — keyword/client grounding, scope, invention risk."""
+    from app.services.publish_preview import draft_body_markdown
+
+    # The page as published: the review-queue notes list the out-of-scope topics and
+    # would match themselves.
     blob = " ".join(
-        str(draft.get(k) or "")
-        for k in ("title", "markdown", "meta_description", "opening")
+        [
+            str(draft.get("title") or ""),
+            draft_body_markdown(str(draft.get("markdown") or "")),
+            str(draft.get("meta_description") or ""),
+            str(draft.get("opening") or ""),
+        ]
     ).lower()
     grounding = brief.get("accuracy_grounding") if isinstance(brief.get("accuracy_grounding"), dict) else {}
     primary = str(
@@ -1244,6 +1286,14 @@ def score_draft_accuracy(
         not scope_hits,
         "No out-of-scope topics" if not scope_hits else f"Out-of-scope leaked: {', '.join(scope_hits[:2])}",
     )
+    places = [
+        p.strip(" .").lower()
+        for p in re.split(r"[,;]|\band\b|\bwith\b|\bin\b|priority metros|headquarters", geo)
+        if len(p.strip(" .")) >= 4
+    ]
+    if geo and len(geo) >= 3 and places and any(p in blob for p in places):
+        geo = ""  # grounded: the page names at least one of the client's places
+        checks.append({"name": "geo_grounding", "ok": True, "detail": "Names a place the client serves"})
     if geo and len(geo) >= 3:
         _check(
             "geo_grounding",
@@ -1281,11 +1331,15 @@ def _accuracy_prompt_block(brief: dict[str, Any]) -> str:
         lines.append(f"- Nameable products/services only: {g['products']}")
     if g.get("serp_competitors_to_beat"):
         lines.append(
-            "- SERP titles to beat (do not paraphrase as your H1/H2): "
-            + "; ".join(str(t) for t in g["serp_competitors_to_beat"][:5])
+            "- Topics of the pages ranking now (do not paraphrase as your H1/H2; never name, "
+            "quote or link these sites or their article titles): "
+            + "; ".join(competitor_topic(t) for t in g["serp_competitors_to_beat"][:5])
         )
     if g.get("competitive_notes"):
-        lines.append("- Competitive gaps to cover: " + "; ".join(str(n) for n in g["competitive_notes"][:5]))
+        lines.append(
+            "- Topics to cover in your own words (never name the sites they came from): "
+            + "; ".join(competitor_topic(n) for n in g["competitive_notes"][:5])
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1588,7 +1642,7 @@ def _build_markdown(
         [
             "## Review queue — resolve before publishing",
             "- [ ] [AUTHOR INPUT REQUIRED] — count filled after draft sections",
-            "- [ ] [VERIFY] — facts, figures, citations",
+            "- [ ] Unsourced facts — filled after the draft is written",
             "- [ ] Named reviewer: ____________  Date: ________",
             "",
             "## Draft metadata",
@@ -1737,6 +1791,10 @@ def _build_markdown(
                 question, answer = q, ""
             if not question:
                 continue
+            if (not answer or _is_faq_stub(answer)) and faq_answers is not None:
+                # The model wrote this page but not this answer: leave the question out
+                # rather than print an instruction where the answer should be.
+                continue
             if not answer or _is_faq_stub(answer):
                 # Never ship "depends on the situation behind…" stubs.
                 answer = (
@@ -1810,7 +1868,7 @@ def _build_markdown(
         else "- [ ] First-hand placeholders: none — named reviewer still signs before publish"
     )
     verify_line = (
-        f"- [ ] [VERIFY] × {len(verify_placeholders)} — facts, figures, citations"
+        f"- [ ] Unsourced claims left out of the page: {len(verify_placeholders)}"
         if verify_placeholders
         else "- [ ] Unsourced facts flagged: none — named reviewer still signs before publish"
     )
@@ -1819,9 +1877,13 @@ def _build_markdown(
         author_line,
     )
     md = md.replace(
-        "- [ ] [VERIFY] — facts, figures, citations",
+        "- [ ] Unsourced facts — filled after the draft is written",
         verify_line,
     )
+    md = re.sub(r"[ \t]*\[VERIFY\b[^\]\n]*\]?", "", md, flags=re.IGNORECASE)
+    md = re.sub(r"[ \t]{2,}", " ", md)
+    md = re.sub(r" +([.,;:!?])", r"\1", md)
+    md = re.sub(r"\n{3,}", "\n\n", md)
 
     return {
         "url": url,
@@ -1956,6 +2018,30 @@ def _comparison_refusal(brief: dict[str, Any], reason: str) -> dict[str, Any]:
     }
 
 
+DRAFT_MAX_TOKENS = 20000
+
+
+_AUDIENCE_LABEL = re.compile(r"\b(primary|secondary|target)(\s+audience)?\s*:\s*", re.IGNORECASE)
+
+
+def _clean_heading(title: Any) -> str:
+    """Outline titles from older briefs carry "Primary:" style audience labels."""
+    text = _AUDIENCE_LABEL.sub("", str(title or "")).strip()
+    return text[:1].upper() + text[1:] if text else text
+
+
+def has_written_body(drafted: dict[str, Any] | None) -> bool:
+    """The model's reply contains the page body, not just an opening: the full page,
+    or sections that all have copy. Anything less would be padded with template text."""
+    if not drafted:
+        return False
+    page_md = str(drafted.get("page_markdown") or "")
+    if len(page_md) >= 500 and "## " in page_md:
+        return True
+    sections = [s for s in (drafted.get("sections") or []) if isinstance(s, dict)]
+    return bool(sections) and all(str(s.get("body") or "").strip() for s in sections)
+
+
 async def _llm_draft_article(
     brief: dict[str, Any],
     client_name: str,
@@ -2023,11 +2109,11 @@ async def _llm_draft_article(
             )
         )
         + "\nReturn JSON only: "
-        '{"opening": str, "page_markdown": str, "sections": [{"title": str, "body": str}], '
-        '"faq": [{"q": str, "a": str}], "cta": str}. '
+        '{"opening": str, "page_markdown": str, "faq": [{"q": str, "a": str}], "cta": str}. '
         "You write FINISHED, ready-to-publish webpage copy. An editor should only fact-check "
         "and sign — not rewrite. "
-        "page_markdown is the full page from the first H2 through the last body section "
+        "page_markdown is the full page from the first H2 through the last body section, "
+        "written once (do not repeat it anywhere else in the JSON) "
         "(markdown headings + paragraphs + bullets). Do not include H1, review queue, or metadata. "
         "Each H2 body is 3–6 short paragraphs of real copy, not notes. "
         "Forbidden: outlines, 'cover this section', 'people who searched', 'treats X as a decision', "
@@ -2044,8 +2130,8 @@ async def _llm_draft_article(
         "Audience is tone guidance only — never paste it into the page. "
         "Only name products/positioning that clearly belong to this keyword. "
         "FAQ answers must be direct and self-contained (2–4 sentences). "
-        "Placeholders are rare: [AUTHOR INPUT REQUIRED] only for a named first-hand fact; "
-        "[VERIFY] only beside a specific unsourced number/date/price/study. "
+        "Never write [VERIFY] or [AUTHOR INPUT REQUIRED] anywhere in the page. "
+        "If a number, date, price, quote, or study was not supplied, leave that claim out. "
         "Honour out_of_scope. Deliver differentiation in the opening and again in the body. "
         "No word_count field. One page only. Pass the people-first test: original value, "
         "bookmark-worthy, leaves the reader able to act. "
@@ -2081,7 +2167,7 @@ async def _llm_draft_article(
         else "RELATED KEYWORDS: none supplied — do not invent extra target terms.\n"
     )
     # Titles only — outline notes are writer metadata and must not be echoed into body copy.
-    outline_lines = "\n".join(f"- {s.get('title')}" for s in sections[:12])
+    outline_lines = "\n".join(f"- {_clean_heading(s.get('title'))}" for s in sections[:12])
     angle_line = angle_guidance(brief.get("angle"), kw=kw)
     faq_qs = [
         (q.get("q") if isinstance(q, dict) else q) for q in (brief.get("faq") or [])
@@ -2106,7 +2192,8 @@ async def _llm_draft_article(
         f"Intent: {ctx['intent']}\n"
         f"Differentiation (must appear in opening + body, must match this keyword): {_differentiation(brief)}\n"
         f"Required outcomes: {cov['outcomes']}\n"
-        f"Must address: {cov['must_address']}\n"
+        "Topics the ranking pages cover (cover them in your own words; never name, quote or "
+        f"link a competitor or its article title): {[competitor_topic(t) for t in cov['must_address']]}\n"
         f"Must name: {cov['must_name']}\n"
         f"Out of scope (do not cover): {cov['out_of_scope']}\n"
         f"H2 outline (use these titles, in order; write finished buyer-facing copy under each):\n"
@@ -2122,7 +2209,9 @@ async def _llm_draft_article(
         parsed = await synthesize_json(
             system,
             user,
-            max_tokens=12288,
+            # 12288 cut replies off mid-page (2026-10-16); stay under the ~21k tokens
+            # above which the SDK requires streaming.
+            max_tokens=DRAFT_MAX_TOKENS,
             model=settings.skill_model,
         )
     except Exception as exc:  # noqa: BLE001
@@ -2130,11 +2219,18 @@ async def _llm_draft_article(
         return None
     if not isinstance(parsed, dict):
         return None
-    opening = _usable_prose(str(parsed.get("opening") or "")) or None
-    page_md = str(parsed.get("page_markdown") or parsed.get("markdown") or "").strip()
+    from app.services.publish_preview import strip_publish_markers
+
+    opening = _usable_prose(strip_publish_markers(str(parsed.get("opening") or ""))) or None
+    page_md = strip_publish_markers(
+        str(parsed.get("page_markdown") or parsed.get("markdown") or "")
+    )
+    page_md = re.sub(
+        r"(?m)^(#{1,6}\s+)(.+)$", lambda m: m.group(1) + _clean_heading(m.group(2)), page_md
+    )
     if page_md and _is_instructional(page_md[:280]):
         page_md = ""
-    cta_text = _usable_prose(str(parsed.get("cta") or ""))
+    cta_text = _usable_prose(strip_publish_markers(str(parsed.get("cta") or "")))
     rows = parsed.get("sections") if isinstance(parsed.get("sections"), list) else []
     clean: list[dict[str, Any]] = []
     for r in rows[:14]:
@@ -2153,7 +2249,7 @@ async def _llm_draft_article(
         if not isinstance(item, dict):
             continue
         q = str(item.get("q") or item.get("question") or "").strip()
-        a = _usable_prose(str(item.get("a") or item.get("answer") or ""))
+        a = _usable_prose(strip_publish_markers(str(item.get("a") or item.get("answer") or "")))
         if q:
             faq_rows.append({"q": q, "a": a})
     if not opening and not clean and len(page_md) < 400:
@@ -2243,6 +2339,30 @@ async def write_one_page(
         seo_strategy=seo_strategy,
         search_demand=search_demand,
     )
+    scope = (content_context or {}).get("service_scope") or {}
+    if scope.get("scoped"):
+        from app.services.service_scope import scope_violations
+
+        found = scope_violations(
+            [_primary, str(brief.get("title") or ""), *[str(r) for r in related]],
+            scope,
+        )
+        if found:
+            named = ", ".join(dict.fromkeys(v["sub_service"] for v in found))
+            return {
+                "ok": False,
+                "refused": True,
+                "route_to": "service_scope",
+                "reason": (
+                    f"This brief targets a sub-service the client does not offer ({named}). "
+                    f"Offered under {scope.get('service')}: "
+                    f"{', '.join(scope.get('offered') or []) or 'none'}. "
+                    "Change the brief or update the service scope."
+                ),
+                "scope_violations": found,
+                "keyword": brief.get("keyword"),
+                "url": brief.get("url"),
+            }
     specs = collect_image_specs(
         brief,
         seo_strategy=seo_strategy,
@@ -2274,6 +2394,34 @@ async def write_one_page(
         )
     if page_type == "comparison" and not drafted:
         return _comparison_refusal(brief, COMPARISON_DRAFT_FAILED)
+    if use_llm and drafted and not has_written_body(drafted):
+        log.warning("create_content_draft_incomplete", keyword=brief.get("keyword"))
+        return {
+            "ok": False,
+            "refused": True,
+            "route_to": "draft this page again",
+            "reason": (
+                "The writing model's reply was incomplete (it stopped before the page body), "
+                "so nothing was written rather than filling the gaps with template text."
+            ),
+            "keyword": brief.get("keyword"),
+            "url": brief.get("url"),
+        }
+    if use_llm and not drafted:
+        # Never save outline-and-template text as a draft: it reads like a page but is
+        # filler (2026-10-13: Anthropic out of credit produced a "draft" of placeholders).
+        return {
+            "ok": False,
+            "refused": True,
+            "route_to": "draft this page again once the writing model is reachable",
+            "reason": (
+                "The writing model did not return a draft, so nothing was written. "
+                "This is usually an out-of-credit or connection error on the model "
+                "account; the Engine room lists provider failures."
+            ),
+            "keyword": brief.get("keyword"),
+            "url": brief.get("url"),
+        }
     draft = _build_markdown(
         brief=brief,
         client_name=client_name,

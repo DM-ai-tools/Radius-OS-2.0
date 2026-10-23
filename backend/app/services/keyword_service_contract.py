@@ -75,6 +75,54 @@ _FOREIGN_CITIES = frozenset(
         "dublin",
         "singapore",
         "dubai",
+        # Countries and large cities outside an Australian market. Whole-phrase
+        # matched, so "us" and "uk" inside other words never fire.
+        "usa",
+        "united states",
+        "america",
+        "uk",
+        "united kingdom",
+        "england",
+        "india",
+        "canada",
+        "philippines",
+        "pakistan",
+        "nigeria",
+        "uae",
+        "new zealand",
+        "nz",
+        "wellington",
+        "christchurch",
+        "chennai",
+        "mumbai",
+        "delhi",
+        "bangalore",
+        "hyderabad",
+        "kolkata",
+        "pune",
+        "karachi",
+        "lahore",
+        "manila",
+        "lagos",
+        "texas",
+        "california",
+        "florida",
+        "houston",
+        "dallas",
+        "miami",
+        "atlanta",
+        "boston",
+        "seattle",
+        "san francisco",
+        "san diego",
+        "phoenix",
+        "denver",
+        "montreal",
+        "calgary",
+        "glasgow",
+        "leeds",
+        "liverpool",
+        "edinburgh",
     }
 )
 
@@ -94,6 +142,268 @@ _COMMERCIAL = frozenset(
         "specialist",
         "solution",
         "platform",
+    }
+)
+
+# A 2–4 letter service token ("seo") also occurs inside personal names
+# ("park seo joon") and dictionary lookups ("define seo"). Those are a
+# different query. The token counts only when the rest of the query is
+# service language, or it is the bare acronym.
+_SHORT_ACRONYMS = frozenset({"seo", "sem", "ppc", "cro", "smm", "aeo", "geo"})
+_ACRONYM_STOPS = frozenset({"a", "an", "the", "and", "or", "of", "to", "is", "are", "my", "your"})
+# "for" keeps "seo for dentists". "with" does not: "tv shows with seo kang joon"
+# is a person's name, and the connector was the only reason it stayed.
+_ACRONYM_CONNECTORS = frozenset({"for"})
+_DICTIONARY_LOOKUPS = frozenset(
+    {
+        "define",
+        "definition",
+        "definitions",
+        "defined",
+        "meaning",
+        "meanings",
+        "means",
+        "def",
+        "dictionary",
+        "acronym",
+        "abbreviation",
+        "wikipedia",
+    }
+)
+_ACRONYM_ON_TOPIC = _COMMERCIAL | _AU_CITIES | frozenset(
+    {
+        "agencies",
+        "companies",
+        "consultants",
+        "consultancy",
+        "firm",
+        "firms",
+        "expert",
+        "experts",
+        "specialists",
+        "freelancer",
+        "freelancers",
+        "providers",
+        "prices",
+        "costs",
+        "quote",
+        "quotes",
+        "packages",
+        "package",
+        "retainer",
+        "proposal",
+        "local",
+        "technical",
+        "audit",
+        "audits",
+        "onpage",
+        "page",
+        "pages",
+        "ecommerce",
+        "commerce",
+        "shopify",
+        "wordpress",
+        "website",
+        "web",
+        "site",
+        "sites",
+        "ranking",
+        "rankings",
+        "rank",
+        "backlink",
+        "backlinks",
+        "link",
+        "links",
+        "building",
+        "google",
+        "search",
+        "engine",
+        "keyword",
+        "keywords",
+        "research",
+        "content",
+        "organic",
+        "traffic",
+        "optimisation",
+        "optimization",
+        "optimise",
+        "optimize",
+        "blog",
+        "sitemap",
+        "schema",
+        "crawl",
+        "index",
+        "indexing",
+        "penalty",
+        "algorithm",
+        "serp",
+        "title",
+        "description",
+        "ai",
+        "automation",
+        "best",
+        "top",
+        "cheap",
+        "affordable",
+        "professional",
+        "enterprise",
+        "small",
+        "business",
+        "international",
+        "national",
+        "white",
+        "label",
+        "monthly",
+        "near",
+        "me",
+        "tips",
+        "guide",
+        "guides",
+        "checklist",
+        "strategies",
+        "ideas",
+        "examples",
+        "example",
+        "how",
+        "what",
+        "why",
+        "when",
+        "australia",
+        "australian",
+        "nsw",
+        "vic",
+        "qld",
+        "gold",
+        "coast",
+        "marketing",
+        "digital",
+        "online",
+        "services",
+        "service",
+        "management",
+        "strategy",
+        "agent",
+        "agents",
+        "consulting",
+        "consultation",
+        "localized",
+        "localisation",
+        "localization",
+        "auditing",
+        "dentist",
+        "dentistry",
+        "dental",
+        "attorney",
+        "lawyer",
+        "lawyers",
+        "realtor",
+        "plumber",
+        "plumbers",
+        "freelance",
+        "expertise",
+        "optimised",
+        "optimising",
+        "optimized",
+        "optimizing",
+        "pack",
+        "packs",
+        "fee",
+        "fees",
+        "charge",
+        "charges",
+        "costing",
+        "rate",
+        "rates",
+        "googlebot",
+        "artificial",
+        "intelligence",
+        "spider",
+        "frog",
+        "screaming",
+        "yoast",
+        "canonical",
+        "url",
+        "urls",
+        "internal",
+        "linking",
+        "meta",
+        "tags",
+        "tag",
+        "reviews",
+        "review",
+        "au",
+        "aus",
+        "market",
+        "marketers",
+        "marketplace",
+        "youtube",
+        "video",
+        "videos",
+        "image",
+        "images",
+        "mobile",
+        "desktop",
+        "speed",
+        "vitals",
+        "copywriting",
+        "copy",
+        "report",
+        "reports",
+        "reporting",
+        "tool",
+        "tools",
+        "software",
+        "plugin",
+        "plugins",
+        "checker",
+        "migration",
+        "redirect",
+        "redirects",
+        "snippet",
+        "snippets",
+        "analytics",
+        "console",
+        "ctr",
+        "impressions",
+        "clicks",
+        "product",
+        "products",
+        "store",
+        "shop",
+        "category",
+        "homepage",
+        "industry",
+        "recovery",
+        "markup",
+        "hreflang",
+        "robots",
+        "indexed",
+        "indexation",
+        "copywriter",
+        "copywriters",
+        "tip",
+        "global",
+        "article",
+        "articles",
+        "lead",
+        "leads",
+        "startup",
+        "onsite",
+        "plan",
+        "plans",
+        "pagespeed",
+        "guarantee",
+        "guarantees",
+        "quotation",
+        "quotations",
+        "journal",
+        "similarweb",
+        "hubspot",
+        "blogger",
+        "post",
+        "posts",
+        "bright",
+        "edge",
     }
 )
 
@@ -144,6 +454,86 @@ def _has_phrase(text: str, phrase: str) -> bool:
 
 def _tokens(text: str) -> set[str]:
     return {t for t in _norm(text).split() if t}
+
+
+_DICTIONARY_TOKENS = _DICTIONARY_LOOKUPS | frozenset({"definitions", "meanings", "words"})
+_ENTERTAINMENT_TOKENS = frozenset(
+    {
+        "movie",
+        "movies",
+        "film",
+        "films",
+        "actor",
+        "actors",
+        "actress",
+        "actresses",
+        "drama",
+        "dramas",
+        "kdrama",
+        "celebrity",
+        "celebrities",
+        "episode",
+        "episodes",
+    }
+)
+_ENTERTAINMENT_PHRASES = ("tv show", "tv shows", "tv series", "korean drama")
+
+
+def _broken_spelling(text: str) -> bool:
+    """True when "is" was stored as two letters, as in "what i s seo".
+
+    A possessive ("what's a"), a plural ("7 p's"), a brand ("h&m"), and
+    "a/b testing" are normal queries and stay.
+    """
+    tokens = _norm(text).split()
+    return any(prev == "i" and nxt == "s" for prev, nxt in zip(tokens, tokens[1:]))
+
+
+def off_topic_reason(text: str) -> str | None:
+    """Why a query is unrelated to the business, or None when it may still be.
+
+    Runs before a service phrase is allowed to keep the row. A dictionary gloss,
+    a broken spelling, another language, or a film title is not a buyer.
+    """
+    if _acronym_homonym(text):
+        return "acronym_homonym"
+    raw = re.findall(r"[a-z0-9]+", _norm(text))
+    if any(token in _DICTIONARY_TOKENS for token in raw) and "keyword" not in raw and "keywords" not in raw:
+        return "dictionary_lookup"
+    if _broken_spelling(text):
+        return "broken_query"
+    if "en" in raw:
+        return "foreign_language"
+    folded = re.findall(r"[a-z0-9]+", _norm(re.sub(r"[^a-z0-9\s]", " ", text.lower())))
+    if "gi" in folded or any(ord(char) > 127 and char.lower() not in "éèêëáíóúüñ" for char in text):
+        return "foreign_language"
+    if "for" not in raw and (
+        any(token in _ENTERTAINMENT_TOKENS for token in raw)
+        or any(_has_phrase(text, phrase) for phrase in _ENTERTAINMENT_PHRASES)
+    ):
+        return "entertainment"
+    return None
+
+
+def _acronym_homonym(text: str) -> bool:
+    """True when a short service acronym is a name or a dictionary lookup.
+
+    "seo agency" and "seo for dentists" stay. "park seo joon" and "define seo"
+    do not: nothing else in the query is about the service.
+    """
+    tokens = _norm(text).split()
+    acronyms = [token for token in tokens if token in _SHORT_ACRONYMS]
+    if len(acronyms) != 1:
+        return False
+    others = [token for token in tokens if token not in _SHORT_ACRONYMS and token not in _ACRONYM_STOPS]
+    if not others:
+        return False
+    on_topic = [token for token in others if token in _ACRONYM_ON_TOPIC]
+    if any(token in _DICTIONARY_LOOKUPS for token in others) and not on_topic:
+        return True
+    if on_topic or any(token in _ACRONYM_CONNECTORS for token in tokens):
+        return False
+    return True
 
 
 FAMILIES: tuple[ServiceFamily, ...] = (
@@ -314,7 +704,19 @@ FAMILIES: tuple[ServiceFamily, ...] = (
             "on-page seo",
             "keyword research",
         ),
-        required_combos=(("search", "engine"), ("link", "building")),
+        # "search engine" alone is someone using one ("private search engine",
+        # "ai-powered search engine"); it is the service only with a marketing word.
+        required_combos=(
+            ("search", "engine", "optimisation"),
+            ("search", "engine", "optimization"),
+            ("search", "engine", "marketing"),
+            ("search", "engine", "ranking"),
+            ("search", "engine", "rankings"),
+            ("search", "engine", "positioning"),
+            ("search", "engine", "visibility"),
+            ("search", "engine", "submission"),
+            ("link", "building"),
+        ),
         negative_phrases=(
             "character ai",
             "google ai studio",
@@ -410,6 +812,31 @@ def _cdd_supports(keyword: str, family: ServiceFamily, cdd_keywords: list[str]) 
     return None
 
 
+def _cdd_long_tail(text: str, cdd_keywords: list[str]) -> bool:
+    """True when a client discovery phrase sits inside the query."""
+    tokens = _tokens(text)
+    for raw in cdd_keywords:
+        phrase = _norm(raw)
+        parts = [token for token in phrase.split() if token not in _INSUFFICIENT and len(token) > 2]
+        if len(parts) < 2:
+            continue
+        if _has_phrase(text, phrase) or all(token in tokens for token in parts):
+            return True
+    return False
+
+
+def _names_other_family(text: str, family: ServiceFamily) -> bool:
+    """True when the query is a phrase that belongs to a different service family."""
+    for other in FAMILIES:
+        if other.id == family.id:
+            continue
+        if any(_has_phrase(text, phrase) for phrase in other.markers):
+            return True
+        if any(_has_phrase(text, phrase) for phrase in other.required_phrases):
+            return True
+    return False
+
+
 def _intent_score(keyword: str) -> float:
     tokens = _tokens(keyword)
     if tokens & {"how", "what", "why", "guide", "tips", "strategy"}:
@@ -493,6 +920,19 @@ def judge_keyword(
             ambiguity=0.2,
             negative=False,
         )
+    # A service phrase must not keep a name, a gloss, a typo, another language,
+    # or a film title. "search engine optimisation means" used to pass because
+    # the full phrase was enough.
+    unrelated = off_topic_reason(text)
+    if unrelated and not cdd_hit:
+        return _verdict(
+            "DROP",
+            unrelated,
+            service_match=0.05,
+            entity_risk=0.9,
+            ambiguity=0.2,
+            negative=False,
+        )
     if positives or combo_hit or cdd_hit:
         return _verdict(
             "KEEP",
@@ -519,7 +959,30 @@ def judge_keyword(
             ambiguity=0.8,
             negative=False,
         )
-    # A single insufficient token ("ai", "email", "google") is not the service.
+    if _names_other_family(text, family):
+        return _verdict(
+            "DROP",
+            "service_mismatch",
+            service_match=0.05,
+            entity_risk=0.4,
+            ambiguity=0.1,
+            negative=False,
+        )
+    # A longer query can describe the service without repeating its name when
+    # the client's own discovery terms support it. Otherwise it stays a mismatch.
+    if _cdd_long_tail(text, list(cdd_keywords or [])):
+        return ServiceVerdict(
+            decision="SKIP",
+            family=family.id,
+            reason="long_tail_for_llm",
+            reason_detail="long_tail_for_llm",
+            service_match=0.0,
+            intent_match=_intent_score(keyword),
+            geo_match=geo_score,
+            entity_risk=0.0,
+            ambiguity=0.4,
+            negative_match=False,
+        )
     return _verdict(
         "DROP",
         "service_mismatch",
@@ -543,7 +1006,7 @@ def partition_service_rejects(
         if not isinstance(row, dict):
             kept.append(row)
             continue
-        service = str(row.get("target") or row.get("seed") or "")
+        service = str(row.get("service") or row.get("target") or row.get("seed") or "")
         verdict = judge_keyword(
             str(row.get("keyword") or ""),
             service=service,

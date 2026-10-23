@@ -11,21 +11,12 @@ from urllib.parse import urlparse
 
 PRIORITY_TIERS = frozenset({"quick_win", "big_bet", "fill_in", "avoid"})
 # Blog/guide creates that are not tied to a confirmed selected service stay small.
-# Phase 5 often overshoots with near-duplicate ideas. Selected services are exempt:
-# each one gets a new page of every supporting page type, not only a blog or a guide.
+# Phase 5 often overshoots with near-duplicate ideas. A selected service does not
+# receive a fixed guide, pricing, FAQ, or tool page. Supporting pages come from
+# that service's keyword clusters, and a blog is added only for a real trending keyword.
 MAX_BLOG_CREATES = 2
 MIN_BLOG_CREATES = 2
 BLOGS_PER_SELECTED_SERVICE = 2
-# page_type, keyword template, title template, intent
-SELECTED_SERVICE_PAGE_KINDS = (
-    ("guide", "{name} guide", "{name}: a practical guide", "informational"),
-    ("blog", "{name} overview", "{name} explained", "informational"),
-    ("comparison", "{name} comparison", "{name} comparison", "commercial"),
-    ("faq", "{name} faq", "{name} questions", "informational"),
-    ("listicle", "{name} examples", "{name} examples", "informational"),
-    ("landing", "{name} pricing", "{name} pricing", "transactional"),
-    ("tool", "{name} tool", "{name} tool", "informational"),
-)
 _GENERIC_MATCH_TOKENS = frozenset(
     {
         "and",
@@ -558,19 +549,21 @@ def _strategy_row_richness(row: dict[str, Any]) -> tuple[int, ...]:
 def _strategy_rows(strategy: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten the Phase 6 strategy spine once.
 
-    Prefer ``priority_queue`` / ``priority_pages`` only. ``combined_priority_queue``
-    re-injects audit Fill-in gaps and invents blog creates that never appeared on
-    the Content Strategy card.
+    Prefer strategy-origin rows on ``content_plan``. Older payloads still expose
+    ``priority_queue`` / ``priority_pages``. Audit-origin rows stay out of this spine.
     """
     collected: list[dict[str, Any]] = []
-    primary_keys = ("priority_queue", "priority_pages")
-    for key in primary_keys:
-        for row in strategy.get(key) or []:
-            if isinstance(row, dict):
-                collected.append(row)
-    # Fall back to combined only when the strategy spine is empty (legacy packs).
+    plan_rows = [row for row in (strategy.get("content_plan") or []) if isinstance(row, dict)]
+    if plan_rows and any(row.get("source") for row in plan_rows):
+        collected.extend(row for row in plan_rows if row.get("source") == "content-strategy")
     if not collected:
-        for row in strategy.get("combined_priority_queue") or []:
+        for key in ("priority_queue", "priority_pages"):
+            for row in strategy.get(key) or []:
+                if isinstance(row, dict):
+                    collected.append(row)
+    # Fall back to the merged list only when the strategy spine is empty (legacy packs).
+    if not collected:
+        for row in strategy.get("combined_priority_queue") or plan_rows:
             if isinstance(row, dict):
                 collected.append(row)
 
@@ -813,19 +806,129 @@ def apply_blog_virality_gate(
     return kept, dropped
 
 
-def supporting_page_spec(name: str, kind: tuple[str, str, str, str]) -> dict[str, str]:
-    """Path and labels for one supporting page kind of a selected service."""
-    from app.services.create_content import path_for_page_type
+def demand_clusters(search_demand: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Keyword clusters from a search-demand pack. Loose keyword rows are not pages."""
+    demand = dict(search_demand or {})
+    report = demand.get("cluster_report") if isinstance(demand.get("cluster_report"), dict) else {}
+    clusters = [row for row in (report.get("clusters") or []) if isinstance(row, dict)]
+    if clusters:
+        return clusters
+    return [row for row in (demand.get("clusters") or []) if isinstance(row, dict)]
 
-    page_type, keyword_tmpl, title_tmpl, intent = kind
-    keyword = keyword_tmpl.format(name=name)
+
+def _cluster_blob(row: dict[str, Any]) -> set[str]:
+    return _token_set(
+        " ".join(
+            str(row.get(key) or "")
+            for key in ("keyword", "primary_keyword", "name", "title", "parent_topic", "service")
+        )
+    )
+
+
+def _service_identity(service: dict[str, Any]) -> set[str]:
+    keys = {_norm_kw(service.get("name")), _norm_kw(service.get("id"))}
+    for sub in service.get("subservices") or []:
+        if isinstance(sub, dict):
+            keys.add(_norm_kw(sub.get("name")))
+            keys.add(_norm_kw(sub.get("id")))
+    keys.discard("")
+    return keys
+
+
+def _cluster_service_labels(row: dict[str, Any]) -> set[str]:
+    labels: set[str] = set()
+    for key in ("supports_service_id", "service_id", "parent_service_id", "service"):
+        label = _norm_kw(row.get(key))
+        if label:
+            labels.add(label)
+    return labels
+
+
+def _best_service_for_cluster(
+    row: dict[str, Any],
+    services: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """The selected service this cluster belongs to, most specific name first."""
+    labels = _cluster_service_labels(row)
+    if labels:
+        labeled = [
+            service
+            for service in services
+            if isinstance(service, dict) and labels & _service_identity(service)
+        ]
+        if not labeled:
+            return None
+        return max(labeled, key=lambda service: len(_distinct_tokens(str(service.get("name") or service.get("id") or ""))))
+    blob = _cluster_blob(row)
+    hits = []
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        tokens = _distinct_tokens(str(service.get("name") or service.get("id") or ""))
+        if tokens and tokens <= blob:
+            hits.append(service)
+    if not hits:
+        return None
+    return max(hits, key=lambda service: len(_distinct_tokens(str(service.get("name") or service.get("id") or ""))))
+
+
+def clusters_by_service(
+    services: list[dict[str, Any]],
+    clusters: list[dict[str, Any]] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    """One list of real clusters per selected service. A cluster is not copied onto every service."""
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    seen: dict[str, set[str]] = {}
+    usable = [service for service in services if isinstance(service, dict)]
+    for row in clusters or []:
+        if not isinstance(row, dict):
+            continue
+        service = _best_service_for_cluster(row, usable)
+        if not service:
+            continue
+        keyword = _norm_kw(row.get("primary_keyword") or row.get("keyword") or row.get("name"))
+        if not keyword or keyword in _service_identity(service):
+            continue
+        key = _norm_service_id(service.get("id") or service.get("name"))
+        if not key or keyword in seen.setdefault(key, set()):
+            continue
+        seen[key].add(keyword)
+        buckets.setdefault(key, []).append(row)
+    return buckets
+
+
+def spec_from_keyword(row: dict[str, Any]) -> dict[str, Any]:
+    """Page type, path, intent, and funnel taken from the keyword itself."""
+    from app.services.create_content import path_for_page_type, resolve_page_type
+    from app.services.keyword_opportunity import detect_funnel, detect_intent
+
+    keyword = str(row.get("primary_keyword") or row.get("keyword") or row.get("name") or "").strip()
+    raw_intent = str(row.get("intent") or "").strip().lower()
+    intent = raw_intent if raw_intent in {"informational", "commercial", "transactional", "navigational"} else detect_intent(keyword, raw_intent)
+    page_type = resolve_page_type({"keyword": keyword, "intent": intent})
+    funnel = str(row.get("funnel") or "").strip().upper()
+    if funnel not in {"TOFU", "MOFU", "BOFU"}:
+        funnel = detect_funnel(keyword, intent)
+    title = str(row.get("title") or "").strip()
+    name = str(row.get("name") or "").strip()
+    if not title:
+        title = keyword if not name or " · " in name else name
+    raw_url = str(row.get("recommended_url") or row.get("suggested_url") or row.get("url") or "")
+    path = urlparse(raw_url).path if "://" in raw_url else raw_url
+    if not path.startswith("/"):
+        path = path_for_page_type(page_type, keyword)
     return {
         "page_type": page_type,
         "keyword": keyword,
-        "title": title_tmpl.format(name=name),
+        "title": title,
         "intent": intent,
-        "path": path_for_page_type(page_type, keyword),
+        "funnel": funnel,
+        "path": path,
         "work_label": f"Create {page_type} page",
+        "volume": row.get("est_traffic") if row.get("est_traffic") is not None else row.get("total_volume", row.get("volume")),
+        "opportunity_score": row.get("opportunity_score") if row.get("opportunity_score") is not None else row.get("best_score"),
+        "from_keyword_cluster": True,
+        "require_virality": False,
     }
 
 
@@ -1106,9 +1209,14 @@ def _selected_service_supporting_row(
     parent = _service_page_url(service)
     path = url_n(spec["path"])
     page_type = spec["page_type"]
+    keyword = spec["keyword"]
+    from_cluster = bool(spec.get("from_keyword_cluster"))
+    viral = bool(spec.get("require_virality"))
     flags = ["supports_service", "selected_service_page"]
-    if page_type in BLOGISH_CONTENT:
+    if viral:
         flags.append("selected_service_blog")
+    if from_cluster:
+        flags.append("keyword_cluster")
     return {
         "url_n": path,
         "url": path,
@@ -1119,9 +1227,10 @@ def _selected_service_supporting_row(
         "decision_basis": "new_content_gap",
         "existing_content_check": "no_match",
         "new_content_justification": (
-            f"Selected service '{name}' needs a {page_type} page. "
-            "Each confirmed service is planned across every supporting page type, "
-            "not only a blog or a guide."
+            f"'{keyword}' is a keyword cluster for {name}. "
+            f"The {page_type} page type follows that keyword's intent and funnel."
+            if from_cluster
+            else f"'{keyword}' is a trending topic for {name}."
         ),
         "title": spec["title"],
         "primary_keyword": spec["keyword"],
@@ -1130,6 +1239,8 @@ def _selected_service_supporting_row(
         "supporting_keywords": [],
         "keywords": [],
         "intent": spec["intent"],
+        "funnel": spec.get("funnel"),
+        "volume": spec.get("volume"),
         "service": name,
         "content_type": page_type,
         "content_type_label": page_type,
@@ -1145,7 +1256,8 @@ def _selected_service_supporting_row(
         "flags": flags,
         "status": "planned",
         "from_selected_service": True,
-        "from_selected_service_blog": page_type in BLOGISH_CONTENT,
+        "from_selected_service_blog": viral,
+        "from_keyword_cluster": from_cluster,
     }
 
 
@@ -1154,20 +1266,49 @@ def ensure_selected_service_coverage(
     selected: list[dict[str, Any]],
     search_demand: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Optimize each selected service page and add any missing page types.
+    """Optimize each selected service page and add pages for its keyword clusters.
 
-    A blog is added only when a keyword for that service passes the virality
-    check. Guide, comparison, FAQ, listicle, landing, and tool pages are unchanged.
+    Nothing is invented from the service name. A blog is added only when a real
+    keyword for that service passes the virality check.
     """
     if not selected:
         return pages
+    from app.services.create_content import path_for_page_type
+
     demand_rows = demand_keyword_rows(search_demand)
+    grouped = clusters_by_service(selected, demand_clusters(search_demand))
     covered_urls = {
         url_n(str(row.get("url_n") or row.get("url") or row.get("path") or ""))
         for row in pages
         if isinstance(row, dict)
     }
-    claimed: set[int] = set()
+    claimed_ids: set[int] = set()
+    claimed_keywords = {
+        _norm_kw(row.get("keyword") or row.get("primary_keyword"))
+        for row in pages
+        if isinstance(row, dict)
+    }
+    claimed_keywords.discard("")
+
+    def _add_spec(service: dict[str, Any], spec: dict[str, Any], viral: dict[str, Any] | None = None) -> None:
+        keyword = _norm_kw(spec.get("keyword"))
+        path = url_n(spec["path"])
+        if not keyword or keyword in claimed_keywords or path in covered_urls:
+            return
+        created = _selected_service_supporting_row(service, spec)
+        if viral:
+            created["trend"] = viral.get("trend")
+            created["volume"] = viral.get("volume")
+            created["bucket"] = viral.get("bucket")
+            created["opportunity_score"] = viral.get("opportunity_score")
+            created["virality_score"] = viral.get("score")
+            created["virality_pass"] = True
+            created["virality_reason"] = viral.get("reason")
+            created["virality_signals"] = viral.get("signals")
+        pages.append(created)
+        covered_urls.add(path)
+        claimed_keywords.add(keyword)
+
     for service in selected:
         if not isinstance(service, dict):
             continue
@@ -1183,10 +1324,8 @@ def ensure_selected_service_coverage(
             if url not in covered_urls:
                 pages.append(_selected_service_page_row(service, url))
                 covered_urls.add(url)
-        present_kinds: set[str] = set()
-        name = str(service.get("name") or service.get("id") or "Service")
         for row in pages:
-            if not isinstance(row, dict) or id(row) in claimed:
+            if not isinstance(row, dict) or id(row) in claimed_ids:
                 continue
             if str(row.get("action") or "") != "create" or _is_service_page(row):
                 continue
@@ -1198,49 +1337,40 @@ def ensure_selected_service_coverage(
             if "selected_service_page" not in flags:
                 flags.append("selected_service_page")
             kind = _row_page_kind(row)
-            if kind in BLOGISH_CONTENT and "selected_service_blog" not in flags:
+            if (
+                kind in BLOGISH_CONTENT
+                and not row.get("from_keyword_cluster")
+                and "selected_service_blog" not in flags
+            ):
                 flags.append("selected_service_blog")
             row["flags"] = flags
-            if kind:
-                present_kinds.add(kind)
-            claimed.add(id(row))
-        for kind in SELECTED_SERVICE_PAGE_KINDS:
-            if kind[0] in present_kinds:
-                continue
-            spec = supporting_page_spec(name, kind)
-            viral: dict[str, Any] | None = None
-            if kind[0] == "blog":
-                picked = pick_viral_blog_topic(service, demand_rows)
-                if not picked:
-                    continue
-                topic, verdict = picked
-                from app.services.create_content import path_for_page_type
-
-                keyword = str(topic.get("keyword") or topic.get("primary_keyword") or spec["keyword"])
-                spec = {
-                    **spec,
-                    "keyword": keyword,
-                    "title": str(topic.get("title") or keyword),
-                    "path": path_for_page_type("blog", keyword),
-                }
-                viral = {**topic, **verdict}
-            path = url_n(spec["path"])
-            if path in covered_urls:
-                present_kinds.add(kind[0])
-                continue
-            created = _selected_service_supporting_row(service, spec)
-            if viral:
-                created["trend"] = viral.get("trend")
-                created["volume"] = viral.get("volume")
-                created["bucket"] = viral.get("bucket")
-                created["opportunity_score"] = viral.get("opportunity_score")
-                created["virality_score"] = viral.get("score")
-                created["virality_pass"] = True
-                created["virality_reason"] = viral.get("reason")
-                created["virality_signals"] = viral.get("signals")
-            pages.append(created)
-            covered_urls.add(path)
-            present_kinds.add(kind[0])
+            claimed_ids.add(id(row))
+            claimed_keywords.add(_norm_kw(row.get("keyword") or row.get("primary_keyword")))
+        service_key = _norm_service_id(service.get("id") or service.get("name"))
+        for cluster in grouped.get(service_key, []):
+            _add_spec(service, spec_from_keyword(cluster))
+        picked = pick_viral_blog_topic(service, demand_rows)
+        if not picked:
+            continue
+        topic, verdict = picked
+        keyword = str(topic.get("keyword") or topic.get("primary_keyword") or "").strip()
+        if not keyword:
+            continue
+        _add_spec(
+            service,
+            {
+                "page_type": "blog",
+                "keyword": keyword,
+                "title": str(topic.get("title") or keyword),
+                "intent": str(topic.get("intent") or "informational"),
+                "funnel": str(topic.get("funnel") or "TOFU"),
+                "path": path_for_page_type("blog", keyword),
+                "work_label": "Create blog page",
+                "require_virality": True,
+            },
+            {**topic, **verdict},
+        )
+    claimed_keywords.discard("")
     return pages
 
 
@@ -1322,7 +1452,7 @@ def build_roadmap(
     """Join three packs on url_n.
 
     A confirmed service selection optimizes those service pages and adds a
-    guide, blog, comparison, FAQ, listicle, landing, and tool page for each.
+    page for each keyword cluster that belongs to the service.
     """
     strat_rows = _strategy_rows(strategy)
     arch_rows = _arch_rows(architecture)
@@ -1945,8 +2075,8 @@ def build_roadmap(
             (
                 "Locked merge of strategy + architecture + audit. "
                 "Each confirmed selected service page is optimized. "
-                "Each selected service also gets a guide, blog, comparison, FAQ, "
-                "listicle, landing, and tool page. "
+                "Supporting pages come from that service's keyword clusters. "
+                "A blog is added only when a keyword for the service is trending. "
                 f"Unrelated blog creates stay capped at {MAX_BLOG_CREATES}. "
                 "Phase 10 briefs pages with action create|refresh in priority_rank order. "
                 "Re-run this merge if any upstream pack changes."

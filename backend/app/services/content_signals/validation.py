@@ -113,6 +113,12 @@ def business_rules_block(context: dict[str, Any] | None) -> str:
             + (f" at {clash.get('url')}" if clash.get("url") else "")
             + ". Differentiate or say this refreshes that page."
         )
+    scope = context.get("service_scope") or {}
+    if scope.get("scoped"):
+        offered = ", ".join(scope.get("offered") or []) or "none"
+        lines.append(f"- Sub-services: only {offered} are offered.")
+        if scope.get("excluded"):
+            lines.append("- Never name or promote: " + ", ".join(scope["excluded"]) + ".")
     if not lines:
         return ""
     return "BUSINESS LOGIC (the draft is checked against these after writing):\n" + "\n".join(lines)
@@ -207,6 +213,19 @@ def validate_business_logic(
             f"This draft refreshes the existing page at {where}."
             if refreshing
             else f"Topic is already covered by {where}. Refresh that page or change the angle.",
+        )
+
+    scope = context.get("service_scope") or {}
+    if scope.get("scoped"):
+        from app.services.service_scope import scope_violations
+
+        named = list(dict.fromkeys(v["sub_service"] for v in scope_violations([text], scope)))
+        _check(
+            "sub_service_scope",
+            not named,
+            "Only offered sub-services are named."
+            if not named
+            else f"Draft names a sub-service we do not offer: {', '.join(named[:3])}.",
         )
 
     failures = [c for c in checks if not c["ok"] and c["severity"] == "fail"]

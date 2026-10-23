@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
@@ -81,6 +83,7 @@ from app.services.keyword_pool import (
 )
 from app.services.keyword_rejection_log import record_keyword_rejections
 from app.services.keyword_metrics import measured_rows_for_pool
+from app.services.keyword_seed_identification import identify_multiple_seed_clusters
 from app.services.keyword_seeding import (
     clean_provider_seed,
     filter_seed_clusters,
@@ -90,6 +93,22 @@ from app.services.keyword_seeding import (
 )
 from app.services.live_site_scan import scan_live_site
 from app.services.role_skills import required_role_for
+from app.services.query_variants import QueryVariantResolver
+from app.services.seed_synonyms import SeedSynonymResolver, audit_entries, operator_notice
+from app.services.subservice_expansion import audit_entries as expansion_audit_entries
+from app.services.subservice_expansion import operator_notice as expansion_notice
+from app.services.service_prioritization import service_identity_key
+from app.services.service_labs_research import (
+    collect_competitor_keywords,
+    partition_keywords_by_service,
+)
+from app.services.service_seeding import (
+    flatten_service_plans,
+    plan_service_seeds,
+    round_robin_seeds,
+    run_service_scoped_seeding,
+    extra_seeds_last,
+)
 from app.services.url_mapping import classify_clusters_against_sitemap
 
 log = get_logger("search_demand")
@@ -99,8 +118,8 @@ log = get_logger("search_demand")
 # cap is the real bottleneck, so depth that did not move it would be cosmetic.
 KEYWORD_DEPTH_PRESETS = [
     {"id": "focused", "label": "Focused", "keyword_pool_target": 1500, "max_seed_roots": 6},
-    {"id": "standard", "label": "Standard", "keyword_pool_target": 4500, "max_seed_roots": 8},
-    {"id": "deep", "label": "Deep", "keyword_pool_target": 8000, "max_seed_roots": 14},
+    {"id": "standard", "label": "Standard", "keyword_pool_target": 4500, "max_seed_roots": 16},
+    {"id": "deep", "label": "Deep", "keyword_pool_target": 8000, "max_seed_roots": 24},
 ]
 
 
@@ -268,7 +287,8 @@ def _products_list(commercial: dict, marketing: dict, intake: dict, cdd: dict | 
             str(x).strip() for x in raw if str(x).strip()
         ]
         for item in items:
-            key = item.lower()
+            # "Web Development" and "Website Development" are one offering.
+            key = service_identity_key(item)
             if key not in seen:
                 seen.add(key)
                 out.append(item)
@@ -310,7 +330,7 @@ def _primary_client_services(
                 else [str(x).strip() for x in raw if str(x).strip()]
             )
             for item in items:
-                key = item.lower()
+                key = service_identity_key(item)
                 if key not in seen:
                     seen.add(key)
                     out.append(item)
@@ -408,6 +428,49 @@ def _page_target_seeds(website: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+# Descriptive competitor fields that read as market language. ``tier_name`` is
+# deliberately absent: "Strong Direct Competitors" is the tier model's label, and
+# seeding on it sent a classification word to keyword research.
+_COMPETITOR_THEME_FIELDS = ("positioning", "notes")
+
+
+def _competitor_theme_seeds(
+    competitive: dict[str, Any],
+    *,
+    seen: set[str],
+    is_brand: Callable[[str], bool],
+) -> list[str]:
+    """Seed phrases drawn from how competitors describe themselves.
+
+    Never the competitor's brand name, never a stale-year phrase, never one that is
+    already a seed, and only from descriptive fields (see ``_COMPETITOR_THEME_FIELDS``).
+    """
+    taken = set(seen)
+    out: list[str] = []
+    for card in (
+        competitive.get("scorecards"),
+        competitive.get("competitors"),
+        competitive.get("tier_overview"),
+    ):
+        if not isinstance(card, list):
+            continue
+        for row in card[:8]:
+            if not isinstance(row, dict):
+                continue
+            for key in _COMPETITOR_THEME_FIELDS:
+                phrase = " ".join(str(row.get(key) or "").split()[:6]).strip()
+                if (
+                    phrase
+                    and len(phrase) > 3
+                    and not is_stale_year_keyword(phrase)
+                    and phrase.lower() not in taken
+                    and not is_brand(phrase)
+                ):
+                    out.append(phrase)
+                    taken.add(phrase.lower())
+    return out
+
+
 def _service_seed_variants(services: list[str]) -> list[str]:
     """Expand CDD services into specific seed queries (not ultra-generic heads alone)."""
     extras: list[str] = []
@@ -461,6 +524,57 @@ async def _load_cdd_fields(db: AsyncSession, client_id: UUID) -> dict[str, Any]:
     return out
 
 
+def _retrieve_exception(task: asyncio.Future[Any]) -> None:
+    """Mark a prefetch task's exception as seen; it is re-raised where it is awaited."""
+    if not task.cancelled():
+        task.exception()
+
+
+class _Prefetch:
+    """Provider calls started early so their waiting overlaps other work.
+
+    Phase 5 used to make every provider call one after another, and spent most of
+    its time waiting. A call whose inputs are known early is started here, and its
+    result is collected at the call's original place in the flow, so everything
+    downstream is processed in the original order and the report is unchanged.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: dict[str, asyncio.Future[Any]] = {}
+
+    def start(self, name: str, coro: Any) -> None:
+        task = asyncio.ensure_future(coro)
+        task.add_done_callback(_retrieve_exception)
+        self._tasks[name] = task
+
+    def has(self, name: str) -> bool:
+        return name in self._tasks
+
+    async def result(self, name: str, *, timeout: float | None = None) -> Any:
+        """The call's result, waited for at most ``timeout`` seconds from now.
+
+        A timeout cancels the call and raises ``asyncio.TimeoutError``, exactly as
+        the original ``asyncio.wait_for`` around the call did.
+        """
+        task = self._tasks.pop(name)
+        if timeout is None:
+            return await task
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            task.cancel()
+            raise
+
+    def discard(self, name: str) -> None:
+        task = self._tasks.pop(name, None)
+        if task is not None:
+            task.cancel()
+
+    def discard_all(self) -> None:
+        for name in list(self._tasks):
+            self.discard(name)
+
+
 async def _harvest_competitor_page_keywords(
     *,
     client: Client,
@@ -475,9 +589,12 @@ async def _harvest_competitor_page_keywords(
     seeds: list[str],
     location_code: int,
 ) -> dict[str, Any]:
-    """Crawl approved competitors' pages for keyword targets, then store the result.
+    """Crawl approved competitors' pages for keyword targets.
 
-    Runs on the confirmed keyword turn, scoped to the selected services.
+    Runs on the confirmed keyword turn, scoped to the selected services, alongside
+    keyword expansion. It changes nothing itself: the caller stores the result with
+    ``_store_competitor_page_intel`` when it collects it, so the profile is only
+    ever written from the main flow.
     """
     from app.services.competitor_keyword_intel import collect_competitor_page_keywords
 
@@ -492,11 +609,17 @@ async def _harvest_competitor_page_keywords(
         domain=extract_domain(client.primary_url) or None,
         industry=client.industry,
     )
-    intel = await collect_competitor_page_keywords(
+    return await collect_competitor_page_keywords(
         competitors=competitors,
         relevance_context=harvest_ctx,
         location_code=location_code,
     )
+
+
+def _store_competitor_page_intel(
+    profile: Any, commercial: dict[str, Any], intel: dict[str, Any]
+) -> None:
+    """Keep the harvest on the client profile for later runs and phases."""
     stored = {
         "keywords": list(intel.get("keywords") or []),
         "snapshots": list(intel.get("snapshots") or []),
@@ -509,7 +632,6 @@ async def _harvest_competitor_page_keywords(
         "competitor_keyword_intel": stored,
     }
     commercial["competitor_keyword_intel"] = stored
-    return intel
 
 
 async def run_search_demand(
@@ -521,11 +643,31 @@ async def run_search_demand(
     message: str,
 ) -> list[dict]:
     _ = load_skill("search_demand")
+    _ = load_skill("seo_dataforseo")
     _ = load_skill_file("create-topic")
     _ = load_skill_file("keyword-clustering")
     _ = user_id
 
     events: list[dict] = []
+    # The chat turn is cancelled at the agent budget. A cancel before the
+    # profile write drops the whole run, so later steps stop while there is
+    # still time to cluster and save.
+    from app.orchestration.pipeline import agent_timeout_seconds
+
+    phase_budget = agent_timeout_seconds("search_demand")
+    phase_started = time.monotonic()
+
+    def _seconds_left() -> float:
+        return phase_budget - (time.monotonic() - phase_started)
+
+    # Seconds since the run started, at the end of each stage. Logged and saved on
+    # the summary so a slow run shows where its time went.
+    stage_timings: dict[str, float] = {}
+
+    def _mark(stage: str) -> None:
+        stage_timings[stage] = round(time.monotonic() - phase_started, 1)
+
+    phase_deadline = phase_started + max(60, phase_budget - 240)
     profile = await get_profile(db, client.id)
 
     if profile.competitor_status != "complete":
@@ -679,9 +821,9 @@ async def run_search_demand(
         build_prioritization_pack,
         cap_seed_roots_preserving_selected_services,
         discover_competitor_service_trees,
-        expand_vertical_subservice_seeds,
         is_prioritization_confirmed,
         merge_competitor_subservices,
+        merge_saved_catalog,
         prioritize_top_service_roots,
         term_matches_selected_services,
         top_priority_service_id,
@@ -692,14 +834,41 @@ async def run_search_demand(
         # Fast gate: selection card only. Competitor tree crawl + page harvest
         # used to run here and made "pick services" feel like a full research
         # turn (45s+). They now run after confirm, scoped to the selection.
+        from app.services.industry_services import taxonomy_for_pack
+
+        card_services = _primary_client_services(commercial, marketing, intake, cdd)
+        card_seeds = _page_target_seeds(website)
+        # The industry's major services and sub-services from the model, as opt-in
+        # suggestions next to what the site revealed. Cached and time-boxed.
+        events.append(
+            {
+                "type": "system_notice",
+                "content": "Looking up the primary services and sub-services for this industry…",
+            }
+        )
+        industry_taxonomy, industry_status = await taxonomy_for_pack(
+            industry=client.industry or intake.get("industry") or marketing.get("industry"),
+            services=card_services,
+            website=website,
+            page_seeds=card_seeds,
+            geography=str(
+                intake.get("geographic_focus")
+                or marketing.get("geographic_focus")
+                or commercial.get("geographic_focus")
+                or ""
+            )
+            or None,
+        )
         pack = build_prioritization_pack(
             client_name=client.display_name,
-            services=_primary_client_services(commercial, marketing, intake, cdd),
+            services=card_services,
             website=website,
-            page_seeds=_page_target_seeds(website),
+            page_seeds=card_seeds,
             competitors=competitors,
             competitor_trees=[],
             existing=prioritization,
+            industry_taxonomy=industry_taxonomy,
+            industry_status=industry_status,
         )
         profile.search_demand_status = "awaiting_service_selection"
         card = {
@@ -776,6 +945,8 @@ async def run_search_demand(
     # fast selection gate). Prefer any stored harvest, then always refresh for
     # the selected services so ranking pages match what the operator picked.
     page_intel = stored_competitor_page_intel(commercial)
+    # Seeds for a fresh competitor-page harvest; None means no harvest this run.
+    harvest_seeds: list[str] | None = None
     competitor_page_keywords = list(page_intel.get("keywords") or [])
     competitor_sites: list[dict[str, Any]] = list(page_intel.get("snapshots") or [])
     if competitor_page_keywords:
@@ -789,30 +960,12 @@ async def run_search_demand(
                 ),
             }
         )
-    for card in (
-        competitive.get("scorecards"),
-        competitive.get("competitors"),
-        competitive.get("tier_overview"),
+    for phrase in _competitor_theme_seeds(
+        competitive, seen=seen, is_brand=_is_competitor_brand
     ):
-        if not isinstance(card, list):
-            continue
-        for row in card[:8]:
-            if not isinstance(row, dict):
-                continue
-            # Never harvest the competitor's brand "name" as a seed — only
-            # descriptive theme fields, and even those are brand-filtered.
-            for key in ("positioning", "tier_name", "notes"):
-                phrase = " ".join(str(row.get(key) or "").split()[:6]).strip()
-                if (
-                    phrase
-                    and len(phrase) > 3
-                    and not is_stale_year_keyword(phrase)
-                    and phrase.lower() not in seen
-                    and not _is_competitor_brand(phrase)
-                ):
-                    competitor_title_seeds.append(phrase)
-                    seeds.append(phrase)
-                    seen.add(phrase.lower())
+        competitor_title_seeds.append(phrase)
+        seeds.append(phrase)
+        seen.add(phrase.lower())
     seeds = seeds[:24]
 
     job = AgentJob(
@@ -823,6 +976,10 @@ async def run_search_demand(
     )
     db.add(job)
     await db.flush()
+    # Research runs for many minutes after this. Commit so the profile row
+    # is not locked for the whole run — the keywords save times out at 15s
+    # while it waits on that lock.
+    await db.commit()
 
     providers_used: list[str] = []
     provider_errors: list[str] = []
@@ -916,6 +1073,11 @@ async def run_search_demand(
     for svc in services:
         _add_root(svc, "service")
     seed_roots = [r for r in seed_roots if r.lower() in seed_targets]
+    # Candidate terms (service names, business keywords, pages, themes) BEFORE the
+    # shared cap. Each service generates its own seeds from this pool and gets its own
+    # budget; the pool itself is never sent to the keyword provider.
+    candidate_roots = list(seed_roots)
+    candidate_targets = {k: dict(v) for k, v in seed_targets.items()}
     seed_roots = cap_seed_roots_preserving_selected_services(
         prioritize_top_service_roots(seed_roots, seed_targets, prioritization),
         seed_targets,
@@ -953,56 +1115,14 @@ async def run_search_demand(
                     "type": "system_notice",
                     "content": (
                         "Harvesting competitor pages for the confirmed services "
-                        "(titles, H1s, paths) before DataForSEO expansion."
+                        "(titles, H1s, paths) alongside DataForSEO expansion."
                     ),
                 }
             )
-            try:
-                page_intel = await _harvest_competitor_page_keywords(
-                    client=client,
-                    profile=profile,
-                    commercial=commercial,
-                    services=services,
-                    cdd_keywords=cdd_keywords,
-                    website=website,
-                    competitors=competitors,
-                    competitor_labels=competitor_labels,
-                    competitor_domains=competitor_domains,
-                    seeds=seed_roots or list(services),
-                    location_code=labs_location_code,
-                )
-                fresh = scope_competitor_keywords_to_services(
-                    list(page_intel.get("keywords") or []), services
-                )
-                if fresh:
-                    competitor_page_keywords = fresh
-                    competitor_sites = list(page_intel.get("snapshots") or [])
-                    harvest_stats = dict(page_intel.get("stats") or {})
-                    events.append(
-                        {
-                            "type": "system_notice",
-                            "content": (
-                                f"Competitor harvest: {harvest_stats.get('pages', 0)} pages, "
-                                f"{len(competitor_page_keywords)} volume-qualified keyword(s) "
-                                "for selected services."
-                            ),
-                        }
-                    )
-            except Exception as exc:  # noqa: BLE001 — harvest must not abort keywords
-                log.warning(
-                    "competitor_page_reharvest_failed",
-                    client_id=str(client.id),
-                    error=str(exc)[:200],
-                )
-                events.append(
-                    {
-                        "type": "system_notice",
-                        "content": (
-                            "Competitor page harvest failed — falling back to "
-                            "organic keyword gap feeds for competitor signal."
-                        ),
-                    }
-                )
+            # The crawl takes up to 90 s and nothing reads its keywords until after
+            # the relevance gate, so it runs alongside expansion (started with the
+            # other prefetches below) instead of in front of it.
+            harvest_seeds = list(seed_roots or services)
 
     service_catalog = build_client_service_catalog(
         services=[],
@@ -1015,13 +1135,21 @@ async def run_search_demand(
             for row in (prioritization.get("service_catalog") or [])
             if isinstance(row, dict)
         ]
+    # The rebuild above only knows the website. Keep the services and sub-services the
+    # operator picked from the industry suggestions, or they vanish before keyword
+    # research and the site architecture that reads this catalog.
+    service_catalog = merge_saved_catalog(
+        service_catalog,
+        prioritization.get("service_catalog"),
+        selected_service_ids=list(prioritization.get("selected_service_ids") or []),
+    )
     trees = list(prioritization.get("competitor_trees") or [])
     if not trees and not prioritization.get("service_catalog"):
         try:
             trees = await asyncio.wait_for(
                 discover_competitor_service_trees(
                     competitors,
-                    max_competitors=3,
+                    max_competitors=8,
                     max_urls_each=20,
                 ),
                 timeout=45,
@@ -1045,31 +1173,51 @@ async def run_search_demand(
     # Persist the exact selected hierarchy so Site Architecture does not have
     # to rebuild CDD and competitor services through separate paths.
     prioritization["service_catalog"] = service_catalog
-    seed_roots, seed_targets = expand_vertical_subservice_seeds(
-        seed_roots,
-        seed_targets,
+    # Each service is also searched by its other names ("search engine optimization"
+    # for "SEO"). Sub-services stay under the service and are not separate seeds.
+    seed_market = str(geo.get("location_name") or geo.get("geographic_focus") or "") or None
+    max_expansions = 0
+    synonym_results = await SeedSynonymResolver(
+        industry=client.industry,
+        market=seed_market,
+        other_services=services,
+    ).resolve_all(services)
+    expansion_results: dict = {}
+    synonym_terms = [s for result in synonym_results.values() for s in result.synonyms]
+    # Seeds are generated PER SERVICE: the service root, its synonyms, and the
+    # candidate keywords / pages / themes that belong to it. Sub-services are not seeds.
+    # `seed_roots` and `seed_targets` below are only the flat union, for the steps that
+    # report on or measure seeds; keywords are fetched per service from that service's
+    # own seeds.
+    service_plans = plan_service_seeds(
+        services,
+        pool_roots=[r for r in candidate_roots if len(str(r).split()) <= 6],
+        pool_targets=candidate_targets,
+        catalog=service_catalog,
         prioritization=prioritization,
-        service_catalog=service_catalog,
+        top_service=top_priority_service_id(prioritization),
+        is_brand=_is_competitor_brand,
+        service_synonyms={name: result.synonyms for name, result in synonym_results.items()},
+        service_subtopics={name: result.terms for name, result in expansion_results.items()},
+        max_expansions=max_expansions,
     )
-    seed_roots = cap_seed_roots_preserving_selected_services(
-        prioritize_top_service_roots(
-            [r for r in seed_roots if len(str(r).split()) <= 6],
-            seed_targets,
-            prioritization,
-        ),
-        seed_targets,
-        selected_services=services,
-        max_seed_roots=max_seed_roots,
-    )
-    seed_targets = {
-        k: v
-        for k, v in seed_targets.items()
-        if any(str(r).lower() == k for r in seed_roots)
-    }
+    synonym_audit = audit_entries(synonym_results, service_plans)
+    synonym_notice = operator_notice(synonym_audit)
+    if synonym_notice:
+        events.append({"type": "system_notice", "content": synonym_notice})
+    expansion_audit = expansion_audit_entries(expansion_results, service_plans)
+    subservice_notice = expansion_notice(expansion_audit)
+    if subservice_notice:
+        events.append({"type": "system_notice", "content": subservice_notice})
+    # Only topics that became seeds count as relevance evidence; one the scope or the
+    # catalog turned away must not widen the gate.
+    subtopic_terms = [t for plan in service_plans for t in plan.expansions_added]
+    seed_roots, seed_targets = flatten_service_plans(service_plans)
 
     pool_limits = resolve_keyword_pool_limits(
         pool_target=pool_target,
-        seed_count=len(seed_roots),
+        # The union is no longer pre-capped; sizing still assumes the capped count.
+        seed_count=min(len(seed_roots), max_seed_roots),
         settings=get_settings(),
     )
     top_service = top_priority_service_id(prioritization)
@@ -1087,43 +1235,51 @@ async def run_search_demand(
         }
     )
 
-    if is_prioritization_confirmed(prioritization) and services:
-        scoped_pages = [
-            t
-            for t in page_terms_from_website(website)
-            if term_matches_selected_services(t, services)
-        ]
-        scoped_themes = [
-            t
-            for t in theme_terms_from_website(website)
-            if term_matches_selected_services(t, services)
-        ]
-        relevance_ctx = build_relevance_context(
-            services=services,
-            cdd_keywords=cdd_keywords,
-            page_terms=scoped_pages,
-            themes=scoped_themes,
-            seeds=seed_roots,
-            competitor_names=competitor_labels,
-            competitor_domains=competitor_domains,
-            brand_name=client.display_name,
-            domain=domain or None,
-            industry=client.industry,
-            geography=str(geo.get("geographic_focus") or "") or None,
-        )
-    else:
-        relevance_ctx = build_relevance_context(
+    def _build_ctx(ctx_seeds: list[str]):
+        """The relevance context for one set of seeds (a single service's, or the union)."""
+        if is_prioritization_confirmed(prioritization) and services:
+            scoped_pages = [
+                t
+                for t in page_terms_from_website(website)
+                if term_matches_selected_services(t, services)
+            ]
+            scoped_themes = [
+                t
+                for t in theme_terms_from_website(website)
+                if term_matches_selected_services(t, services)
+            ]
+            return build_relevance_context(
+                services=services,
+                cdd_keywords=cdd_keywords,
+                page_terms=scoped_pages,
+                themes=scoped_themes,
+                seeds=ctx_seeds,
+                competitor_names=competitor_labels,
+                competitor_domains=competitor_domains,
+                brand_name=client.display_name,
+                domain=domain or None,
+                industry=client.industry,
+                geography=str(geo.get("geographic_focus") or "") or None,
+                service_synonyms=synonym_terms,
+                service_subtopics=subtopic_terms,
+            )
+        return build_relevance_context(
             services=services,
             cdd_keywords=cdd_keywords,
             website=website,
-            seeds=seed_roots,
+            seeds=ctx_seeds,
             competitor_names=competitor_labels,
             competitor_domains=competitor_domains,
             brand_name=client.display_name,
             domain=domain or None,
             industry=client.industry,
             geography=str(geo.get("geographic_focus") or "") or None,
+            service_synonyms=synonym_terms,
+            service_subtopics=subtopic_terms,
         )
+
+    # The union context only answers "is there any business evidence at all?".
+    relevance_ctx = _build_ctx(seed_roots)
 
     # Nothing on file to judge relevance against. Expanding here would spend
     # provider budget on a keyword set no gate can check, so stop before the
@@ -1157,16 +1313,150 @@ async def run_search_demand(
         )
         return events
 
-    seeding = await run_multi_mode_seeding(
-        seed_roots,
+    # Provider calls that need neither the seeded keywords nor the relevance gate
+    # start now and run alongside them: the competitor-page harvest, the client's
+    # own rankings, competitor keywords, the keyword gap and competitor service
+    # trees. Each result is still collected and processed at its original place
+    # below, so the report is the same; only the waiting overlaps.
+    min_volume = int(get_settings().keyword_expand_min_volume or 10)
+    prefetch = _Prefetch()
+    if harvest_seeds is not None:
+        prefetch.start(
+            "harvest",
+            _harvest_competitor_page_keywords(
+                client=client,
+                profile=profile,
+                commercial=commercial,
+                services=services,
+                cdd_keywords=cdd_keywords,
+                website=website,
+                competitors=competitors,
+                competitor_labels=competitor_labels,
+                competitor_domains=competitor_domains,
+                seeds=harvest_seeds,
+                location_code=labs_location_code,
+            ),
+        )
+    if domain:
+        prefetch.start(
+            "ranked_keywords",
+            dataforseo.ranked_keywords(
+                domain,
+                location_code=labs_location_code,
+                language_code=language_code,
+                limit=50,
+                min_volume=min_volume,
+            ),
+        )
+        prefetch.start(
+            "keywords_for_site",
+            dataforseo.keywords_for_site(
+                domain,
+                location_code=labs_location_code,
+                language_code=language_code,
+                limit=50,
+                min_volume=min_volume,
+            ),
+        )
+    prefetch.start(
+        "competitor_keywords",
+        collect_competitor_keywords(
+            client_domain=domain,
+            competitor_domains=competitor_domains,
+            location_code=labs_location_code,
+            language_code=language_code,
+            min_volume=min_volume,
+            limit=40,
+        ),
+    )
+    if competitor_domains:
+        prefetch.start(
+            "keyword_gap",
+            dataforseo.keyword_gap(
+                domain or competitor_domains[0],
+                competitor_domains,
+                location_code=labs_location_code,
+                language_code=language_code,
+            ),
+        )
+    if is_prioritization_confirmed(prioritization) and not prioritization.get("competitor_trees"):
+        prefetch.start(
+            "competitor_trees",
+            discover_competitor_service_trees(competitors, max_competitors=8, max_urls_each=20),
+        )
+
+    # Keywords are fetched per service, from that service's own seeds only. The seed
+    # budget is split across services (every service gets a share), each service is
+    # judged against a relevance context built from ITS seeds, and one service failing
+    # does not stop the others. Three services expand at once; the shared DataForSEO
+    # gate keeps every concurrent call under the account's simultaneous-request limit.
+    seeding = await run_service_scoped_seeding(
+        service_plans,
+        fetch=run_multi_mode_seeding,
+        total_cap=min(max_seed_roots, pool_limits["max_seeds"]),
+        relevance_context_for=lambda plan: _build_ctx(plan.seeds),
+        service_concurrency=3,
         country=country,
-        min_volume=int(get_settings().keyword_expand_min_volume or 10),
-        max_seeds=min(max_seed_roots, pool_limits["max_seeds"]),
+        min_volume=min_volume,
         limit_per_mode=pool_limits["limit_per_mode"],
-        seed_targets=seed_targets,
         location_code=labs_location_code,
         language_code=language_code,
-        relevance_context=relevance_ctx,
+        # Question/research variants per seed widen each pull toward informational
+        # keywords; one resolver per run so every service shares its cache.
+        query_variants=QueryVariantResolver(
+            industry=client.industry, market=seed_market, language=language_code
+        ),
+    )
+    seeding["seed_synonyms"] = synonym_audit
+    seeding["subservice_expansion"] = expansion_audit
+    _mark("expansion")
+
+    # Related-keyword lookups need only the seeds each service actually fetched, so
+    # they start now and run alongside the relevance gate below.
+    _dfs_sem = asyncio.Semaphore(4)
+
+    async def _related(service: str, seed: str) -> tuple[list[dict[str, Any]], list[str]]:
+        async with _dfs_sem:
+            rows, errs = await dataforseo.related_keywords(
+                clean_provider_seed(seed),
+                limit=35,
+                location_code=labs_location_code,
+                language_code=language_code,
+            )
+            for row in rows:
+                if isinstance(row, dict):
+                    row["service"] = service
+                    row["seed"] = seed
+            return rows, errs
+
+    related_pairs = round_robin_seeds(
+        extra_seeds_last(seeding.get("service_runs") or [], service_plans), max_seed_roots
+    ) or [("", r) for r in seed_roots[:max_seed_roots]]
+    if related_pairs:
+        prefetch.start(
+            "related",
+            asyncio.gather(
+                *[_related(svc, s) for svc, s in related_pairs],
+                return_exceptions=True,
+            ),
+        )
+    events.append(
+        {
+            "type": "system_notice",
+            "content": "Seeded per service: "
+            + "; ".join(
+                f"{r['service']} {r['seed_count']} seed(s), {r['keyword_count']} keyword(s)"
+                + (
+                    f" ({(r.get('volume_coverage') or {}).get('unverified')} without measured volume)"
+                    if (r.get("volume_coverage") or {}).get("unverified")
+                    else ""
+                )
+                if r["status"] == "ok"
+                else f"{r['service']} {r['status'].replace('_', ' ')}"
+                for r in seeding.get("service_runs") or []
+            )
+            + ".",
+        }
     )
     provider_errors.extend(seeding.get("provider_errors") or [])
     seed_clusters = list(seeding.get("seed_clusters") or [])
@@ -1203,9 +1493,12 @@ async def run_search_demand(
         services=services,
         cdd_keywords=cdd_keywords,
         geography=str(geo.get("geographic_focus") or geo.get("location_name") or "") or None,
+        prioritization=prioritization,
         competitor_names=competitor_labels,
         competitor_domains=competitor_domains,
+        deadline=phase_deadline,
     )
+    _mark("relevance_gate")
     # The LLM stage returns its own drops with a different reason key; normalize
     # them into the same rejection record (read-only on that module).
     for row in relevance_dropped or []:
@@ -1232,6 +1525,14 @@ async def run_search_demand(
     # verdicts have to be written onto the cluster rows or they vanish here —
     # and the cluster rows are what downstream enforcement actually reads.
     seed_clusters = stamp_relevance_flags(seed_clusters, keyword_dataset)
+    seed_clusters, seed_identification = await identify_multiple_seed_clusters(
+        seed_clusters,
+        services=services,
+        brand_name=client.display_name,
+        industry=client.industry,
+        geography=str(geo.get("geographic_focus") or geo.get("location_name") or "") or None,
+        deadline=phase_deadline,
+    )
     keyword_dataset = flatten_dataset(seed_clusters)
     seeding = {
         **seeding,
@@ -1247,6 +1548,7 @@ async def run_search_demand(
             for c in seed_clusters
             if all(c.get(cls) for cls in ("exact", "phrase", "related", "broad"))
         ),
+        "seed_identification": seed_identification,
     }
     _unjudged = int(relevance_audit.get("quarantined", 0))
     events.append(
@@ -1270,6 +1572,29 @@ async def run_search_demand(
             ),
         }
     )
+    if seed_identification.get("source") != "unchanged":
+        identified = [
+            f"{row['service']} ({len(row.get('seeds') or [])})"
+            for row in (seed_identification.get("services") or [])
+            if isinstance(row, dict)
+        ]
+        via = (
+            "the model"
+            if seed_identification.get("source") == "model"
+            else "keyword themes"
+        )
+        events.append(
+            {
+                "type": "system_notice",
+                "content": (
+                    "Seed identification grouped keywords into "
+                    f"{seed_identification.get('seed_count_after')} seeds "
+                    f"({seed_identification.get('seed_count_before')} before, "
+                    f"via {via})"
+                    + (f": {', '.join(identified)}." if identified else ".")
+                ),
+            }
+        )
     # Everything downstream works from the verified subset. The full dataset
     # (including quarantined rows) is still reported, so nothing is hidden.
     verified_keywords = verified_keywords_only(keyword_dataset)
@@ -1312,6 +1637,12 @@ async def run_search_demand(
                     "traffic_potential": row.get("traffic_potential"),
                     "cpc": row.get("cpc"),
                     "intent": row.get("intent"),
+                    "funnel": row.get("funnel"),
+                    # Keywords kept without measured volume stay flagged downstream.
+                    "volume_status": row.get("volume_status"),
+                    "volume_unverified": bool(row.get("volume_unverified")),
+                    "query_variant": bool(row.get("query_variant")),
+                    "informational_topup": bool(row.get("informational_topup")),
                     "parent_topic": row.get("parent_topic"),
                     "source": row.get("source") or "dataforseo",
                     "match_class": row.get("match_class"),
@@ -1340,23 +1671,60 @@ async def run_search_demand(
         }
     )
 
+    def _assign_rows_to_services(
+        rows: list[dict[str, Any]], source_label: str
+    ) -> list[dict[str, Any]]:
+        """Keep each Labs row on the service it matches, then apply that service's relevance gate."""
+        grouped = partition_keywords_by_service(rows, service_plans)
+        kept_all: list[dict[str, Any]] = []
+        grouped_norms = {
+            _norm_kw(row.get("keyword"))
+            for bucket in grouped.values()
+            for row in bucket
+            if isinstance(row, dict)
+        }
+        for plan in service_plans:
+            bucket = grouped.get(plan.service_id) or []
+            if not bucket:
+                continue
+            kept, excl, audit = filter_relevant_keywords(
+                bucket, _build_ctx(plan.seeds), source_label=source_label
+            )
+            cleaning_audits.append(audit)
+            rejected_keywords.extend(excl)
+            kept_all.extend(kept)
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("keyword"):
+                continue
+            if _norm_kw(row.get("keyword")) not in grouped_norms:
+                rejected_keywords.append(
+                    {**row, "rejection_reason": "irrelevant_to_service", "source": source_label}
+                )
+        return kept_all
+
     # Client + competitor organic keywords (gap signals) via DataForSEO Labs
     # ranked-keywords — this deployment has no SEMrush subscription.
-    if domain:
-        org, e3 = await dataforseo.ranked_keywords(
-            domain,
-            location_code=labs_location_code,
-            language_code=language_code,
-            limit=50,
-            min_volume=int(get_settings().keyword_expand_min_volume or 10),
+    # The seeded set already has volumes. This second pass is skipped when
+    # the turn is nearly out of time so clustering and the report save still run.
+    extra_fetch = _seconds_left() > 240
+    if not extra_fetch:
+        log.info(
+            "keyword_extra_fetch_skipped",
+            seconds_left=round(_seconds_left(), 1),
         )
-        site_kws, e3b = await dataforseo.keywords_for_site(
-            domain,
-            location_code=labs_location_code,
-            language_code=language_code,
-            limit=50,
-            min_volume=int(get_settings().keyword_expand_min_volume or 10),
+        events.append(
+            {
+                "type": "system_notice",
+                "content": (
+                    "Saving the seeded keyword report without a second provider "
+                    "pass so this run finishes inside the time limit."
+                ),
+            }
         )
+    if extra_fetch and domain:
+        # Both were started before expansion; this only collects them.
+        org, e3 = await prefetch.result("ranked_keywords")
+        site_kws, e3b = await prefetch.result("keywords_for_site")
         provider_errors.extend(e3)
         provider_errors.extend(e3b)
         for row in org:
@@ -1377,60 +1745,88 @@ async def run_search_demand(
                 continue
             r["client_position"] = r.get("position")
             pending_org.append(r)
-        kept, _excl, audit = filter_relevant_keywords(
-            pending_org, relevance_ctx, source_label="dataforseo_organic"
-        )
-        cleaning_audits.append(audit)
-        rejected_keywords.extend(_excl)
+        kept = _assign_rows_to_services(pending_org, "dataforseo_organic")
         ahrefs_rows.extend(kept)
     else:
+        prefetch.discard("ranked_keywords")
+        prefetch.discard("keywords_for_site")
         client_kw_map = {}
 
-    for cd in competitor_domains[:4]:
-        corg, e4 = await dataforseo.ranked_keywords(
-            cd,
-            location_code=labs_location_code,
-            language_code=language_code,
-            limit=40,
-            min_volume=int(get_settings().keyword_expand_min_volume or 10),
-        )
-        site_kws, e4b = await dataforseo.keywords_for_site(
-            cd,
-            location_code=labs_location_code,
-            language_code=language_code,
-            limit=40,
-            min_volume=int(get_settings().keyword_expand_min_volume or 10),
-        )
-        provider_errors.extend(e4)
-        provider_errors.extend(e4b)
-        for row in corg:
-            if isinstance(row, dict):
-                row["sources"] = ["ranked_keywords"]
-        for row in site_kws:
-            if isinstance(row, dict):
-                row["sources"] = ["keywords_for_site"]
-        corg = list(corg) + list(site_kws)
-        pending_comp: list[dict[str, Any]] = []
-        for r in corg:
-            kw = str(r.get("keyword") or "")
-            if not kw or is_stale_year_keyword(kw):
-                continue
-            kl = kw.lower()
-            r["gap_flag"] = kl not in client_kw_map
-            r["competitor_domain"] = cd
-            pending_comp.append(r)
-        kept, _excl, audit = filter_relevant_keywords(
-            pending_comp, relevance_ctx, source_label="dataforseo_competitor"
-        )
-        cleaning_audits.append(audit)
-        rejected_keywords.extend(_excl)
-        ahrefs_rows.extend(kept)
+    # Competitor research is fetched once per domain, then each row is kept
+    # only for the service it describes. A solar keyword never lands on roofing.
+    # The fetch was started before expansion; this collects it.
+    if extra_fetch and _seconds_left() > 200:
+        try:
+            comp_rows, comp_errs = await prefetch.result(
+                "competitor_keywords", timeout=max(20.0, min(90.0, _seconds_left() - 200))
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "competitor_keywords_cut_short",
+                seconds_left=round(_seconds_left(), 1),
+            )
+            comp_rows, comp_errs = [], ["competitor_keywords_cut_short"]
+    else:
+        prefetch.discard("competitor_keywords")
+        comp_rows, comp_errs = [], []
+    provider_errors.extend(comp_errs)
+    pending_comp: list[dict[str, Any]] = []
+    for row in comp_rows:
+        kw = str(row.get("keyword") or "")
+        if not kw or is_stale_year_keyword(kw):
+            continue
+        row["gap_flag"] = kw.lower() not in client_kw_map
+        endpoint = str(row.get("dataforseo_endpoint") or "ranked_keywords")
+        row["sources"] = [endpoint]
+        pending_comp.append(row)
+    if pending_comp and "dataforseo" not in providers_used:
+        providers_used.append("dataforseo")
+    ahrefs_rows.extend(_assign_rows_to_services(pending_comp, "dataforseo_competitor"))
+
+    # Collect the competitor-page harvest that ran alongside expansion.
+    if prefetch.has("harvest"):
+        try:
+            page_intel = await prefetch.result("harvest")
+            _store_competitor_page_intel(profile, commercial, page_intel)
+            fresh = scope_competitor_keywords_to_services(
+                list(page_intel.get("keywords") or []), services
+            )
+            if fresh:
+                competitor_page_keywords = fresh
+                competitor_sites = list(page_intel.get("snapshots") or [])
+                harvest_stats = dict(page_intel.get("stats") or {})
+                events.append(
+                    {
+                        "type": "system_notice",
+                        "content": (
+                            f"Competitor harvest: {harvest_stats.get('pages', 0)} pages, "
+                            f"{len(competitor_page_keywords)} volume-qualified keyword(s) "
+                            "for selected services."
+                        ),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 — harvest must not abort keywords
+            log.warning(
+                "competitor_page_reharvest_failed",
+                client_id=str(client.id),
+                error=str(exc)[:200],
+            )
+            events.append(
+                {
+                    "type": "system_notice",
+                    "content": (
+                        "Competitor page harvest failed — falling back to "
+                        "organic keyword gap feeds for competitor signal."
+                    ),
+                }
+            )
 
     # The harvest ran before the client's own rankings were known, so every page
     # keyword was provisionally a gap. Correct that now.
     if competitor_page_keywords:
-        competitor_page_keywords = refresh_gap_flags(
-            competitor_page_keywords, client_kw_map
+        competitor_page_keywords = _assign_rows_to_services(
+            refresh_gap_flags(competitor_page_keywords, client_kw_map),
+            "competitor_page",
         )
         ahrefs_rows.extend(competitor_page_keywords)
     else:
@@ -1445,18 +1841,18 @@ async def run_search_demand(
         ][:40]
 
     # DataForSEO related + volume + KD + gap (location from geographic_focus).
-    # Related-keyword lookups run concurrently — sequential calls blew the turn budget.
-    _dfs_sem = asyncio.Semaphore(4)
-
-    async def _related(seed: str) -> tuple[list[dict[str, Any]], list[str]]:
-        async with _dfs_sem:
-            return await dataforseo.related_keywords(
-                clean_provider_seed(seed), limit=35, location_code=labs_location_code
+    # The related lookups were started right after expansion (see `_related`).
+    if extra_fetch and _seconds_left() > 200 and prefetch.has("related"):
+        try:
+            related_results = await prefetch.result(
+                "related", timeout=max(20.0, min(90.0, _seconds_left() - 200))
             )
-
-    related_results = await asyncio.gather(
-        *[_related(s) for s in seed_roots[:max_seed_roots]], return_exceptions=True
-    )
+        except asyncio.TimeoutError:
+            log.warning("keyword_related_cut_short", seconds_left=round(_seconds_left(), 1))
+            related_results = []
+    else:
+        prefetch.discard("related")
+        related_results = []
     for res in related_results:
         if isinstance(res, BaseException):
             provider_errors.append(f"dataforseo_related_error:{type(res).__name__}")
@@ -1471,18 +1867,18 @@ async def run_search_demand(
                 for row in related
                 if not is_stale_year_keyword(str(row.get("keyword") or ""))
             ]
-            kept, _excl, audit = filter_relevant_keywords(
-                pending_related, relevance_ctx, source_label="dataforseo_related"
-            )
-            cleaning_audits.append(audit)
-            rejected_keywords.extend(_excl)
-            dfs_rows.extend(kept)
+            dfs_rows.extend(_assign_rows_to_services(pending_related, "dataforseo_related"))
 
     all_kw_names = list(
         {
             *(clean_provider_seed(str(r.get("keyword") or "")) for r in ahrefs_rows if r.get("keyword")),
             *(clean_provider_seed(str(r.get("keyword") or "")) for r in dfs_rows if r.get("keyword")),
-            *(clean_provider_seed(s) for s in seed_roots if relevance_ctx.seed_is_supported(s)),
+            # Only seeds that were actually fetched (each service's capped share).
+            *(
+                clean_provider_seed(s)
+                for s in (seeding.get("seeds") or seed_roots)
+                if relevance_ctx.seed_is_supported(s)
+            ),
         }
     )
     # Prefer specific multi-word names for volume lookup.
@@ -1493,12 +1889,22 @@ async def run_search_demand(
         [k for k in all_kw_names if k and not is_stale_year_keyword(str(k))],
         key=lambda k: (-len(str(k).split()), str(k).lower()),
     )
-    volumes, kds, e6 = await measured_rows_for_pool(
-        all_kw_names,
-        location_code=location_code,
-        language_code=language_code,
-        labs_location_code=labs_location_code,
-    )
+    if extra_fetch and _seconds_left() > 200 and all_kw_names:
+        try:
+            volumes, kds, e6 = await asyncio.wait_for(
+                measured_rows_for_pool(
+                    all_kw_names,
+                    location_code=location_code,
+                    language_code=language_code,
+                    labs_location_code=labs_location_code,
+                ),
+                timeout=max(20.0, min(90.0, _seconds_left() - 180)),
+            )
+        except asyncio.TimeoutError:
+            log.warning("keyword_metrics_cut_short", seconds_left=round(_seconds_left(), 1))
+            volumes, kds, e6 = [], [], ["keyword_metrics_cut_short"]
+    else:
+        volumes, kds, e6 = [], [], []
     provider_errors.extend(e6)
     if volumes:
         if "dataforseo" not in providers_used:
@@ -1516,12 +1922,9 @@ async def run_search_demand(
     rejected_keywords.extend(_excl)
     dfs_rows.extend(kept_kds)
 
-    if competitor_domains:
-        gap_rows, e8 = await dataforseo.keyword_gap(
-            domain or competitor_domains[0],
-            competitor_domains,
-            location_code=labs_location_code,
-        )
+    if extra_fetch and competitor_domains and _seconds_left() > 180:
+        # Started before expansion; this collects it.
+        gap_rows, e8 = await prefetch.result("keyword_gap")
         provider_errors.extend(e8)
         if gap_rows:
             if "dataforseo" not in providers_used:
@@ -1532,13 +1935,9 @@ async def run_search_demand(
                     continue
                 row["gap_flag"] = True
                 pending_gap.append(row)
-            kept, _excl, audit = filter_relevant_keywords(
-                pending_gap, relevance_ctx, source_label="dataforseo_gap"
-            )
-            cleaning_audits.append(audit)
-            rejected_keywords.extend(_excl)
-            dfs_rows.extend(kept)
+            dfs_rows.extend(_assign_rows_to_services(pending_gap, "dataforseo_gap"))
 
+    _mark("provider_enrichment")
     # Phase 3 stores the pull under backlink_summary.summary. A homepage
     # estimate is labelled and is not used as a Domain Rating in ranking.
     authority, authority_source = _authority_for_ranking(website, competitive)
@@ -1627,7 +2026,7 @@ async def run_search_demand(
     comps_set = {d.lower().removeprefix("www.") for d in competitor_domains}
 
     # SERP lookups run concurrently — one per target keyword
-    _serp_sem = asyncio.Semaphore(4)
+    _serp_sem = asyncio.Semaphore(12)
 
     async def _serp(kw: str) -> tuple[list[dict[str, Any]], list[str]]:
         async with _serp_sem:
@@ -1635,11 +2034,22 @@ async def run_search_demand(
                 kw, depth=8, location_code=location_code
             )
 
-    serp_results = await asyncio.gather(
-        *[_serp(str(r.get("keyword") or "").strip()) for r in serp_targets],
-        return_exceptions=True,
-    )
+    if serp_targets and _seconds_left() > 160:
+        try:
+            serp_results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[_serp(str(r.get("keyword") or "").strip()) for r in serp_targets],
+                    return_exceptions=True,
+                ),
+                timeout=max(15.0, min(45.0, _seconds_left() - 140)),
+            )
+        except asyncio.TimeoutError:
+            log.warning("keyword_serp_cut_short", seconds_left=round(_seconds_left(), 1))
+            serp_results = []
+    else:
+        serp_results = []
 
+    _mark("serp_check")
     for row, res in zip(serp_targets, serp_results):
         kw = str(row.get("keyword") or "").strip()
         if isinstance(res, BaseException):
@@ -1813,7 +2223,12 @@ async def run_search_demand(
         relevance_context=relevance_ctx,
         location_code=location_code,
         language_code=language_code,
+        use_llm=time.monotonic() < phase_deadline,
+        # Primary selection weighs difficulty against what this site can rank
+        # for, but only on a measured Domain Rating, never an estimate.
+        site_strength=float(authority) if authority is not None and authority_source == "provider" else None,
     )
+    _mark("clustering")
     cluster_report["service_clusters"] = service_clusters
     cluster_report["subservice_competitor_matrix"] = subservice_competitor_matrix
     cluster_report["services_clustered"] = len(service_clusters)
@@ -1846,7 +2261,9 @@ async def run_search_demand(
         services=services,
         cdd_keywords=cdd_keywords,
         geography=str(geo.get("geographic_focus") or geo.get("location_name") or "") or None,
+        deadline=phase_deadline,
     )
+    _mark("cluster_coherence")
     # Keep rejected clusters in the report (stamped) so operators can see why;
     # only coherent clusters continue into topic / CDP paths.
     cluster_report["clusters"] = kept_clusters + rejected_clusters
@@ -1917,24 +2334,38 @@ async def run_search_demand(
     clusters = clusters_for_cdp(cluster_report)
 
     # Draft topics only for clusters that do not already exist on the sitemap
-    topic_plan = await run_create_topic_for_new_clusters(
-        message=message,
-        industry=client.industry,
-        audience=audience,
-        topic_seed=str(topic_seed),
-        topic_kw_pool=topic_kw_pool,
-        keyword_dataset=verified_keywords,
-        clusters=kept_clusters,
-        competitor_domains=competitor_domains,
-        competitor_names=competitor_labels,
-        geographic_focus=str(geo.get("geographic_focus") or ""),
-        location_name=str(geo.get("location_name") or ""),
-        competitor_context=competitor_context_blob(competitors, competitor_sites, geo),
-        products=products,
-        cdd_keywords=cdd_keywords,
-        pain_points=pain_points,
-        serp_by_kw=serp_by_kw,
-    )
+    if _seconds_left() > 150:
+        try:
+            topic_plan = await asyncio.wait_for(
+                run_create_topic_for_new_clusters(
+                    message=message,
+                    industry=client.industry,
+                    audience=audience,
+                    topic_seed=str(topic_seed),
+                    topic_kw_pool=topic_kw_pool,
+                    keyword_dataset=verified_keywords,
+                    clusters=kept_clusters,
+                    competitor_domains=competitor_domains,
+                    competitor_names=competitor_labels,
+                    geographic_focus=str(geo.get("geographic_focus") or ""),
+                    location_name=str(geo.get("location_name") or ""),
+                    competitor_context=competitor_context_blob(
+                        competitors, competitor_sites, geo
+                    ),
+                    products=products,
+                    cdd_keywords=cdd_keywords,
+                    pain_points=pain_points,
+                    serp_by_kw=serp_by_kw,
+                ),
+                timeout=max(30.0, min(120.0, _seconds_left() - 90)),
+            )
+        except asyncio.TimeoutError:
+            log.warning("create_topic_cut_short", seconds_left=round(_seconds_left(), 1))
+            topic_plan = {}
+    else:
+        log.info("create_topic_skipped", seconds_left=round(_seconds_left(), 1))
+        topic_plan = {}
+    _mark("topic_plan")
     topic_plan["sitemap_classification"] = {
         "existing_topic_count": sitemap_classification.get("existing_topic_count"),
         "existing_review_count": sitemap_classification.get("existing_review_count"),
@@ -2045,6 +2476,20 @@ async def run_search_demand(
             "target_type_counts": seeding.get("target_type_counts") or {},
             "note": seeding.get("note"),
             "seed_count": len(seed_clusters),
+            "seed_identification": seeding.get("seed_identification") or {},
+            # Per service: synonyms the model suggested, which became seeds (tagged
+            # seed_origin="synonym"), which were skipped and why, or why none came.
+            "seed_synonyms": seeding.get("seed_synonyms") or [],
+            # Per service: sub-service topics the model suggested, which became seeds
+            # (target_type="sub_service", seed_origin="subservice_expansion"), which were
+            # skipped and why (duplicate, in_catalog, excluded_by_scope, ...).
+            "subservice_expansion": seeding.get("subservice_expansion") or [],
+            # measured / estimated / unverified volume, funnel mix, and per seed the
+            # informational share before and after the variant pull and top-up.
+            "volume_coverage": seeding.get("volume_coverage") or {},
+            "funnel_counts": seeding.get("funnel_counts") or {},
+            "funnel_coverage": seeding.get("funnel_coverage") or [],
+            "informational_topups": seeding.get("informational_topups") or 0,
             "seeded_keyword_count": seeding.get("keyword_count") or len(keyword_dataset),
             "seeds_with_all_classes": seeding.get("seeds_with_all_classes", 0),
             "class_coverage": seeding.get("class_coverage") or [],
@@ -2073,7 +2518,7 @@ async def run_search_demand(
         "keyword_pool_target": pool_target,
         "keyword_pool_limits": pool_limits,
         "keyword_pool_actual": len(keyword_dataset),
-        "skills_used": ["keyword_clustering", "keyword_seeding", "create_topic"],
+        "skills_used": ["keyword_clustering", "keyword_seeding", "create_topic", "seo-dataforseo"],
         "note": (
             "Sitemap inventory first, then multi-mode seeding, clustering with "
             "intent/funnel, classify clusters against the sitemap (existing vs new), "
@@ -2130,16 +2575,26 @@ async def run_search_demand(
         if stored["reopened_reason"]:
             prioritization["reopened_reason"] = stored["reopened_reason"]
     if is_prioritization_confirmed(prioritization) or prioritization.get("reopened_reason"):
-        if is_prioritization_confirmed(prioritization) and not prioritization.get("competitor_trees"):
+        if (
+            is_prioritization_confirmed(prioritization)
+            and not prioritization.get("competitor_trees")
+            and _seconds_left() > 70
+        ):
             try:
-                prioritization["competitor_trees"] = await asyncio.wait_for(
-                    discover_competitor_service_trees(
-                        competitors,
-                        max_competitors=3,
-                        max_urls_each=20,
-                    ),
-                    timeout=45,
-                )
+                # Usually started before expansion and long finished by now.
+                if prefetch.has("competitor_trees"):
+                    prioritization["competitor_trees"] = await prefetch.result(
+                        "competitor_trees", timeout=45
+                    )
+                else:
+                    prioritization["competitor_trees"] = await asyncio.wait_for(
+                        discover_competitor_service_trees(
+                            competitors,
+                            max_competitors=8,
+                            max_urls_each=20,
+                        ),
+                        timeout=45,
+                    )
             except asyncio.TimeoutError:
                 log.warning(
                     "competitor_service_trees_timeout",
@@ -2150,6 +2605,9 @@ async def run_search_demand(
         commercial["service_prioritization"] = prioritization
         profile.commercial_scope = commercial
 
+    _mark("saved")
+    summary["timings"] = dict(stage_timings)
+    log.info("search_demand_timings", client_id=str(client.id), **stage_timings)
     profile.search_demand_summary = summary
     profile.search_demand_status = "pending_signoff"
 
@@ -2253,4 +2711,6 @@ async def run_search_demand(
             ),
         )
     )
+    # A prefetched call whose step was skipped (time budget, no competitors).
+    prefetch.discard_all()
     return events

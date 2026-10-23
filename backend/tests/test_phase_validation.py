@@ -458,6 +458,120 @@ async def test_technically_valid_but_poor_quality():
     assert any(c.parameter == "quality" for c in result.failed_checks())
 
 
+@pytest.mark.asyncio
+async def test_every_agent_reports_four_qa_layers():
+    client = _client()
+    profile = _profile()
+    for agent_key in PHASE_CRITERIA:
+        result = await validate_phase_output(
+            client=client,
+            profile=profile,
+            agent_key=agent_key,
+            events=_card(agent_key, note="layer probe"),
+            skip_semantic=True,
+        )
+        assert [row["id"] for row in result.layer_report()] == [
+            "contract",
+            "honesty",
+            "scope",
+            "judgement",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_invented_metric_fails_the_honesty_layer():
+    client = _client()
+    profile = _profile()
+    result = await validate_phase_output(
+        client=client,
+        profile=profile,
+        agent_key="content_strategy",
+        events=_card(
+            "content_strategy",
+            priority_queue=[{"title": "Rooftop solar", "volume_basis": "invented"}],
+        ),
+        skip_semantic=True,
+    )
+    honesty = next(row for row in result.layer_report() if row["id"] == "honesty")
+    assert honesty["status"] == "failed"
+    assert any(c.check_id == "qa_metric_honesty" for c in result.failed_checks())
+
+
+def test_a_later_deliverable_may_grow_but_not_shrink():
+    from app.services.phase_validation.breadth import deliverable_breadth, is_narrower
+
+    wide = {"priority_queue": [{"title": "A"}, {"title": "B"}, {"title": "C"}]}
+    same = {"priority_queue": [{"title": "A fixed"}, {"title": "B fixed"}, {"title": "C fixed"}]}
+    thin = {"priority_queue": [{"title": "A"}]}
+    assert deliverable_breadth(wide) == 3
+    assert not is_narrower(wide, same)
+    assert is_narrower(wide, thin)
+    assert not is_narrower({}, thin)
+
+
+@pytest.mark.asyncio
+async def test_a_narrower_rerun_keeps_the_wider_deliverable(db_session):
+    from app.models import Client, ClientDigitalProfile
+    from app.services.phase_validation.apply import run_phase_with_validation
+
+    client = Client(
+        legal_name="Acme Solar Pty Ltd",
+        display_name="Acme Solar",
+        primary_url="https://acmesolar.example",
+        industry="residential solar",
+    )
+    db_session.add(client)
+    await db_session.flush()
+    profile = ClientDigitalProfile(
+        client_id=client.id,
+        seo_strategy_summary={
+            "priority_queue": [
+                {"title": "Rooftop solar"},
+                {"title": "Battery storage"},
+                {"title": "EV charger"},
+            ]
+        },
+        seo_strategy_status="complete",
+    )
+    db_session.add(profile)
+    await db_session.flush()
+
+    async def thin_runner(db, *, client, session_id, user_id, message):
+        _ = client, session_id, user_id, message
+        profile.seo_strategy_summary = {"priority_queue": [{"title": "Rooftop solar"}]}
+        profile.seo_strategy_status = "pending_signoff"
+        await db.flush()
+        return _card("content_strategy", priority_queue=[{"title": "Rooftop solar"}])
+
+    import app.services.phase_validation.apply as apply_mod
+    import app.services.phase_validation.service as svc_mod
+
+    original = svc_mod.validate_phase_output
+
+    async def validate_no_semantic(**kwargs):
+        kwargs["skip_semantic"] = True
+        return await original(**kwargs)
+
+    apply_mod.validate_phase_output = validate_no_semantic
+    try:
+        events = await run_phase_with_validation(
+            db_session,
+            runner=thin_runner,
+            client=client,
+            profile=profile,
+            session_id=uuid4(),
+            user_id=uuid4(),
+            agent_key="content_strategy",
+            message="Run content strategy again",
+        )
+    finally:
+        apply_mod.validate_phase_output = original
+
+    titles = [row["title"] for row in profile.seo_strategy_summary["priority_queue"]]
+    assert titles == ["Rooftop solar", "Battery storage", "EV charger"]
+    assert any("wider deliverable was kept" in str(ev.get("content") or "") for ev in events)
+
+
 def test_phase_specific_parameters_differ():
     tracking_params = set(list_applicable_parameters("tracking_access_agent"))
     demand_params = set(list_applicable_parameters("search_demand"))
@@ -582,6 +696,22 @@ async def test_website_off_domain_inventory_critical():
         c.check_id == "website_inventory" and c.severity == CheckSeverity.CRITICAL.value
         for c in checks
     )
+
+
+def test_content_strategy_content_plan_satisfies_priority_queue():
+    checks = run_deterministic_checks(
+        agent_key="content_strategy",
+        output={
+            "content_plan": [
+                {"title": "Local SEO guide", "from_phase5_topic": True, "priority": "Quick win"}
+            ],
+            "content_calendar": [{"week": 1}],
+        },
+        company_ctx={"display_name": "Click Trends", "industry": "digital marketing"},
+        prior={"search_demand_summary": {"topic_plan": [{"title": "Local SEO guide"}]}},
+    )
+    assert any(c.check_id == "required_key:priority_queue" and c.status == "passed" for c in checks)
+    assert not any(c.check_id == "required_key:priority_queue" and c.status == "failed" for c in checks)
 
 
 def test_website_inventory_from_nested_tabs_passes():
@@ -1318,3 +1448,100 @@ async def test_search_demand_surfaces_validation_report(db_session):
     ]
     assert demand_cards
     assert demand_cards[-1]["payload"].get("validation_blocked_approve") is not True
+
+
+@pytest.mark.asyncio
+async def test_semantic_reject_keeps_approve_when_competitors_are_real(db_session):
+    """A semantic QC disagreement must not hide Approve on a real landscape."""
+    import app.services.phase_validation.apply as apply_mod
+    from app.models import Client, ClientDigitalProfile
+    from app.services.phase_validation.apply import run_phase_with_validation
+
+    client = Client(
+        legal_name="Click Trends",
+        display_name="Click Trends",
+        primary_url="https://clicktrends.com.au",
+        industry="digital marketing",
+    )
+    db_session.add(client)
+    await db_session.flush()
+    profile = ClientDigitalProfile(client_id=client.id)
+    db_session.add(profile)
+    await db_session.flush()
+
+    async def runner(db, *, client, session_id, user_id, message):
+        _ = db, client, session_id, user_id, message
+        profile.competitor_status = "pending_signoff"
+        profile.competitive_landscape_summary = {
+            "competitors": [
+                {"name": "Digital8", "url": "https://digital8.com.au"},
+            ],
+            "scorecards": [
+                {"name": "Digital8", "url": "https://digital8.com.au", "tier": 2, "composite": 61},
+            ],
+            "client_baseline_maturity": 40,
+        }
+        return [
+            {
+                "type": "structured_card",
+                "payload": {
+                    "card_type": "competitor_landscape",
+                    "agent_key": "competitor_market_agent",
+                    "actions": ["approve"],
+                    "title": "Competitor landscape",
+                },
+            }
+        ]
+
+    original = apply_mod.validate_phase_output
+
+    async def semantic_reject(**kwargs):
+        _ = kwargs
+        return ValidationResult(
+            agent_key="competitor_market_agent",
+            phase_label="Competitor & Market Analysis",
+            iteration=1,
+            decision=ValidationDecision.REJECT.value,
+            summary="Geographic peers look weak.",
+            checks=[
+                CheckResult(
+                    check_id="geographic_market_alignment_01",
+                    parameter="geographic_market_alignment",
+                    category="geographic_market_alignment",
+                    status=CheckStatus.FAILED.value,
+                    severity=CheckSeverity.MAJOR.value,
+                    message="One peer is outside the home market.",
+                    source="semantic",
+                )
+            ],
+        )
+
+    apply_mod.validate_phase_output = semantic_reject
+    try:
+        events = await run_phase_with_validation(
+            db_session,
+            runner=runner,
+            client=client,
+            profile=profile,
+            session_id=uuid4(),
+            user_id=uuid4(),
+            agent_key="competitor_market_agent",
+            message="Fetch competitors",
+        )
+    finally:
+        apply_mod.validate_phase_output = original
+
+    assert profile.competitor_status == "pending_signoff"
+    cards = [
+        ev
+        for ev in events
+        if (ev.get("payload") or {}).get("card_type") == "competitor_landscape"
+    ]
+    assert cards
+    assert "approve" in (cards[-1]["payload"].get("actions") or [])
+    assert cards[-1]["payload"].get("validation_blocked_approve") is not True
+    statuses = [
+        ev for ev in events if ev.get("type") == "phase_status"
+    ]
+    assert statuses
+    assert statuses[-1]["payload"]["competitor_status"] == "pending_signoff"

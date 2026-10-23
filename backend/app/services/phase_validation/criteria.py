@@ -325,7 +325,12 @@ PHASE_CRITERIA: dict[str, PhaseCriteria] = {
             "commercial_scope",
             "seo_strategy_summary",
         ),
-        deterministic_checks=("output_present", "production_one_page", "production_action_fit"),
+        deterministic_checks=(
+            "output_present",
+            "production_one_page",
+            "production_action_fit",
+            "production_sub_service_scope",
+        ),
         never_present_notes="Batch drafts; briefing unlocked plan; generic off-brand content.",
         success_looks_like="Briefs match roadmap; draft aligned to company voice/services.",
         downstream_risk="Wrong draft flows into on-page and publishing.",

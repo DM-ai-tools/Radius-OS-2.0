@@ -26,6 +26,7 @@ async def run_content_audit(
 ) -> list[dict]:
     _ = skill_system_preamble("content_audit")
     skill_chars = len(load_skill("content_audit") or "")
+    dataforseo_chars = len(load_skill("seo_dataforseo") or "")
     _ = user_id
     _ = message
 
@@ -59,6 +60,7 @@ async def run_content_audit(
     demand = dict(profile.search_demand_summary or {})
     has_inventory_signal = bool(
         ia.get("target_url_tree")
+        or strategy.get("content_plan")
         or strategy.get("priority_queue")
         or strategy.get("content_gaps")
         or website.get("sample_urls")
@@ -100,6 +102,7 @@ async def run_content_audit(
     )
     summary["generated_at"] = datetime.now(timezone.utc).isoformat()
     summary.setdefault("skills_loaded", {})["content_audit"] = skill_chars
+    summary["skills_loaded"]["seo-dataforseo"] = dataforseo_chars
 
     if summary.get("blocked"):
         profile.content_audit_status = "not_started"

@@ -295,9 +295,13 @@ async def submit_questionnaire(
     )
     await db.flush()
 
-    ai_filled = await _fill_discovery_gaps(
-        db, client_id=client_id, answered=answered, user_id=user.id
-    )
+    from app.services.api_meter import api_meter_context
+
+    # The AI gap-fill is Discovery spend for this client; tag it for the cost tracker.
+    async with api_meter_context(client_id=client_id, agent_key="discovery_agent"):
+        ai_filled = await _fill_discovery_gaps(
+            db, client_id=client_id, answered=answered, user_id=user.id
+        )
 
     from app.agents.discovery import build_discovery_signoff_events
 

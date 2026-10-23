@@ -4,7 +4,7 @@ from uuid import UUID
 
 import bcrypt
 from cryptography.fernet import Fernet
-from jose import JWTError, jwt
+from jose import ExpiredSignatureError, JWTError, jwt
 
 from app.config import get_settings
 
@@ -36,9 +36,15 @@ def create_access_token(
     return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
 
 
+class TokenExpired(ValueError):
+    """Access token was signed correctly and then passed its exp claim."""
+
+
 def decode_access_token(token: str) -> dict[str, Any]:
     try:
         return jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
+    except ExpiredSignatureError as exc:
+        raise TokenExpired("Session expired") from exc
     except JWTError as exc:
         raise ValueError("Invalid token") from exc
 

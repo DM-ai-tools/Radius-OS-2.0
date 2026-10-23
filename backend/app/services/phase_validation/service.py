@@ -16,6 +16,7 @@ from app.services.phase_validation.criteria import (
     list_applicable_parameters,
 )
 from app.services.phase_validation.deterministic import run_deterministic_checks
+from app.services.phase_validation.layers import stamp_layers
 from app.services.phase_validation.schema import (
     CheckResult,
     CheckSeverity,
@@ -51,6 +52,7 @@ def _output_has_deliverable(output: dict[str, Any]) -> bool:
         "pages",
         "pages_found",
         "topic_plan",
+        "content_plan",
         "priority_queue",
         "discovered_urls",
         "status_samples",
@@ -194,6 +196,23 @@ async def validate_phase_output(
         validator_error = err
 
     checks = _soften_missing_payload_failures(checks, output)
+    stamp_layers(checks)
+    if not any(check.layer == "judgement" for check in checks):
+        checks.append(
+            CheckResult(
+                check_id="judgement_skipped",
+                parameter="quality",
+                category="quality",
+                status=CheckStatus.SKIPPED.value,
+                severity=CheckSeverity.INFO.value,
+                message=(
+                    "Judgement layer did not run. Contract, honesty, and scope "
+                    "checks still apply."
+                ),
+                source="semantic",
+                layer="judgement",
+            )
+        )
     decision = decide_from_checks(checks, validator_error=validator_error)
 
     # Unavailable semantic with only deterministic passes → treat as pass_with_warnings

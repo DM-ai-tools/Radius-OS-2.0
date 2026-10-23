@@ -293,7 +293,7 @@ def build_accuracy_grounding(
         or mkt.get("geographic_focus")
         or mkt.get("location")
         or ""
-    ).strip()
+    ).strip().rstrip(".").strip()  # stored geography often ends with "."; sentences add their own
     products = _list_str(
         intake.get("products")
         or commercial.get("products")
@@ -317,7 +317,7 @@ def build_accuracy_grounding(
         "Do not restate competitor SERP titles — answer the same query with a distinct angle.",
         "Use only related keywords supplied below; never invent extra target terms.",
         "Honour out_of_scope exactly.",
-        "Mark any unsourced number/date/price/study with [VERIFY].",
+        "Do not write [VERIFY] or [AUTHOR INPUT REQUIRED]. If a number, date, price, or study was not supplied, leave it out.",
     ]
     if geo:
         rules.append(f"Ground examples and audience in {geo} when relevant; do not invent other markets.")

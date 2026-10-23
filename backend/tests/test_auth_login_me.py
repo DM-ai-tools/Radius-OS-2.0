@@ -8,7 +8,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.models import Role, User
-from app.security import hash_password
+from app.security import create_access_token, hash_password
 
 
 async def _make_active_user(db_session, *, email: str, password: str, role_name: str) -> User:
@@ -150,3 +150,17 @@ async def test_me_rejects_garbage_token(api_client):
         "/api/v1/auth/me", headers={"Authorization": "Bearer not-a-real-token"}
     )
     assert resp.status_code == 401
+    assert resp.json()["detail"] == "Invalid token"
+
+
+async def test_me_rejects_expired_token(api_client, db_session):
+    user = await _make_active_user(
+        db_session,
+        email="expired-token@example.com",
+        password="correct-horse-1",
+        role_name="client_success_manager",
+    )
+    token = create_access_token(str(user.id), expires_minutes=-1)
+    resp = await api_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Session expired"

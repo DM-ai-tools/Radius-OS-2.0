@@ -16,7 +16,6 @@ from app.integrations import wordpress
 from app.integrations.wordpress import WordPressConnection
 from app.services.publish_preview import (
     build_content_html,
-    build_draft_site_preview,
     build_page_preview,
     draft_body_markdown,
     markdown_to_content_html,
@@ -437,6 +436,24 @@ Body copy here.
     assert "Body copy here" in body
 
 
+def test_draft_body_markdown_drops_verify_markers_from_the_page():
+    md = """# Title
+
+## Review queue — resolve before publishing
+- [ ] [VERIFY] — facts, figures, citations
+
+---
+
+# Title
+
+Prices start at $99 [VERIFY]. A second claim [VERIFY: source missing] stays factual.
+"""
+    body = draft_body_markdown(md)
+    assert "[VERIFY" not in body
+    assert "Prices start at $99." in body
+    assert "stays factual." in body
+
+
 def test_markdown_to_content_html_escapes_and_structures():
     html_out = markdown_to_content_html("## Hello\n\nPara **bold**.\n\n- one\n- two")
     assert "<h2>Hello</h2>" in html_out
@@ -498,95 +515,6 @@ def test_display_meta_strips_stringified_audience_dict():
     assert _display_meta(ugly) == "Website Conversion Optimisation"
     assert "Founder" in _display_meta({"primary": {"job_titles": ["Founder"], "age_range": "32-50"}})
     assert "32" in _display_meta({"primary": {"job_titles": ["Founder"], "age_range": "32-50"}})
-
-
-@pytest.mark.asyncio
-async def test_build_draft_site_preview_uses_client_brand(monkeypatch):
-    draft = {
-        "title": "SEO Services",
-        "url": "/seo-services/",
-        "meta_description": "Professional SEO help.",
-        "markdown": "---\n\n# SEO Services\n\n## Why it matters\n\nWe help you grow.",
-    }
-
-    async def fake_brand(_url):
-        return BRAND_OK
-
-    async def fake_scrape(_url):
-        return {"available": True, "url": "https://acme.example/", "markdown": "# Home\n\n## Services"}
-
-    monkeypatch.setattr("app.integrations.brandfetch.fetch_brand", fake_brand)
-    monkeypatch.setattr("app.integrations.firecrawl.scrape_page", fake_scrape)
-
-    async def no_wp(_url):
-        return {"available": False, "source": "wordpress"}
-
-    monkeypatch.setattr("app.services.wp_site_design.fetch_wordpress_design", no_wp)
-
-    out = await build_draft_site_preview(
-        client_name="Acme",
-        primary_url="https://acme.example",
-        draft=draft,
-        site_architecture={},
-    )
-    assert out["preview_html"].startswith("<!doctype html>")
-    assert "SITE PREVIEW" in out["preview_html"]
-    assert "Why it matters" in out["preview_html"]
-    assert out["brand_applied"] is True
-
-
-@pytest.mark.asyncio
-async def test_site_preview_uses_wordpress_kit_over_brandfetch(monkeypatch):
-    draft = {
-        "title": "SEO Services",
-        "url": "/seo-services/",
-        "meta_description": "Professional SEO help.",
-        "markdown": "# SEO Services\n\nA real draft.",
-    }
-
-    async def fake_brand(_url):
-        return {"available": True, "primary_color": "#111111", "font": {"name": "Brandfetch Font"}, "palette": []}
-
-    async def fake_scrape(_url):
-        return {"available": False}
-
-    async def fake_wp(_url):
-        return {
-            "available": True,
-            "source": "wordpress",
-            "kit_id": "7",
-            "primary_color": "#6EC1E4",
-            "font": "Manrope",
-            "colors": {"primary": "#6EC1E4", "accent": "#61CE70"},
-            "stylesheets": ["https://clicktrends.com.au/wp-content/uploads/elementor/css/post-7.css"],
-            "header_html": '<header class="site-header">Click Trends</header>',
-            "footer_html": "<footer>Footer</footer>",
-            "chrome": True,
-        }
-
-    async def no_capture(_url):
-        return {"available": False, "reasons": ["context_dev_not_configured"], "design_md": ""}
-
-    monkeypatch.setattr("app.integrations.brandfetch.fetch_brand", fake_brand)
-    monkeypatch.setattr("app.integrations.firecrawl.scrape_page", fake_scrape)
-    monkeypatch.setattr("app.services.wp_site_design.fetch_wordpress_design", fake_wp)
-    monkeypatch.setattr("app.services.design_capture.capture_page_design", no_capture)
-
-    out = await build_draft_site_preview(
-        client_name="Click Trends",
-        primary_url="https://clicktrends.com.au",
-        draft=draft,
-    )
-    html = out["preview_html"]
-    assert out["design_source"] == "wordpress"
-    assert "#6EC1E4" in html
-    assert "#111111" not in html
-    assert "elementor-kit-7" in html
-    assert "post-7.css" in html
-    assert "site-header" in html
-    assert "<footer>" in html
-    assert "Manrope" in html
-    assert out["design_fallback"] is None
 
 
 def test_brandfetch_fills_missing_wordpress_tokens():

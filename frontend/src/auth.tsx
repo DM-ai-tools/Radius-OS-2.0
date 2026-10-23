@@ -43,6 +43,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
+    function onExpired() {
+      localStorage.removeItem(TOKEN_KEY);
+      setToken(null);
+      setUser(null);
+    }
+    window.addEventListener("radius-auth-expired", onExpired);
+    return () => window.removeEventListener("radius-auth-expired", onExpired);
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!token) {

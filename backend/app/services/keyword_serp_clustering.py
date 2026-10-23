@@ -21,9 +21,9 @@ from app.logging_config import get_logger
 
 log = get_logger("keyword_serp_clustering")
 
-# Shared results needed before two head terms are treated as one query. Three
-# of the top ten is the threshold the SEO literature settles on; below it,
-# overlap is mostly incidental big-brand pages.
+# Shared results needed before two head terms are one query. Four of the top
+# ten (40%) is the usual line: below it, overlap is mostly incidental
+# big-brand pages, and the two keywords need different URLs.
 DEFAULT_MIN_SHARED = 4
 # Live SERP is one HTTP call per keyword — keep the head small enough that
 # Phase 5 does not stall for minutes after metrics already finished.
@@ -227,6 +227,8 @@ def merge_clusters_by_serp_overlap(
         if existing is None:
             head = dict(cluster)
             head["keywords"] = list(cluster.get("keywords") or [])
+            # Keywords proven to share one SERP: same-page variants for roles.
+            head["serp_group"] = list(groups[index])
             merged[index] = head
             out.append(head)
             continue
@@ -237,6 +239,13 @@ def merge_clusters_by_serp_overlap(
                 existing.setdefault("keywords", []).append(row)
                 seen.add(_norm(row.get("keyword")))
         _carry_worst_verdict(existing, cluster)
+        # The folded cluster's true size (not just its displayed rows) moves
+        # with it, or the keyword accounting would come up short.
+        existing["keyword_count"] = int(
+            existing.get("keyword_count") or len(existing.get("keywords") or [])
+        ) + int(cluster.get("keyword_count") or len(cluster.get("keywords") or []))
+        if isinstance(cluster.get("est_traffic"), (int, float)):
+            existing["est_traffic"] = int(existing.get("est_traffic") or 0) + int(cluster["est_traffic"])
         existing["serp_validated"] = True
         merged_from = list(existing.get("serp_merged_from") or [])
         merged_from.append(cluster.get("cluster_name") or cluster.get("primary_keyword"))
@@ -316,6 +325,7 @@ async def refine_clusters_with_serp(
         {
             "skipped": False,
             "head_terms": len(head),
+            "checked_keywords": list(head),
             "clusters_after": len(refined),
             "errors": errors[:10],
             "groups_found": sum(1 for g in groups if len(g) > 1),

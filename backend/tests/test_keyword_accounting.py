@@ -50,15 +50,14 @@ def test_orphans_keep_their_classification_and_an_exclusion_reason():
     assert report["keyword_accounting"]["orphan_reasons"]["single_low_value_keyword"] == 1
 
 
-def test_cluster_keyword_count_is_true_membership_not_the_display_cap():
-    """Reporting the capped row count made keywords vanish from the audit."""
+def test_different_keywords_are_not_one_cluster_just_to_fill_a_cap():
+    """Each numbered option is its own search, so none of them share a page."""
     rows = _rows([(f"crm pricing option {i}", 100 + i) for i in range(60)])
     report = build_clusters_deterministic(rows)
 
-    biggest = max(report["clusters"], key=lambda c: c["keyword_count"])
-    assert biggest["keyword_count"] > biggest["keywords_shown"]
-    assert biggest["keywords_truncated"] == biggest["keyword_count"] - biggest["keywords_shown"]
     assert report["keyword_accounting"]["balanced"] is True
+    assert report["keyword_accounting"]["clustered_count"] == len(rows)
+    assert max(c["keyword_count"] for c in report["clusters"]) == 1
 
 
 def test_every_cluster_keyword_row_has_intent_and_funnel():

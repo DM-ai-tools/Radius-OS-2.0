@@ -77,6 +77,23 @@ def test_an_explicit_content_type_is_never_overridden_by_service(label):
     assert got != "service", f"explicit {label!r} was overridden -> {got!r}"
 
 
+def test_a_non_price_query_is_not_forced_onto_a_pricing_page():
+    assert (
+        resolve_page_type(
+            {
+                "keyword": "seo company near me",
+                "intent": "transactional",
+                "content_type": "landing",
+                "url": "/pricing/seo-company-near-me/",
+            }
+        )
+        == "service"
+    )
+    assert resolve_page_type({"keyword": "search engine optimisation business"}) == "service"
+    assert resolve_page_type({"keyword": "seo meaning in business", "intent": "commercial"}) == "guide"
+    assert resolve_page_type({"keyword": "buy payroll software", "intent": "transactional"}) == "landing"
+
+
 def test_an_explicit_service_label_still_wins():
     assert (
         resolve_page_type({"keyword": "what is seo", "page_type": "service"}) == "service"

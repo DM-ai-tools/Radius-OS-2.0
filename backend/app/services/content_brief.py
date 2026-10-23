@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -445,10 +446,10 @@ def differentiation_angle(
         if missing:
             gap = f"current {fmt} results that omit {', '.join(missing[:3])}"
         elif organic:
-            top = str(organic[0].get("title") or "the current #1")[:48]
-            gap = f"current {fmt} results such as “{top}”"
+            # Never quote a ranking page's title: it carries a competitor's brand.
+            gap = f"the current {fmt} results"
     text = (
-        f"{client_name} publishes from {method} practice with {proof} — "
+        f"{client_name} works from {method} practice with {proof} — "
         f"not another restatement of {gap}."
     )
     text = re.sub(r"\s+", " ", text).strip()
@@ -594,6 +595,8 @@ def _intent_from_serp(organic: list[dict[str, Any]], fallback: str | None) -> st
 
 
 def summarize_serp(serp: dict[str, Any], *, fallback_intent: str | None = None) -> dict[str, Any]:
+    from app.services.create_content import competitor_topic
+
     organic = [r for r in (serp.get("organic") or []) if isinstance(r, dict)]
     validated = bool(serp.get("validated") and organic)
     types = list(serp.get("item_types") or [])
@@ -619,7 +622,11 @@ def summarize_serp(serp: dict[str, Any], *, fallback_intent: str | None = None) 
         }
         if snippet
         else None,
-        "coverage_floor": [str(r.get("title")) for r in organic[:6] if r.get("title")],
+        # Topics of the ranking pages, without their " - Brand" suffix: the writer
+        # covers the topic and never names the competitor.
+        "coverage_floor": [
+            competitor_topic(r.get("title")) for r in organic[:6] if r.get("title")
+        ],
     }
 
 
@@ -1164,7 +1171,13 @@ def select_brief_targets(
 ) -> list[dict[str, Any]]:
     queue = [
         r
-        for r in (strategy.get("combined_priority_queue") or strategy.get("priority_queue") or strategy.get("priority_pages") or [])
+        for r in (
+            strategy.get("content_plan")
+            or strategy.get("priority_queue")
+            or strategy.get("combined_priority_queue")
+            or strategy.get("priority_pages")
+            or []
+        )
         if isinstance(r, dict) and (r.get("keyword") or r.get("title"))
     ]
     by_kw = {_norm_kw(str(r.get("keyword") or r.get("title"))): r for r in queue}
@@ -1262,6 +1275,7 @@ async def generate_briefs(
     skipped: list[dict[str, Any]] = []
     serp_errors: list[str] = []
 
+    ready_items: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
     for item in targets:
         kw = str(item.get("keyword") or item.get("primary_keyword") or item.get("title") or "").strip()
         if not kw:
@@ -1287,8 +1301,33 @@ async def generate_briefs(
                 }
             )
             # Still emit a draft brief so the strategist can see the stop
-        serp_raw, err = await dataforseo.serp_advanced(kw, location_code=loc)
-        serp_errors.extend(err)
+        ready_items.append((item, kw, pre))
+
+    serp_gate = asyncio.Semaphore(3)
+
+    async def _serp_for(keyword: str):
+        async with serp_gate:
+            return await dataforseo.serp_advanced(keyword, location_code=loc)
+
+    serp_results = await asyncio.gather(
+        *[_serp_for(kw) for _item, kw, _pre in ready_items],
+        return_exceptions=True,
+    )
+
+    for (item, kw, pre), serp_result in zip(ready_items, serp_results):
+        if isinstance(serp_result, BaseException):
+            serp_errors.append(f"dataforseo_serp_error:{type(serp_result).__name__}")
+            serp_raw: dict[str, Any] = {
+                "organic": [],
+                "people_also_ask": [],
+                "featured_snippet": None,
+                "item_types": [],
+                "ai_overview": False,
+                "validated": False,
+            }
+        else:
+            serp_raw, err = serp_result
+            serp_errors.extend(err)
         serp = summarize_serp(serp_raw, fallback_intent=item.get("intent"))
         secondaries = _related_for(kw) or [
             str(s)

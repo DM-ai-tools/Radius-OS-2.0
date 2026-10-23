@@ -1,0 +1,411 @@
+/* Phase browser — a list of phases beside one detail pane. Shared by Deliverables and
+   Client memory. Shell (.ct, .ct-head, .ct-muted, .ct-empty) comes from cost-tracker.css. */
+
+.pb {
+  --pb-rail: 248px;
+  max-width: 1280px;
+}
+
+.pb-body {
+  display: grid;
+  grid-template-columns: var(--pb-rail) minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+/* --------------------------------------------------------------------- rail */
+
+.pb-rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: calc(100vh - 160px);
+  overflow-y: auto;
+  padding-right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pb-rail ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pb-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.pb-row:hover {
+  background: var(--surface-2);
+}
+
+.pb-row.is-selected {
+  background: var(--surface-active);
+  border-color: var(--border-active);
+}
+
+.pb-row:focus-visible,
+.pb-tabs button:focus-visible {
+  outline: 2px solid var(--brand-blue);
+  outline-offset: 1px;
+}
+
+.pb-no {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  text-align: right;
+}
+
+.pb-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pb-row-name {
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.pb-row-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.pb-row-sub::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pb-tone, var(--text-muted));
+}
+
+.pb-row-meta {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.pb-row.is-done,
+.pb-state.is-done {
+  --pb-tone: var(--success-bright);
+}
+
+.pb-row.is-wait,
+.pb-state.is-wait {
+  --pb-tone: var(--warning-bright);
+}
+
+.pb-row.is-run,
+.pb-state.is-run {
+  --pb-tone: var(--info);
+}
+
+.pb-row.is-todo,
+.pb-state.is-todo {
+  --pb-tone: var(--text-muted);
+}
+
+.pb-missing {
+  margin: 0;
+  padding: 0 10px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+/* ------------------------------------------------------------------- detail */
+
+.pb-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.pb-notice {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-default);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.pb-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+
+.pb-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.pb-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.pb-detail-head h3 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.15;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+
+.pb-detail-sub {
+  margin: 8px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-size: 13px;
+}
+
+.pb-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 10px 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pb-tone, var(--text-secondary));
+  background: color-mix(in srgb, var(--pb-tone, var(--text-muted)) 14%, transparent);
+}
+
+.pb-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.pb-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Switcher for phases that hold more than one pack. */
+.pb-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pb-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.pb-tabs button:hover {
+  color: var(--text-primary);
+  background: var(--surface-2);
+}
+
+.pb-tabs button.is-on {
+  color: var(--text-primary);
+  background: var(--surface-active);
+  border-color: var(--border-active);
+}
+
+.pb-tab-tag {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.pb-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* One block of saved memory inside a phase. */
+.pb-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 12px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-default);
+  min-width: 0;
+}
+
+.pb-block-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+.pb-block-head h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.pb-block-source {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pb-empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* Cards and saved packs share a handful of label classes that were set in small capitals. */
+.pb-content :is(.page-kicker, .present-key, .metric-label, .q-badge, .source-legend-item, .mode-badge, h4, th, label) {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Saved memory is read as prose, so its labels use sentence case instead of small capitals. */
+.pb .playground-body .pg-group-title,
+.pb .playground-body .pg-report-h,
+.pb .playground-body .pg-kv-row dt,
+.pb .playground-body .pg-k {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* -------------------------------------------------------------- responsive */
+
+@media (max-width: 960px) {
+  .pb-body {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+
+  /* The list becomes a row of chips you can swipe through. */
+  .pb-rail {
+    position: static;
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .pb-rail ul {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 6px;
+    padding-bottom: 6px;
+    scroll-snap-type: x proximity;
+  }
+
+  .pb-rail li {
+    flex: none;
+    scroll-snap-align: start;
+  }
+
+  .pb-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 8px 12px;
+    border-color: var(--border-default);
+    border-radius: 999px;
+  }
+
+  .pb-row-meta,
+  .pb-no {
+    display: none;
+  }
+
+  .pb-row-sub {
+    display: none;
+  }
+
+  .pb-row-name {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .pb-row-name::before {
+    content: "";
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--pb-tone, var(--text-muted));
+  }
+
+  /* The header sentence already gives the count; the names would push the content down. */
+  .pb-missing {
+    display: none;
+  }
+}
+
+@media (max-width: 520px) {
+  .pb-detail-head h3 {
+    font-size: 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pb-row,
+  .pb-tabs button {
+    transition: none;
+  }
+}

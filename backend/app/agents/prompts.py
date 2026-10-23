@@ -25,6 +25,7 @@ AGENT_SKILL_DIRS = {
     "cwv_measurement": "cwv-measurement",
     "hreflang_validator": "hreflang-validator",
     "seo_sitemap": "seo-sitemap",
+    "seo_dataforseo": "seo-dataforseo",
     "on_page_seo": "on-page-seo",
     "technical_seo": "technical-seo-audit",
     "technical_seo_audit": "technical-seo-audit",

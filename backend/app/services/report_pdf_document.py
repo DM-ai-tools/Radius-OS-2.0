@@ -7,20 +7,22 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from reportlab.platypus import Spacer
+from reportlab.platypus import KeepTogether, Spacer
 
 from app.services.report_export import resolve_report_title
 from app.services.report_pdf_normalize import normalize_report_payload
 from app.services.report_pdf_theme import (
+    alert_block,
     body,
     bullet_list,
     data_table_weighted,
+    group_header,
     header_band,
     metric_strip,
     note_block,
     numbered_list,
-    numbered_section,
-    subsection,
+    section_rule,
+    summary_panel,
 )
 
 SKIP = frozenset(
@@ -39,6 +41,33 @@ SUMMARY_KEYS = ("executive_summary", "summary", "overview", "headline", "note", 
 
 
 @dataclass
+class TableSpec:
+    """An extra table inside a section, under its own small heading."""
+
+    title: str
+    source: str
+    headers: list[str]
+    keys: list[str]
+    weights: list[float] = field(default_factory=list)
+    max_rows: int = 40
+    row_fn: Callable[[dict[str, Any]], list[Any]] | None = None
+
+
+@dataclass
+class GroupSpec:
+    """Several titled tables in one section: one per cluster, hub, etc.
+
+    ``source`` is a list of ``{"title", "subtitle", "detail", "tone", "rows",
+    "more"}`` dicts, rows already formatted as cell lists.
+    """
+
+    source: str
+    headers: list[str]
+    weights: list[float] = field(default_factory=list)
+    max_rows: int = 25
+
+
+@dataclass
 class SectionSpec:
     title: str
     intro: str | None = None
@@ -52,8 +81,15 @@ class SectionSpec:
     numbered_source: str | None = None
     note_label: str | None = None
     note_fields: list[str] = field(default_factory=list)
-    max_rows: int = 25
+    max_rows: int = 40
     row_fn: Callable[[dict[str, Any]], list[Any]] | None = None
+    # Applied to the table's rows before row_fn (e.g. numbering older saved rows).
+    prepare_rows: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None
+    tables: list[TableSpec] = field(default_factory=list)
+    # A finding that must stand out, shown first in the section.
+    alert_field: str | None = None
+    alert_label: str = "Warning:"
+    groups: GroupSpec | None = None
 
 
 def _get(data: dict[str, Any], path: str, default: Any = None) -> Any:
@@ -146,7 +182,7 @@ def _table_rows(
         if isinstance(value, list):
             return ", ".join(str(x) for x in value[:6])
         if isinstance(value, dict):
-            return json.dumps(value, default=str)[:120]
+            return json.dumps(value, default=str)[:200]
         return value
 
     def _has_value(value: Any) -> bool:
@@ -198,16 +234,12 @@ def _auto_blueprint(payload: dict[str, Any]) -> list[SectionSpec]:
 def _content_strategy_sections() -> list[SectionSpec]:
     return [
         SectionSpec(
-            title="Strategic Overview",
-            intro_field="summary",
-        ),
-        SectionSpec(
             title="Core Topics & Authority Map",
             table_source="core_topics",
             table_headers=["Topic", "Intent", "Volume", "Difficulty", "Priority"],
             table_keys=["name", "intent", "volume", "difficulty", "priority"],
             table_weights=[1.4, 0.8, 0.7, 0.7, 0.8],
-            max_rows=20,
+            max_rows=40,
             row_fn=lambda r: [
                 r.get("name") or r.get("pillar") or r.get("topic"),
                 r.get("intent"),
@@ -230,28 +262,54 @@ def _content_strategy_sections() -> list[SectionSpec]:
             ],
         ),
         SectionSpec(
-            title="Priority Content Queue",
-            intro="Prioritized content pieces ranked by opportunity and business impact.",
-            table_source="priority_queue",
-            table_headers=["Title", "Priority", "Volume", "Difficulty", "URL"],
-            table_keys=["title", "priority", "volume", "difficulty", "suggested_url"],
-            table_weights=[1.5, 0.7, 0.6, 0.6, 1.2],
-            max_rows=30,
-            row_fn=lambda r: [
-                r.get("title") or r.get("keyword"),
-                r.get("priority") or r.get("priority_label") or r.get("bucket"),
-                r.get("volume"),
-                r.get("difficulty"),
-                r.get("suggested_url") or r.get("url"),
+            title="Content Plan Summary",
+            intro="One row per piece of work. The two tables below are the same rows in the same order.",
+            metrics=[
+                ("Work items", "content_plan_summary_view.total"),
+                ("By action", "content_plan_summary_view.actions"),
+                ("By priority", "content_plan_summary_view.priorities"),
+                ("Scheduled", "content_plan_summary_view.scheduled"),
+                ("Unscheduled", "content_plan_summary_view.unscheduled"),
+                ("Target volume", "content_plan_summary_view.combined_volume"),
+                ("By source", "content_plan_summary_view.sources"),
             ],
         ),
         SectionSpec(
-            title="Combined Priority Queue",
-            table_source="combined_priority_queue",
-            table_headers=["Action", "Title", "Priority", "Source"],
-            table_keys=["action", "title", "priority", "source"],
-            table_weights=[0.8, 1.6, 0.7, 0.9],
-            max_rows=25,
+            title="Content Plan — Work",
+            intro="Row numbers match the targeting table.",
+            table_source="content_plan",
+            table_headers=["#", "Week", "Action", "Title", "Primary keyword", "Type", "Priority"],
+            table_keys=["row", "week", "action", "title", "keyword", "content_type", "priority"],
+            table_weights=[0.35, 0.4, 0.7, 1.5, 1.1, 0.7, 0.6],
+            max_rows=200,
+            row_fn=lambda r: [
+                r.get("row"),
+                r.get("week") or "—",
+                r.get("work_label") or r.get("action"),
+                r.get("title") or r.get("keyword"),
+                r.get("primary_keyword") or r.get("keyword"),
+                r.get("content_type"),
+                r.get("priority"),
+            ],
+        ),
+        SectionSpec(
+            title="Content Plan — Targeting",
+            intro="Same rows and numbering as the work table.",
+            table_source="content_plan",
+            table_headers=["#", "Volume", "Difficulty", "Intent", "Funnel", "Words", "URL", "Service"],
+            table_keys=["row", "volume", "difficulty", "intent", "funnel", "est_words", "suggested_url", "service"],
+            table_weights=[0.35, 0.55, 0.55, 0.7, 0.5, 0.45, 1.5, 0.8],
+            max_rows=200,
+            row_fn=lambda r: [
+                r.get("row"),
+                r.get("volume"),
+                r.get("difficulty"),
+                r.get("intent"),
+                r.get("funnel"),
+                r.get("est_words"),
+                r.get("suggested_url") or r.get("existing_url") or r.get("url"),
+                r.get("service"),
+            ],
         ),
         SectionSpec(
             title="Content Gaps",
@@ -269,19 +327,33 @@ def _content_strategy_sections() -> list[SectionSpec]:
             ],
         ),
         SectionSpec(
-            title="12-Week Content Calendar",
+            title="Calendar",
+            intro="Month pacing for the content plan. Each piece of work is listed once in the content plan, with its week.",
             table_source="content_calendar",
-            table_headers=["Week", "Month", "Title", "Keyword", "Type", "Priority"],
-            table_keys=["week", "month", "title", "keyword", "type", "priority"],
-            table_weights=[0.5, 0.9, 1.4, 1.0, 0.7, 0.7],
-            max_rows=15,
+            table_headers=["Month", "Theme", "Pieces", "Actions", "Volume", "Services"],
+            table_keys=["month", "theme", "pieces", "actions_label", "combined_volume", "services_label"],
+            table_weights=[0.5, 0.9, 0.5, 1.3, 0.6, 1.2],
+            max_rows=12,
             row_fn=lambda r: [
-                r.get("week"),
                 r.get("month"),
-                r.get("title") or r.get("keyword"),
-                r.get("keyword"),
-                r.get("type") or r.get("content_type"),
-                r.get("priority"),
+                r.get("theme") or r.get("label"),
+                r.get("pieces"),
+                r.get("actions_label"),
+                r.get("combined_volume"),
+                r.get("services_label"),
+            ],
+        ),
+        SectionSpec(
+            title="Excluded",
+            intro="Topics marked avoid. These are not pieces of work.",
+            table_source="exclusions",
+            table_headers=["Keyword or topic", "Reason"],
+            table_keys=["keyword", "reason"],
+            table_weights=[1.2, 2.2],
+            max_rows=40,
+            row_fn=lambda r: [
+                r.get("keyword") or r.get("topic"),
+                r.get("reason"),
             ],
         ),
         SectionSpec(
@@ -294,6 +366,114 @@ def _content_strategy_sections() -> list[SectionSpec]:
                 r.get("item") or r.get("concern") or r.get("deliverable"),
                 r.get("receiving") or r.get("route_to") or r.get("owner"),
             ],
+        ),
+    ]
+
+
+def _cells(row: dict[str, Any]) -> list[Any]:
+    return list(row.get("cells") or [])
+
+
+def _keyword_cluster_sections() -> list[SectionSpec]:
+    """Layered Keyword Clusters report (data from keyword_cluster_report)."""
+    return [
+        SectionSpec(
+            title="Keyword Clustering Summary",
+            alert_field="kc_accounting_alert",
+            alert_label="Keyword accounting did not balance.",
+            metrics=[
+                ("Keywords in", "kc_summary.keywords_in"),
+                ("Clusters", "kc_summary.clusters"),
+                ("Clustered", "kc_summary.clustered"),
+                ("Orphans", "kc_summary.orphans"),
+                ("Accounting", "kc_summary.accounting"),
+                ("Source", "kc_summary.source"),
+                ("Content hubs", "kc_summary.hubs"),
+                ("Size discipline", "kc_summary.size"),
+            ],
+            note_label="Verification:",
+            note_fields=["kc_verification"],
+        ),
+        SectionSpec(
+            title="Content Hubs",
+            intro_field="kc_hubs_note",
+            groups=GroupSpec(
+                source="kc_hubs",
+                headers=["Subtopic cluster", "Primary keyword", "Intent", "Stage", "Page pattern", "Volume"],
+                weights=[1.4, 1.4, 0.9, 0.55, 0.95, 0.65],
+            ),
+        ),
+        SectionSpec(
+            title="Cluster Overview",
+            table_source="kc_overview",
+            table_headers=[
+                "Cluster / URL", "Primary keyword", "Intent / stage",
+                "Page pattern / content", "Size", "Volume", "Avg KD",
+            ],
+            table_keys=[],
+            table_weights=[1.7, 1.35, 0.95, 1.25, 0.6, 0.65, 0.55],
+            max_rows=60,
+            row_fn=_cells,
+        ),
+        SectionSpec(
+            title="Cluster Detail",
+            intro_field="kc_details_note",
+            groups=GroupSpec(
+                source="kc_details",
+                headers=["Keyword", "Role", "Volume", "KD", "Intent", "Stage", "Opp. score"],
+                weights=[2.0, 0.8, 0.8, 0.45, 0.9, 0.55, 0.65],
+            ),
+        ),
+        SectionSpec(
+            title="Orphan Keywords",
+            intro_field="kc_orphans_note",
+            table_source="kc_orphans",
+            table_headers=["Keyword", "Volume", "Intent", "Why it has no cluster"],
+            table_keys=[],
+            table_weights=[1.5, 0.7, 0.9, 2.4],
+            max_rows=40,
+            row_fn=_cells,
+        ),
+        SectionSpec(
+            title="Content Roadmap",
+            table_source="kc_roadmap",
+            table_headers=["Priority", "Cluster", "Content type", "Target keyword", "Intent", "Stage", "Est. traffic"],
+            table_keys=[],
+            table_weights=[0.55, 1.4, 1.0, 1.3, 0.85, 0.5, 0.7],
+            max_rows=20,
+            row_fn=_cells,
+        ),
+        SectionSpec(
+            title="Clustering Quality",
+            intro_field="kc_quality_note",
+            table_source="kc_quality",
+            table_headers=["Issue", "Cluster", "What is wrong", "Risk"],
+            table_keys=[],
+            table_weights=[1.0, 1.3, 2.6, 0.8],
+            max_rows=40,
+            row_fn=_cells,
+        ),
+        SectionSpec(
+            title="Clustering Provenance",
+            metrics=[
+                ("Grouped by", "kc_provenance.grouped_by"),
+                ("Model clustering", "kc_provenance.model_clustering"),
+                ("SERP check", "kc_provenance.serp_check"),
+                ("Cluster names", "kc_provenance.naming"),
+                ("Invented keywords rejected", "kc_provenance.invented_rejected"),
+                ("Excluded in cleaning", "kc_provenance.excluded"),
+            ],
+            tables=[
+                TableSpec(
+                    title="Excluded during cleaning, by reason",
+                    source="kc_exclusions",
+                    headers=["Reason", "Keywords"],
+                    keys=[],
+                    weights=[3.0, 1.0],
+                    row_fn=_cells,
+                )
+            ],
+            bullets_source="kc_provenance_notes",
         ),
     ]
 
@@ -313,28 +493,14 @@ def _search_demand_sections() -> list[SectionSpec]:
                 ("Data quality", "keyword_data_quality.warning"),
             ],
         ),
-        SectionSpec(
-            title="Keyword Clusters",
-            table_source="clusters",
-            table_headers=["Cluster", "Primary keyword", "Volume", "Keywords", "Intent"],
-            table_keys=["name", "primary_keyword", "total_volume", "keyword_count", "intent"],
-            table_weights=[1.2, 1.2, 0.7, 0.6, 0.8],
-            max_rows=25,
-            row_fn=lambda r: [
-                r.get("name") or r.get("cluster"),
-                r.get("primary_keyword") or r.get("target_keyword"),
-                r.get("total_volume") or r.get("est_traffic") or r.get("volume"),
-                r.get("keyword_count") or len(r.get("keywords") or []),
-                r.get("intent"),
-            ],
-        ),
+        *_keyword_cluster_sections(),
         SectionSpec(
             title="Top Opportunities",
             table_source="opportunities",
             table_headers=["Keyword", "Volume", "KD", "Score", "Intent"],
             table_keys=["keyword", "volume", "difficulty", "opportunity_score", "intent"],
             table_weights=[1.4, 0.7, 0.5, 0.6, 0.8],
-            max_rows=30,
+            max_rows=40,
             row_fn=lambda r: [
                 r.get("keyword") or r.get("title"),
                 r.get("volume"),
@@ -371,12 +537,13 @@ def _site_architecture_sections() -> list[SectionSpec]:
         SectionSpec(
             title="URL Mapping — Taxonomy & Status",
             table_source="url_map_report.final_url_map",
+            prepare_rows=_url_map_numbered,
             table_headers=[
-                "Lvl", "L1", "L2", "L3", "L4", "Current URL", "Proposed URL",
+                "#", "Lvl", "L1", "L2", "L3", "L4", "Current URL", "Proposed URL",
                 "Status", "Page Type", "Priority",
             ],
             table_keys=[
-                "level", "l1_category", "l2_subcategory", "l3_subsubcategory",
+                "row_no", "level", "l1_category", "l2_subcategory", "l3_subsubcategory",
                 "l4_attribution", "current_url", "proposed_url", "status",
                 "page_type", "priority",
             ],
@@ -385,15 +552,17 @@ def _site_architecture_sections() -> list[SectionSpec]:
         SectionSpec(
             title="URL Mapping — Keywords & Opportunity",
             table_source="url_map_report.final_url_map",
+            prepare_rows=_url_map_numbered,
             table_headers=[
-                "Primary Keyword", "Vol/mo", "CPC", "Secondary Keywords (5-10)",
+                "#", "Primary Keyword", "Vol/mo", "CPC", "Secondary Keywords (5-10)",
                 "Combined Vol", "Est. Products", "In Scope?", "Notes",
             ],
             table_keys=[
-                "primary_keyword", "search_volume", "cpc", "secondary_keywords_sheet",
+                "row_no", "primary_keyword", "search_volume", "cpc", "secondary_keywords_sheet",
                 "combined_cluster_volume", "est_products", "in_scope", "notes",
             ],
             row_fn=lambda u: [
+                u.get("row_no"),
                 u.get("primary_keyword"),
                 u.get("search_volume"),
                 u.get("cpc"),
@@ -405,7 +574,39 @@ def _site_architecture_sections() -> list[SectionSpec]:
             ],
             max_rows=60,
         ),
+        SectionSpec(
+            title="URL Mapping — Decision & Evidence",
+            intro=(
+                "The same rows by number: what each row will do, the score and the signals it "
+                "was based on, how confident the match is, the effort, the checks run against the "
+                "site and the other proposals, the links and redirects, and the rules that fired."
+            ),
+            table_source="url_map_report.final_url_map",
+            prepare_rows=_url_map_numbered,
+            table_headers=_url_map_decision_headers(),
+            table_keys=[],
+            row_fn=_url_map_decision_row,
+            max_rows=60,
+        ),
     ]
+
+
+def _url_map_numbered(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from app.services.url_map_report import numbered
+
+    return numbered(rows)
+
+
+def _url_map_decision_headers() -> list[str]:
+    from app.services.url_map_report import DECISION_HEADERS
+
+    return list(DECISION_HEADERS)
+
+
+def _url_map_decision_row(entry: dict[str, Any]) -> list[Any]:
+    from app.services.url_map_report import decision_row
+
+    return decision_row(entry)
 
 
 def _content_audit_sections() -> list[SectionSpec]:
@@ -436,10 +637,17 @@ def _content_audit_sections() -> list[SectionSpec]:
         SectionSpec(
             title="Inventory & Disposition",
             table_source="inventory",
-            table_headers=["Title", "Path", "Disposition", "Reason", "IA note"],
-            table_keys=["title", "path", "disposition", "reason", "ia_note"],
+            table_headers=["Title", "Path", "Disposition", "Reason", "Keyword"],
+            table_keys=["title", "path", "disposition", "reason", "keyword"],
             table_weights=[1.2, 1.0, 0.8, 1.3, 0.9],
-            max_rows=35,
+            max_rows=40,
+            row_fn=lambda r: [
+                r.get("title"),
+                r.get("path") or r.get("url"),
+                r.get("disposition"),
+                r.get("reason"),
+                r.get("keyword") or r.get("ia_note"),
+            ],
         ),
         SectionSpec(
             title="Refresh Priority Queue",
@@ -454,6 +662,13 @@ def _content_audit_sections() -> list[SectionSpec]:
             table_headers=["Topic", "URLs", "Recommendation"],
             table_keys=["topic", "urls", "recommendation"],
             table_weights=[1.0, 1.2, 1.5],
+            row_fn=lambda r: [
+                r.get("topic") or r.get("keyword") or r.get("query"),
+                ", ".join(str(u) for u in r.get("urls") or [])
+                if isinstance(r.get("urls"), list)
+                else r.get("urls"),
+                r.get("recommendation") or r.get("action"),
+            ],
         ),
         SectionSpec(
             title="Handoffs",
@@ -465,6 +680,87 @@ def _content_audit_sections() -> list[SectionSpec]:
     ]
 
 
+# The twelve Phase 7 audit groups, in report order: (title, payload slug, extra tables).
+_TECH_GROUP_EXTRAS: dict[str, list[TableSpec]] = {
+    "on_page": [
+        TableSpec("Sampled pages", "on_page_audit.pages",
+                  ["Page", "Title", "H1s", "Meta description", "Headings", "Alt text", "Words"],
+                  ["url", "title", "h1", "meta", "headings", "alt", "words"], [1.6, 0.7, 0.4, 0.8, 0.8, 0.6, 0.5]),
+    ],
+    "canonicalisation": [
+        TableSpec("Canonical tags on sampled pages", "canonical_audit.pages", ["Page", "Canonical", "State"],
+                  ["url", "canonical", "state"], [1.4, 1.4, 1.0]),
+        TableSpec("Duplicate URL clusters", "canonical_audit.duplicate_clusters", ["Cluster", "Pages", "Count"],
+                  ["cluster", "urls", "count"], [1.4, 2.2, 0.4]),
+    ],
+    "javascript_rendering": [
+        TableSpec("Raw HTML vs browser-rendered (raw / rendered)", "js_rendering_audit.comparison",
+                  ["Page", "Words", "Links", "H1", "Verdict"], ["url", "words", "links", "h1", "verdict"],
+                  [1.4, 0.7, 0.7, 0.5, 1.0]),
+    ],
+    "performance": [
+        TableSpec("Core Web Vitals and lab metrics (field = real users; lab = one controlled run)",
+                  "performance_audit.metrics", ["Metric", "Mobile", "Desktop", "Rating"],
+                  ["metric", "mobile", "desktop", "rating"], [1.6, 1.0, 1.0, 1.0]),
+        TableSpec("Page weight (direct sample)", "performance_audit.page_weight",
+                  ["Page", "HTML KB", "Scripts", "Render-blocking", "Third-party hosts", "Images"],
+                  ["url", "html_kb", "scripts", "blocking", "third_party", "images"], [1.6, 0.6, 0.6, 0.8, 0.8, 0.6]),
+    ],
+    "structured_data": [
+        TableSpec("Schema found per page", "structured_data_audit.pages", ["Page", "JSON-LD blocks", "Types", "Problems"],
+                  ["url", "blocks", "types", "problems"], [1.2, 0.5, 1.4, 1.8]),
+        TableSpec("Rich results the markup qualifies for", "structured_data_audit.eligible_rows", ["Rich result"],
+                  ["result"], [1.0]),
+    ],
+    "security": [
+        TableSpec("Response headers (homepage)", "security_audit.headers", ["Header", "Present"], ["header", "present"],
+                  [2.0, 0.6]),
+        TableSpec("WordPress exposure", "security_audit.wordpress_rows", ["Check", "Result"], ["check", "result"],
+                  [1.4, 2.0]),
+    ],
+}
+TECH_GROUP_SLUGS = (
+    ("Crawlability", "crawlability"),
+    ("Indexation", "indexation"),
+    ("URL Structure", "url_structure"),
+    ("Canonicalisation", "canonicalisation"),
+    ("Sitemap", "sitemap"),
+    ("Internal Linking", "internal_linking"),
+    ("On-Page Technical SEO", "on_page"),
+    ("JavaScript and Rendering", "javascript_rendering"),
+    ("Performance (Core Web Vitals)", "performance"),
+    ("Mobile and Usability", "mobile"),
+    ("Structured Data", "structured_data"),
+    ("Security", "security"),
+)
+
+
+def _tech_group_section(title: str, slug: str) -> SectionSpec:
+    base = f"group.{slug}"
+    return SectionSpec(
+        title=title,
+        intro_field=f"{base}.coverage_note",
+        metrics=[
+            ("Score", f"{base}.score_label"),
+            ("Issues", f"{base}.issue_count"),
+            ("Fields measured", f"{base}.fields_measured"),
+            ("Not measured", f"{base}.fields_not_measured"),
+        ],
+        table_source=f"{base}.issues",
+        table_headers=["Severity", "Issue", "Pages", "Examples", "Recommended fix"],
+        table_keys=["severity", "issue", "affected", "examples", "fix"],
+        table_weights=[0.6, 1.8, 0.4, 1.0, 1.7],
+        max_rows=25,
+        tables=[
+            TableSpec("Checks run", f"{base}.checks", ["Check", "Result", "Detail", "URLs"],
+                      ["check", "status", "detail", "urls"], [1.0, 0.6, 2.2, 1.2]),
+            *_TECH_GROUP_EXTRAS.get(slug, []),
+            TableSpec("Fields: checked vs not measured", f"{base}.fields", ["Field", "Status", "Note"],
+                      ["field", "status", "note"], [1.0, 0.8, 2.6]),
+        ],
+    )
+
+
 def _technical_seo_sections() -> list[SectionSpec]:
     return [
         SectionSpec(
@@ -472,42 +768,71 @@ def _technical_seo_sections() -> list[SectionSpec]:
             metrics=[
                 ("Overall score", "score"),
                 ("Severity", "severity"),
+                ("Coverage", "coverage_label"),
+                ("Fields measured %", "audit_coverage.summary.coverage_pct"),
+                ("Pages sampled", "page_sample.pages"),
                 ("Phase 6 connected", "phase6_connected"),
             ],
+            note_label="Data sources:",
+            note_fields=["data_source_note"],
         ),
         SectionSpec(
-            title="Findings by Theme",
-            table_source="findings_by_theme",
-            table_headers=["Theme", "Score", "Findings"],
-            table_keys=["theme", "score", "findings"],
-            table_weights=[1.0, 0.6, 2.9],
-            row_fn=lambda r: [
-                r.get("theme"),
-                r.get("score"),
-                "; ".join(str(x) for x in (r.get("findings") or [])[:4]),
-            ],
+            title="Quick Wins",
+            intro="High-priority issues with a straightforward fix, most impactful first.",
+            table_source="quick_wins",
+            table_headers=["Priority", "Issue", "Fix", "Group", "Pages"],
+            table_keys=["priority", "issue", "fix", "category", "affected"],
+            table_weights=[0.6, 1.8, 1.8, 0.9, 0.4],
+            max_rows=10,
         ),
+        *[_tech_group_section(title, slug) for title, slug in TECH_GROUP_SLUGS],
         SectionSpec(
-            title="Priority Fix Backlog",
+            title="Priority Backlog by Category",
+            intro="Up to 50 actions, grouped by audit area, most severe first within each area.",
             table_source="priority_backlog",
-            table_headers=["Priority", "Issue", "Fix", "Source"],
-            table_keys=["priority", "issue", "fix", "source"],
-            table_weights=[0.7, 1.3, 1.5, 0.8],
-            max_rows=25,
+            table_headers=["Category", "Priority", "Issue", "Fix", "Pages"],
+            table_keys=["category", "priority", "issue", "fix", "affected"],
+            table_weights=[0.9, 0.6, 1.7, 1.8, 0.4],
+            max_rows=50,
         ),
         SectionSpec(
             title="IA Actions from Phase 6",
             table_source="ia_actions",
-            table_headers=["Action", "Detail", "Owner"],
-            table_keys=["action", "detail", "owner"],
-            table_weights=[1.0, 2.0, 0.8],
+            table_headers=["Type", "Issue", "Fix", "Priority"],
+            table_keys=["type", "issue", "fix", "priority"],
+            table_weights=[0.6, 1.6, 1.8, 0.6],
+            row_fn=lambda r: [
+                r.get("type"),
+                r.get("issue") or (f"{r.get('from')} → {r.get('to')}" if r.get("from") else None),
+                r.get("fix") or (f"{r.get('status')} redirect" if r.get("from") else None),
+                r.get("priority"),
+            ],
         ),
         SectionSpec(
             title="Specialist Routing",
             table_source="specialist_routing",
-            table_headers=["Area", "Route to", "Reason"],
-            table_keys=["area", "route", "reason"],
-            table_weights=[1.0, 1.0, 1.8],
+            table_headers=["Area", "Route to", "Status"],
+            table_keys=["finding_area", "route_to", "status"],
+            table_weights=[1.8, 1.0, 1.0],
+        ),
+        SectionSpec(
+            title="What We Checked",
+            intro=(
+                "Coverage of the twelve audit groups this pass. Not measured means no evidence was collected; "
+                "it is never counted as a pass."
+            ),
+            metrics=[
+                ("Fields", "audit_coverage.summary.fields"),
+                ("Measured", "audit_coverage.summary.measured"),
+                ("With issues", "audit_coverage.summary.with_issues"),
+                ("Not measured", "audit_coverage.summary.not_measured"),
+                ("Coverage %", "audit_coverage.summary.coverage_pct"),
+            ],
+            table_source="coverage_matrix",
+            table_headers=["Group", "Fields", "Measured", "With issues", "Not measured", "What would complete it"],
+            table_keys=["group", "fields", "measured", "with_issues", "not_measured", "needs"],
+            table_weights=[1.1, 0.5, 0.6, 0.6, 0.7, 2.2],
+            max_rows=12,
         ),
         SectionSpec(
             title="Not Measured",
@@ -552,7 +877,7 @@ def _competitor_sections() -> list[SectionSpec]:
             table_headers=["Parameter", "Client", "Top competitor", "Gap", "Action"],
             table_keys=["parameter", "client_score", "top_competitor", "gap", "action"],
             table_weights=[1.0, 0.6, 1.0, 0.5, 1.6],
-            max_rows=20,
+            max_rows=40,
         ),
         SectionSpec(
             title="Benchmark Recommendations",
@@ -597,7 +922,7 @@ def _website_sections() -> list[SectionSpec]:
             table_headers=["URL", "Score", "Status", "Note"],
             table_keys=["url", "score", "status", "note"],
             table_weights=[1.5, 0.6, 0.7, 1.7],
-            max_rows=20,
+            max_rows=40,
         ),
         SectionSpec(
             title="Sample URLs",
@@ -661,13 +986,26 @@ REPORT_BLUEPRINTS: dict[str, list[SectionSpec]] = {
         ),
     ],
     "seo_audit_report": [
-        SectionSpec(title="SEO Audit Summary", intro_field="summary"),
+        SectionSpec(
+            title="SEO Audit Summary",
+            intro_field="summary",
+            metrics=[
+                ("Overall score", "overall_score"),
+                ("Score band", "score_band"),
+                ("Pages analyzed", "pages_analyzed"),
+            ],
+        ),
         SectionSpec(
             title="Issues",
             table_source="issues",
             table_headers=["Issue", "Severity", "URL"],
             table_keys=["issue", "severity", "url"],
             table_weights=[1.4, 0.7, 1.4],
+            row_fn=lambda r: [
+                r.get("issue") or r.get("message") or r.get("title"),
+                r.get("severity"),
+                r.get("url") or r.get("ref"),
+            ],
         ),
     ],
     "on_page_seo_report": [
@@ -675,9 +1013,17 @@ REPORT_BLUEPRINTS: dict[str, list[SectionSpec]] = {
         SectionSpec(
             title="Page recommendations",
             table_source="pages",
-            table_headers=["URL", "Title", "Score", "Priority fixes"],
-            table_keys=["url", "title", "score", "fixes"],
+            table_headers=["URL", "Title", "Score", "Keyword"],
+            table_keys=["url", "title", "score", "keyword"],
             table_weights=[1.3, 1.0, 0.5, 1.7],
+            row_fn=lambda r: [
+                r.get("url") or r.get("path"),
+                (r.get("title") or {}).get("after")
+                if isinstance(r.get("title"), dict)
+                else (r.get("title") or r.get("h1")),
+                r.get("score") if r.get("score") is not None else r.get("current_score"),
+                r.get("keyword") or r.get("fixes"),
+            ],
         ),
     ],
     "content_planning_report": [
@@ -754,9 +1100,16 @@ REPORT_BLUEPRINTS: dict[str, list[SectionSpec]] = {
         SectionSpec(
             title="Publish queue",
             table_source="queue",
-            table_headers=["URL", "Action", "Status", "Note"],
-            table_keys=["url", "action", "status", "note"],
-            table_weights=[1.3, 0.8, 0.7, 1.5],
+            table_headers=["URL", "Title", "Keyword", "Status", "Note"],
+            table_keys=["url", "title", "keyword", "status", "note"],
+            table_weights=[1.2, 1.1, 0.9, 0.7, 1.2],
+            row_fn=lambda r: [
+                r.get("url"),
+                r.get("title"),
+                r.get("keyword"),
+                r.get("status") or r.get("action"),
+                r.get("note"),
+            ],
         ),
     ],
     "readiness_score": [
@@ -764,6 +1117,7 @@ REPORT_BLUEPRINTS: dict[str, list[SectionSpec]] = {
             title="Readiness Assessment",
             metrics=[("Overall", "overall"), ("Threshold", "threshold"), ("Ready for Phase 5", "ready_for_phase5")],
         ),
+        SectionSpec(title="Phase scores", bullets_source="phase_scores"),
         SectionSpec(title="Missing items", bullets_source="missing"),
     ],
 }
@@ -778,10 +1132,22 @@ def _resolve_blueprint(card_type: str, payload: dict[str, Any]) -> list[SectionS
     return _auto_blueprint(payload)
 
 
-def _render_section(flow: list, n: int, spec: SectionSpec, payload: dict[str, Any]) -> bool:
+def _render_section(
+    flow: list,
+    n: int,
+    spec: SectionSpec,
+    payload: dict[str, Any],
+    *,
+    leading_rule: bool = False,
+) -> bool:
     """Render one section. Returns False if section had no content."""
     blocks: list = []
     has_content = False
+
+    if spec.alert_field and _get(payload, spec.alert_field):
+        blocks.append(alert_block(spec.alert_label, str(_get(payload, spec.alert_field))))
+        blocks.append(Spacer(1, 6))
+        has_content = True
 
     intro = spec.intro
     if not intro and spec.intro_field:
@@ -804,6 +1170,8 @@ def _render_section(flow: list, n: int, spec: SectionSpec, payload: dict[str, An
 
     if spec.table_source:
         rows = _rows(_get(payload, spec.table_source))
+        if rows and spec.prepare_rows:
+            rows = spec.prepare_rows(rows)
         if rows:
             keys = spec.table_keys or _infer_columns(rows)[1]
             headers = spec.table_headers or [k.replace("_", " ").title() for k in keys]
@@ -819,6 +1187,45 @@ def _render_section(flow: list, n: int, spec: SectionSpec, payload: dict[str, An
                     )
                 )
                 has_content = True
+
+    if spec.groups:
+        g = spec.groups
+        for group in _rows(_get(payload, g.source)):
+            rows = [r for r in group.get("rows") or [] if isinstance(r, list)]
+            blocks.append(Spacer(1, 6))
+            header = group_header(
+                str(group.get("title") or ""),
+                str(group.get("subtitle") or ""),
+                str(group.get("detail") or ""),
+                tone=group.get("tone"),
+            )
+            if rows:
+                # A header never sits alone at the foot of a page.
+                table = data_table_weighted(
+                    g.headers, rows, g.weights or [1.0] * len(g.headers), max_rows=g.max_rows
+                )
+                blocks.append(KeepTogether([header, table]))
+            else:
+                blocks.append(header)
+            if group.get("more"):
+                blocks.append(body(f"…and {group['more']} more keyword(s) in this cluster."))
+            has_content = True
+
+    for extra in spec.tables:
+        rows = _rows(_get(payload, extra.source))
+        table_data = _table_rows(rows, extra.keys, extra.row_fn) if rows else []
+        if table_data:
+            blocks.append(Spacer(1, 4))
+            blocks.append(note_block(extra.title, ""))
+            blocks.append(
+                data_table_weighted(
+                    extra.headers,
+                    table_data,
+                    extra.weights or [1.0] * len(extra.headers),
+                    max_rows=extra.max_rows,
+                )
+            )
+            has_content = True
 
     if spec.bullets_source:
         raw = _get(payload, spec.bullets_source)
@@ -854,7 +1261,11 @@ def _render_section(flow: list, n: int, spec: SectionSpec, payload: dict[str, An
     if not has_content:
         return False
 
-    flow.append(numbered_section(n, spec.title))
+    if leading_rule:
+        flow.append(Spacer(1, 6))
+        flow.append(section_rule())
+        flow.append(Spacer(1, 8))
+    flow.extend(header_band(f"{n}. {spec.title}"))
     flow.extend(blocks)
     flow.append(Spacer(1, 8))
     return True
@@ -867,6 +1278,8 @@ def _append_auto_sections(
     section_num: int,
 ) -> int:
     covered = {s.table_source for s in blueprint if s.table_source}
+    covered |= {s.groups.source for s in blueprint if s.groups}
+    covered |= {t.source.split(".", 1)[0] for s in blueprint for t in s.tables}
     covered |= {s.bullets_source for s in blueprint if s.bullets_source}
     covered |= {s.numbered_source for s in blueprint if s.numbered_source}
     # A metrics path's top-level key (e.g. "funnel_balance.TOFU" -> "funnel_balance")
@@ -886,14 +1299,14 @@ def _append_auto_sections(
                     table_headers=headers,
                     table_keys=keys,
                 )
-                if _render_section(flow, section_num, spec, payload):
+                if _render_section(flow, section_num, spec, payload, leading_rule=True):
                     covered.add(key)
                 else:
                     section_num -= 1
             elif isinstance(value[0], str):
                 section_num += 1
                 spec = SectionSpec(title=key.replace("_", " ").title(), bullets_source=key)
-                if _render_section(flow, section_num, spec, payload):
+                if _render_section(flow, section_num, spec, payload, leading_rule=True):
                     covered.add(key)
                 else:
                     section_num -= 1
@@ -909,7 +1322,7 @@ def _append_auto_sections(
                     title=key.replace("_", " ").title(),
                     metrics=[(k.replace("_", " ").title(), f"{key}.{k}") for k, _ in scalar_items[:8]],
                 )
-                if _render_section(flow, section_num, spec, payload):
+                if _render_section(flow, section_num, spec, payload, leading_rule=True):
                     covered.add(key)
                 else:
                     section_num -= 1
@@ -930,23 +1343,26 @@ def render_document_report(
     meta = _meta_line(payload, client)
 
     if show_title:
-        flow.extend(header_band(title, meta))
-    elif meta:
-        flow.append(body(meta))
+        flow.extend(header_band(title, meta, level="report"))
+    elif "Geo:" in meta:
+        # The cover and running header already name the client and site.
+        flow.append(body(f"Market: {meta.split('Geo:', 1)[1].strip()}"))
         flow.append(Spacer(1, 6))
 
-    flow.append(subsection("Executive Summary"))
-    summary = _summary_text(payload, client)
-    if summary:
-        flow.append(body(summary))
-    else:
-        flow.append(body(f"Structured phase report for {client.get('name') or 'the client'}."))
-    flow.append(Spacer(1, 10))
+    if payload.get("scorecard_line"):
+        # One line, every audit group, before the narrative.
+        flow.append(note_block("At a glance:", str(payload["scorecard_line"])))
+        flow.append(Spacer(1, 4))
+    summary = _summary_text(payload, client) or (
+        f"Structured phase report for {client.get('name') or 'the client'}."
+    )
+    flow.append(summary_panel(summary, lead="Summary"))
+    flow.append(Spacer(1, 12))
 
     blueprint = _resolve_blueprint(card_type, payload)
     section_num = 0
     for spec in blueprint:
-        if _render_section(flow, section_num + 1, spec, payload):
+        if _render_section(flow, section_num + 1, spec, payload, leading_rule=True):
             section_num += 1
 
     _append_auto_sections(flow, payload, blueprint, section_num)

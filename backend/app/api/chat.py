@@ -15,11 +15,13 @@ from sqlalchemy.orm import selectinload
 from app.config import get_settings
 from app.db import AsyncSessionLocal, get_db
 from app.deps import get_current_user
+from app.logging_config import get_logger
 from app.models import ChatSession, User
 from app.orchestration.pipeline import process_chat_turn
 from app.security import decode_access_token, parse_uuid
 
 router = APIRouter(tags=["chat"])
+log = get_logger("chat")
 
 
 class ChatTurnRequest(BaseModel):
@@ -146,7 +148,14 @@ async def post_message_stream(
                 if "rolled back" not in str(root).lower():
                     break
                 root = getattr(root, "__cause__", None) or getattr(root, "orig", None)
-            msg = str(root) or str(exc)
+            log.exception("chat_turn_failed")
+            if isinstance(root, json.JSONDecodeError):
+                msg = (
+                    "Keyword research stopped while reading a reply. "
+                    "Confirm the selection again to finish the report."
+                )
+            else:
+                msg = str(root) or str(exc)
             yield _sse({"type": "error", "content": msg[:400]})
             yield _sse({"type": "done"})
             return

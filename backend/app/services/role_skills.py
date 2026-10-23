@@ -119,7 +119,7 @@ PHASE_SKILL_COVERAGE: list[dict[str, Any]] = [
     {
         "phase": 5,
         "title": "Search Demand & Keyword Research",
-        "skills": ["search_demand", "keyword_clustering", "create_topic"],
+        "skills": ["search_demand", "keyword_clustering", "create_topic", "seo_dataforseo"],
         "roles": ["content_seo_specialist"],
         "implemented": True,
     },
@@ -418,6 +418,14 @@ SKILL_ROLE_OWNERS: dict[str, dict[str, Any]] = {
         "trigger": ["technical_seo_specialist"],
         "approve": ["technical_seo_specialist"],
         "source": "Phase 7 companion — Claude SEO sitemap skill (audit only)",
+    },
+    "seo_dataforseo": {
+        "label": "DataForSEO live data",
+        "agent_key": "search_demand",
+        "owner": "content_seo_specialist",
+        "trigger": ["content_seo_specialist"],
+        "approve": ["content_seo_specialist"],
+        "source": "Phase 5 companion — Claude SEO DataForSEO skill via the REST API, not MCP",
     },
     "content_audit": {
         "label": "Existing Content Audit",

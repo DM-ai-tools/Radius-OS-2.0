@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "node ./node_modules/typescript/bin/tsc -b && node ./node_modules/vite/bin/vite.js build",
-    "preview": "vite preview --host 0.0.0.0 --port 4173",
-    "start": "vite preview --host 0.0.0.0 --port 4173"
+    "preview": "node ./scripts/preview.mjs",
+    "start": "node ./scripts/preview.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

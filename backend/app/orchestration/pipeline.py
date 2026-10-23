@@ -80,6 +80,8 @@ def agent_timeout_seconds(agent_key: str) -> int:
         return int(getattr(settings, "technical_seo_agent_timeout_seconds", 900) or 900)
     if agent_key == "search_demand":
         return int(getattr(settings, "search_demand_agent_timeout_seconds", 720) or 720)
+    if agent_key == "content_production":
+        return int(getattr(settings, "content_production_agent_timeout_seconds", 900) or 900)
     return int(getattr(settings, "agent_timeout_seconds", AGENT_TIMEOUT_SECONDS) or AGENT_TIMEOUT_SECONDS)
 
 
@@ -87,8 +89,14 @@ def _timeout_notice(agent_key: str) -> str:
     budget_min = agent_timeout_seconds(agent_key) // 60
     if agent_key == "search_demand":
         return (
-            f"Keyword research was stopped after {budget_min} minutes. "
-            "It reuses the Phase 3 sitemap instead of recrawling the live site — try again."
+            f"Keyword research was stopped after {budget_min} minutes, "
+            "before the report could be saved. Run it again — it uses the "
+            "saved sitemap and does not recrawl the site."
+        )
+    if agent_key == "content_production":
+        return (
+            f"Draft and preview was stopped after {budget_min} minutes, "
+            "before the page could be saved. Run it again."
         )
     if agent_key == "website_situation_agent":
         return (
@@ -286,10 +294,14 @@ async def process_chat_turn(
         from app.services.api_meter import api_meter_context
         from app.services.phase_validation import run_phase_with_validation
 
+        phase_budget = None
+        if agent_key == "search_demand":
+            phase_budget = float(get_settings().search_demand_budget_usd or 0) or None
         async with api_meter_context(
             client_id=client.id,
             session_id=session.id,
             agent_key=agent_key,
+            phase_budget_usd=phase_budget,
         ):
             runner_task = asyncio.create_task(
                 run_phase_with_validation(
@@ -320,6 +332,20 @@ async def process_chat_turn(
                 "content": _timeout_notice(agent_key),
             }
         ]
+        # A cancelled run leaves the phase looking active. Clear that so the
+        # next attempt is not blocked behind a run that already stopped.
+        status_attr = next(
+            (attr for attr, key in _STATUS_AGENT_PAIRS if key == agent_key),
+            None,
+        )
+        if status_attr and getattr(profile, status_attr, None) == "in_progress":
+            setattr(profile, status_attr, "not_started")
+            events.append(
+                {
+                    "type": "phase_status",
+                    "payload": {status_attr: "not_started"},
+                }
+            )
     await _persist_agent_events(db, session, client.id, events)
     return events
 

@@ -19,6 +19,9 @@ function friendlyApiError(detail: unknown, fallback: string): string {
   if (!text || text === "Internal Server Error" || text === "Request failed") {
     return "The API was unavailable (it may have been restarting). Refresh the page and try again.";
   }
+  if (text === "Invalid token" || text === "Session expired" || text === "Not authenticated") {
+    return "Your session expired. Log in again, then retry the download.";
+  }
   return text;
 }
 
@@ -80,6 +83,16 @@ async function requestRaw(path: string, opts: RequestOpts = {}): Promise<Respons
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
+    const detail = typeof err.detail === "string" ? err.detail : "";
+    if (
+      res.status === 401 &&
+      (detail === "Invalid token" ||
+        detail === "Session expired" ||
+        detail === "Not authenticated" ||
+        detail === "User inactive")
+    ) {
+      window.dispatchEvent(new CustomEvent("radius-auth-expired"));
+    }
     throw new Error(friendlyApiError(err.detail, "Request failed"));
   }
   return res;
@@ -93,7 +106,7 @@ async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
-export type ReportDownloadFormat = "pdf" | "docx";
+export type ReportDownloadFormat = "pdf" | "docx" | "csv";
 
 function triggerBrowserDownload(blob: Blob, filename: string): string {
   const url = URL.createObjectURL(blob);
@@ -128,6 +141,47 @@ export function downloadHtmlFile(html: string, filename: string): string {
   const name = cleaned.toLowerCase().endsWith(".html") ? cleaned : `${cleaned}.html`;
   return triggerBrowserDownload(new Blob([html], { type: "text/html;charset=utf-8" }), name);
 }
+
+export type SitePreviewDraft = {
+  title?: string;
+  url?: string;
+  meta_description?: string;
+  keyword?: string;
+  page_type?: string;
+  /** "create" or "refresh"; a refresh copies the design of its own live page. */
+  action?: string;
+  existing_page_url?: string;
+  markdown: string;
+  images?: Array<Record<string, unknown>>;
+};
+
+export type SitePreviewActivity = {
+  id: string;
+  at: number;
+  kind: "note" | "action" | "answer" | "decision" | "error";
+  text: string;
+};
+
+export type SitePreviewState = {
+  pageKey: string;
+  status: "none" | "starting" | "running" | "waiting" | "collecting" | "done" | "failed" | "stopped";
+  mode?: "build" | "edit";
+  stage?: string;
+  stageLabel?: string;
+  progress?: number;
+  startedAt?: number;
+  updatedAt?: number;
+  activity?: SitePreviewActivity[];
+  questions?: Array<{ question: string; answer: string; at: number }>;
+  reviewNotes?: string[];
+  report?: { summary: string; fonts: string[]; colours: string[]; referenceUrl: string } | null;
+  designPageUrl?: string;
+  designPageReason?: string;
+  credits?: number | null;
+  error?: string | null;
+  canUndo?: boolean;
+  hasHtml: boolean;
+};
 
 export type Permission = {
   agent_key: string;
@@ -172,6 +226,49 @@ export type Playground = {
   sections: PlaygroundSection[];
 };
 
+export type EngineProblem = {
+  severity: "error" | "warning" | "info" | string;
+  kind: string;
+  title: string;
+  detail: string;
+  count: number;
+  last_at: string | null;
+  clients?: string[];
+};
+export type EngineProvider = {
+  provider: string;
+  name: string;
+  configured: boolean;
+  mock: boolean;
+  state: "working" | "intermittent" | "failing" | "idle" | "no_key" | "test_mode" | "set_up" | string;
+  calls: number;
+  failed: number;
+  last_success_at: string | null;
+  last_error: { message: string; at: string } | null;
+};
+export type EnginePhase = {
+  agent_key: string;
+  label: string;
+  phase: number | null;
+  enabled: boolean;
+  runs: number;
+  failed: number;
+  typical_seconds: number | null;
+  last_state: string | null;
+  last_run_at: string | null;
+  last_client: string | null;
+};
+export type EngineRun = {
+  id: string;
+  agent_key: string;
+  label: string;
+  client_name: string | null;
+  state: "succeeded" | "failed" | "running" | "stopped" | string;
+  seconds: number | null;
+  error: string | null;
+  created_at: string | null;
+};
+
 export type EngineRoomPayload = {
   generated_at: string;
   window_days: number;
@@ -180,9 +277,17 @@ export type EngineRoomPayload = {
     agents_ok: number;
     open_issues: number;
     api_calls: number;
+    failed_calls?: number;
     estimated_cost_usd: number;
     clients: number;
+    runs?: number;
+    failed_runs?: number;
+    running_runs?: number;
   };
+  problems?: EngineProblem[];
+  providers?: EngineProvider[];
+  phases?: EnginePhase[];
+  recent_runs?: EngineRun[];
   agents: Array<{
     agent_key: string;
     label: string;
@@ -208,53 +313,80 @@ export type EngineRoomPayload = {
   feature_flags: Record<string, boolean>;
 };
 
+export type CostDay = { date: string; cost_usd: number; calls: number };
+export type CostVendorRow = {
+  vendor: string;
+  cost_usd: number;
+  calls: number;
+  unpriced_calls?: number;
+};
+export type CostPhaseRow = { agent_key: string; label?: string; cost_usd: number; calls: number };
+export type CostModelRow = {
+  vendor: string;
+  provider: string;
+  model: string;
+  cost_usd: number;
+  calls: number;
+  unpriced_calls?: number;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+};
+export type CostCall = {
+  id: string;
+  vendor?: string;
+  provider?: string;
+  operation?: string;
+  model?: string;
+  agent_key?: string | null;
+  phase?: string;
+  client_id?: string | null;
+  estimated_cost_usd?: number;
+  cost_usd?: number;
+  latency_ms?: number | null;
+  status?: string;
+  created_at?: string | null;
+};
+
 export type CostTrackerPayload = {
   generated_at: string;
   window_days: number;
   summary: {
     api_calls: number;
     estimated_cost_usd: number;
+    previous_cost_usd?: number;
+    failed_calls?: number;
     clients_with_usage: number;
   };
-  cost_by_vendor: Array<{ vendor: string; cost_usd: number; calls: number }>;
-  cost_by_model: Array<{
-    vendor: string;
-    provider: string;
-    model: string;
-    cost_usd: number;
-    calls: number;
-    prompt_tokens?: number | null;
-    completion_tokens?: number | null;
-  }>;
+  daily?: CostDay[];
+  cost_by_vendor: CostVendorRow[];
+  cost_by_model: CostModelRow[];
   cost_by_provider: Array<{ provider: string; cost_usd: number; calls: number }>;
-  cost_by_agent: Array<{ agent_key: string; cost_usd: number; calls: number }>;
+  cost_by_agent: CostPhaseRow[];
   cost_by_client: Array<{
     client_id: string | null;
     client_name: string;
+    client_url?: string | null;
     cost_usd: number;
     calls: number;
+    last_used_at?: string | null;
   }>;
-  recent_api_calls: Array<Record<string, unknown>>;
+  recent_api_calls: CostCall[];
 };
 
 export type ClientCostPayload = {
   client_id: string;
   window_days: number;
   estimated_cost_usd: number;
+  previous_cost_usd?: number;
   call_count: number;
-  cost_by_vendor: Array<{ vendor: string; cost_usd: number; calls: number }>;
-  cost_by_model: Array<{
-    vendor: string;
-    provider: string;
-    model: string;
-    cost_usd: number;
-    calls: number;
-    prompt_tokens?: number | null;
-    completion_tokens?: number | null;
-  }>;
+  failed_calls?: number;
+  last_used_at?: string | null;
+  daily?: CostDay[];
+  cost_by_vendor: CostVendorRow[];
+  cost_by_model: CostModelRow[];
   cost_by_provider: Array<{ provider: string; cost_usd: number; calls: number }>;
-  cost_by_agent: Array<{ agent_key: string; cost_usd: number; calls: number }>;
-  calls: Array<Record<string, unknown>>;
+  cost_by_agent: CostPhaseRow[];
+  calls: CostCall[];
 };
 
 export type Client = {
@@ -458,35 +590,32 @@ export const api = {
     }),
   deleteClient: (token: string | null, id: string) =>
     request<void>(`/api/v1/clients/${id}`, { method: "DELETE", token }),
-  contentProductionSitePreview: (
+  /** Start, change, stop or undo the Manus client-site preview of a draft. */
+  sitePreviewAction: (
     token: string,
     clientId: string,
     body: {
-      title?: string;
-      url?: string;
-      meta_description?: string;
-      keyword?: string;
-      markdown: string;
-      images?: Array<Record<string, unknown>>;
-      media_base?: string;
-      /** Inline images as data URIs for offline/downloadable HTML. */
-      embed_images?: boolean;
+      action: "status" | "build" | "edit" | "stop" | "undo";
+      draft: SitePreviewDraft;
+      instructions?: string;
+      /** data:image/...;base64,... — at most 4. */
+      screenshots?: string[];
     },
   ) =>
-    request<{
-      preview_html: string;
-      brand_applied: boolean;
-      layout_available: boolean;
-      design_source?: string;
-      design_fallback?: string | null;
-      wordpress_kit_id?: string | null;
-      images_embedded?: boolean;
-    }>(`/api/v1/clients/${clientId}/content-production/site-preview`, {
+    request<SitePreviewState>(`/api/v1/clients/${clientId}/content-production/site-preview`, {
       method: "POST",
       token,
       body: JSON.stringify(body),
-      timeoutMs: 90_000,
+      timeoutMs: 120_000,
     }),
+  /** Poll a preview run; with includeHtml, also the finished page. */
+  sitePreviewState: (token: string, clientId: string, pageKey: string, includeHtml = false) =>
+    request<SitePreviewState & { html?: string }>(
+      `/api/v1/clients/${clientId}/content-production/site-preview?key=${encodeURIComponent(pageKey)}${
+        includeHtml ? "&include_html=true" : ""
+      }`,
+      { token },
+    ),
   createSession: (token: string, client_id: string) =>
     request<{ id: string }>("/api/v1/sessions", {
       method: "POST",
@@ -832,7 +961,7 @@ export const api = {
     );
     return { filename, report_count: null as number | null };
   },
-  /** Download one phase report as PDF or Word by card_type. */
+  /** Download one phase report as PDF or Word by card_type (keyword research also as CSV). */
   downloadReport: async (
     token: string | null,
     client_id: string,

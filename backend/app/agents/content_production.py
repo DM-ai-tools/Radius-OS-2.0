@@ -51,6 +51,7 @@ def _content_context_builder(db, client, profile):
         return build_content_context(
             keyword=keyword,
             page_type=page_type,
+            service_id=service_id,
             commercial=commercial,
             marketing=dict(profile.marketing_context or {}),
             competitive=dict(profile.competitive_landscape_summary or {}),
@@ -104,6 +105,7 @@ async def run_content_production(
     message: str,
 ) -> list[dict]:
     _ = load_skill("content_production")
+    _ = load_skill("seo_dataforseo")
     load_skill("content_brief")
     load_skill("create_content")
     # Canonical Google helpful-content / scaled-abuse / Who-How-Why evidence for Phase 10

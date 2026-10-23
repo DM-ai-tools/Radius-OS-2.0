@@ -238,7 +238,8 @@ def test_site_architecture_docx_shows_url_mapping_columns():
 def test_report_export_formats_dispatch():
     from app.api.clients import REPORT_EXPORT_FORMATS, _build_export_body
 
-    assert set(REPORT_EXPORT_FORMATS) == {"pdf", "docx"}
+    # CSV is served for keyword research only (tests/test_report_downloads.py).
+    assert set(REPORT_EXPORT_FORMATS) == {"pdf", "docx", "csv"}
     bundle = {
         "client": {"name": "Acme"},
         "exported_at": "2026-08-12T12:00:00+00:00",

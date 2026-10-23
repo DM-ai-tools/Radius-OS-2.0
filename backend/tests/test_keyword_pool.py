@@ -12,6 +12,7 @@ class _Settings:
     keyword_max_seeds = 50
     keyword_relevance_max_per_seed = 60
     keyword_relevance_max_input_per_seed = 80
+    keyword_labs_page_limit = 1000
 
 
 def test_resolve_keyword_pool_limits_scales_with_target():
@@ -20,6 +21,13 @@ def test_resolve_keyword_pool_limits_scales_with_target():
     assert limits["max_seeds"] >= 40
     assert limits["limit_per_mode"] >= 35
     assert limits["keyword_relevance_max_per_seed"] >= 60
+
+
+def test_every_dataforseo_call_uses_the_configured_page():
+    wide = resolve_keyword_pool_limits(pool_target=4500, seed_count=40, settings=_Settings())
+    narrow = resolve_keyword_pool_limits(pool_target=4500, seed_count=8, settings=_Settings())
+    assert wide["limit_per_mode"] == 1000
+    assert narrow["limit_per_mode"] == 1000
 
 
 def test_resolve_client_pool_target_prefers_commercial_override():

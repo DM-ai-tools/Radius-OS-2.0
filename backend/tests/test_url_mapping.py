@@ -158,11 +158,28 @@ def test_url_n_normalizes():
 
 def test_taxonomy_levels_from_path():
     tax = _taxonomy_levels("/services/local-seo/melbourne")
-    assert tax["level"] == 3
-    assert tax["l1_category"] == "Services"
-    assert tax["l2_subcategory"] == "Local Seo"
-    assert tax["l3_subsubcategory"] == "Melbourne"
+    assert tax["level"] == 2
+    assert tax["l1_category"] == "Local Seo"
+    assert tax["l2_subcategory"] == "Melbourne"
+    assert tax["l3_subsubcategory"] is None
     assert tax["l4_attribution"] is None
+
+
+def test_taxonomy_skips_structural_folders():
+    hub = _taxonomy_levels("/product-category/accessories/")
+    assert hub["level"] == 1
+    assert hub["l1_category"] == "Accessories"
+    assert hub["l2_subcategory"] is None
+    nested = _taxonomy_levels("/product-category/beds-furniture/bed-frames/")
+    assert nested["level"] == 2
+    assert nested["l1_category"] == "Beds Furniture"
+    assert nested["l2_subcategory"] == "Bed Frames"
+    landing = _taxonomy_levels("/locations/adjustable-beds-brisbane/")
+    assert landing["sheet_kind"] == "landing"
+    assert landing["l1_category"] == "Adjustable Beds Brisbane"
+    brand = _taxonomy_levels("/brands/ergoadjust/")
+    assert brand["sheet_kind"] == "brand"
+    assert brand["l1_category"] == "Ergoadjust"
 
 
 def test_map_cluster_sheet_columns_optimize_existing():
@@ -179,16 +196,19 @@ def test_map_cluster_sheet_columns_optimize_existing():
 
     assert out["current_url"] == "/services/local-seo-melbourne"
     assert out["proposed_url"] is None
-    assert out["status"] in ("Optimize Existing", "Review / Merge / Redirect")
+    assert out["status"] == "LIVE"
     assert out["primary_keyword"] == "local seo melbourne"
     assert out["search_volume"] == 1200
     assert out["cpc"] == 4.5
     assert out["combined_cluster_volume"] == 2000
-    assert "seo agency melbourne" in out["secondary_keywords_sheet"]
-    assert out["l1_category"] == "Services"
-    assert out["l2_subcategory"] == "Local Seo Melbourne"
-    assert out["priority"] in ("High", "Medium", "Low")
-    assert out["in_scope"] == "Yes"
+    assert out["secondary_keywords_sheet"] == ["seo agency melbourne"]
+    assert out["l1_category"] == "Local Seo Melbourne"
+    assert out["l2_subcategory"] is None
+    assert out["l4_attribution"] is None
+    assert out["page_type"] == "Hub Page"
+    assert out["priority"] == "P0"
+    assert out["ia_page_type"]
+    assert out["in_scope"] == "YES"
     assert out["est_products"] == 2
     assert isinstance(out["notes"], str) and out["notes"]
 
@@ -211,10 +231,15 @@ def test_map_cluster_sheet_columns_create_new():
     assert out["action"] == "CREATE"
     assert out["current_url"] is None
     assert out["proposed_url"] == "/blog/best-crm-software"
-    assert out["status"] == "Create New"
+    assert out["status"] == "NEW"
     assert out["combined_cluster_volume"] == 5900
-    assert out["l1_category"] == "Blog"
-    assert out["in_scope"] == "Yes"
+    assert out["secondary_keywords_sheet"] == ["crm tools comparison"]
+    assert out["l1_category"] == "Best Crm Software"
+    assert out["page_type"] == "Hub Page"
+    # Priority weighs opportunity too: a new hub with 5,900/mo of demand is P0.
+    assert out["priority"] == "P0"
+    assert "5,900/mo" in out["priority_reason"]
+    assert out["in_scope"] == "YES"
 
 
 def test_map_cluster_low_score_existing_page_uses_current_url():
@@ -238,11 +263,75 @@ def test_map_cluster_low_score_existing_page_uses_current_url():
     assert out["action"] in ("OPTIMIZE_EXISTING", "REVIEW_MERGE_REDIRECT")
 
 
+def test_secondary_keywords_are_the_cluster_not_a_modifier_pattern():
+    cluster = {
+        "name": "Bookcase",
+        "primary_keyword": "bookcase",
+        "keywords": [
+            {"keyword": "bookcase", "role": "Primary", "volume": 9900},
+            {"keyword": "bookcase with doors", "role": "Secondary", "volume": 400},
+        ],
+    }
+    out = map_cluster_to_url(
+        cluster,
+        crawled_pages=[],
+        commercial={"geography": "Brisbane, Australia"},
+    )
+    assert out["secondary_keywords_sheet"] == ["bookcase with doors"]
+    assert out["combined_cluster_volume"] == 10300
+    local = map_cluster_to_url(
+        {
+            "name": "Bedroom Furniture Brisbane",
+            "primary_keyword": "bedroom furniture brisbane",
+            "keywords": [{"keyword": "bedroom furniture brisbane", "volume": 210}],
+        },
+        crawled_pages=[],
+        commercial={"geography": "Brisbane, Australia"},
+    )
+    assert local["secondary_keywords_sheet"] == []
+    assert local["combined_cluster_volume"] == 210
+
+
+def test_pillar_becomes_the_l1_category():
+    report = build_final_url_map(
+        {"clusters": [_cluster()]},
+        website={"pages": _crawl()},
+        pillar_structure=[{"pillar": "SEO", "clusters": [{"name": "Local SEO Melbourne"}]}],
+    )
+    row = report["final_url_map"][0]
+    assert row["l1_category"] == "SEO"
+    assert row["l2_subcategory"] == "Local SEO Melbourne"
+    assert row["l3_subsubcategory"] is None
+    assert row["l4_attribution"] is None
+    assert row["page_type"] == "Landing Page"
+    assert row["status"] == "LIVE"
+    assert row["priority"] == "P0"
+    assert row["priority_reason"] == "Landing Page +2, live +0.5, 2,000/mo +3, HIGH match +1 = 6.5 -> P0"
+    assert row["pillar_cluster_id"] == row["cluster_id"] and not report["link_warnings"]
+
+
 def test_in_scope_review_when_weak_relevance():
     cluster = _cluster()
     cluster["keywords"][0]["relevance_reason"] = "gap_only"
     out = map_cluster_to_url(cluster, crawled_pages=_crawl())
-    assert out["in_scope"] == "Review"
+    assert out["in_scope"] == "REVIEW"
+
+
+def test_rejected_clusters_are_not_url_mapped():
+    kept = _cluster()
+    dropped = {
+        "name": "American Marketing Association Code of Ethics",
+        "primary_keyword": "american marketing association code of ethics",
+        "intent": "informational",
+        "cluster_sense_verdict": "drop",
+        "keywords": [
+            {"keyword": "american marketing association code of ethics", "role": "Primary", "volume": 90}
+        ],
+    }
+    report = build_final_url_map({"clusters": [kept, dropped]})
+    primaries = [row["primary_keyword"] for row in report["final_url_map"]]
+    assert primaries == ["local seo melbourne"]
+    assert report["final_url_map"][0]["secondary_keywords"]
 
 
 def test_build_final_url_map_includes_all_sheet_columns():

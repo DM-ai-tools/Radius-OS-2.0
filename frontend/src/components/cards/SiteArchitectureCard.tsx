@@ -1,4 +1,6 @@
-import WorkbookTable from "./WorkbookTable";
+import { useMemo, useState } from "react";
+import SiteMindTree, { type TreeRow } from "./SiteMindTree";
+import UrlMapBoard from "./UrlMapBoard";
 import { useStageFocus } from "../../lib/stageFocus";
 
 type Props = {
@@ -15,58 +17,6 @@ function asRows(raw: unknown): Array<Record<string, unknown>> {
 function fmtNum(v: unknown): string {
   if (v == null || v === "") return "—";
   return String(v);
-}
-
-function fmtVol(v: unknown): string {
-  if (v == null || v === "") return "—";
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toLocaleString() : String(v);
-}
-
-function fmtCpc(v: unknown): string {
-  if (v == null || v === "") return "—";
-  const n = Number(v);
-  return Number.isFinite(n) ? `$${n.toFixed(2)}` : String(v);
-}
-
-function fmtKwList(raw: unknown, n = 10): string {
-  if (!Array.isArray(raw) || !raw.length) return "—";
-  return raw.slice(0, n).map(String).filter(Boolean).join(", ") || "—";
-}
-
-/** Status / Priority / In Scope? — same small colored-chip treatment. */
-function StatusChip({ value }: { value: unknown }) {
-  const v = String(value || "").trim();
-  if (!v) return <span>—</span>;
-  const lower = v.toLowerCase();
-  const tone =
-    lower.includes("create") || lower === "high"
-      ? "coral"
-      : lower.includes("review") || lower === "medium"
-        ? "amber"
-        : "teal";
-  const colors: Record<string, { bg: string; fg: string }> = {
-    coral: { bg: "rgba(153, 60, 29, 0.14)", fg: "#993c1d" },
-    amber: { bg: "rgba(133, 79, 11, 0.14)", fg: "#854f0b" },
-    teal: { bg: "rgba(15, 118, 110, 0.14)", fg: "#0f766e" },
-  };
-  const c = colors[tone];
-  return (
-    <span
-      style={{
-        display: "inline-block",
-        fontSize: 10,
-        fontWeight: 700,
-        padding: "2px 7px",
-        borderRadius: 4,
-        whiteSpace: "nowrap",
-        background: c.bg,
-        color: c.fg,
-      }}
-    >
-      {v}
-    </span>
-  );
 }
 
 const PAGE_TYPE_STYLES: Record<
@@ -166,10 +116,200 @@ function resolveUrlColumns(row: Record<string, unknown>): { current: string | nu
   const action = String(row.action || row.status || "").toUpperCase();
   const sel = row.selected_url ? String(row.selected_url).trim() : "";
   const create = row.create_url ? String(row.create_url).trim() : "";
+  // Folds into a parent page that is not built yet: it lives on that new page.
+  if (action === "FOLD_INTO_NEW_PARENT") {
+    const target = row.target_url ? String(row.target_url).trim() : "";
+    return { current: null, proposed: target || sel || null };
+  }
   if (action.includes("CREATE") || action === "NEW") {
     return { current: null, proposed: create || sel || null };
   }
   return { current: sel || null, proposed: null };
+}
+
+const DISTINCT_PAGE =
+  /^(?:how to|how do|how does|why |when to|should i|best |top )\b|\b(?:pricing|prices?|costs?|how much|quotes?|rates?|buy|buying|purchase)\b|\b(?:vs|versus)\b/i;
+const LINE_MODIFIERS = [
+  "near me",
+  "gold coast",
+  "companies",
+  "company",
+  "businesses",
+  "business",
+  "agencies",
+  "agency",
+  "services",
+  "service",
+  "consultants",
+  "consultant",
+  "consultancy",
+  "firms",
+  "firm",
+  "providers",
+  "provider",
+  "specialists",
+  "specialist",
+  "experts",
+  "expert",
+  "freelancers",
+  "freelancer",
+  "australia",
+  "australian",
+  "sydney",
+  "melbourne",
+  "brisbane",
+  "perth",
+  "adelaide",
+  "canberra",
+  "hobart",
+  "darwin",
+  "nsw",
+  "vic",
+  "qld",
+  "tas",
+  "act",
+  "online",
+  "meaning",
+  "definition",
+  "defined",
+].sort((a, b) => b.length - a.length);
+const LINE_FILLER = new Set([
+  "in",
+  "for",
+  "the",
+  "a",
+  "an",
+  "and",
+  "of",
+  "to",
+  "with",
+  "is",
+  "are",
+  "your",
+  "our",
+]);
+/** Offer name after commercial, city, and "meaning" words are removed. */
+function publishableHead(keyword: string): string | null {
+  const raw = keyword.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!raw || DISTINCT_PAGE.test(raw)) return null;
+  let text = raw.replace(/search engine optimization/g, "search engine optimisation");
+  text = text.replace(/^(?:what is|what are)\s+/, "");
+  for (const mod of LINE_MODIFIERS) {
+    const pattern = mod.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+");
+    text = text.replace(new RegExp(`\\b${pattern}\\b`, "g"), " ");
+  }
+  let tokens = text.split(/\s+/).filter((token) => token && !LINE_FILLER.has(token));
+  if (tokens.includes("marketing")) {
+    const without = tokens.filter((token) => token !== "marketing");
+    const left = without.join(" ");
+    if (left === "seo" || left === "search engine optimisation" || left === "") tokens = without;
+  }
+  text = tokens.join(" ");
+  text = text.replace(/optimization/g, "optimisation").replace(/organization/g, "organisation");
+  return text || null;
+}
+
+function offerIndex(raw: unknown): Map<string, string> {
+  const index = new Map<string, string>();
+  if (!Array.isArray(raw)) return index;
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const record = row as Record<string, unknown>;
+    const service = String(record.service || "").trim();
+    if (!service) continue;
+    const canon = publishableHead(service) || service.toLowerCase();
+    const names = [service, ...(Array.isArray(record.suggested) ? record.suggested : []), ...(Array.isArray(record.added) ? record.added : [])];
+    for (const name of names) {
+      const line = publishableHead(String(name)) || String(name).toLowerCase().trim();
+      if (line) index.set(line, canon);
+    }
+  }
+  return index;
+}
+
+/** One row when the offer is the same line, such as SEO and search engine optimisation. */
+function foldSameOffer(
+  rows: Array<Record<string, unknown>>,
+  synonyms: unknown,
+): Array<Record<string, unknown>> {
+  const index = offerIndex(synonyms);
+  const groups = new Map<string, number[]>();
+  rows.forEach((row, indexNo) => {
+    const line =
+      publishableHead(String(row.primary_keyword || row.keyword || "")) ||
+      publishableHead(String(row.l1_category || ""));
+    if (!line) return;
+    const head = index.get(line) || line;
+    const list = groups.get(head) || [];
+    list.push(indexNo);
+    groups.set(head, list);
+  });
+  const drop = new Set<number>();
+  for (const indexes of groups.values()) {
+    if (indexes.length < 2) continue;
+    indexes.sort((a, b) => {
+      const liveA = rows[a].current_url ? 1 : 0;
+      const liveB = rows[b].current_url ? 1 : 0;
+      if (liveA !== liveB) return liveB - liveA;
+      return Number(rows[b].search_volume || 0) - Number(rows[a].search_volume || 0);
+    });
+    const owner = rows[indexes[0]];
+    const seconds = Array.isArray(owner.secondary_keywords)
+      ? owner.secondary_keywords.map((item) => String(item).trim()).filter(Boolean)
+      : [];
+    const seen = new Set(seconds.map((item) => item.toLowerCase()));
+    const primary = String(owner.primary_keyword || "").trim().toLowerCase();
+    if (primary) seen.add(primary);
+    for (const index of indexes.slice(1)) {
+      const other = String(rows[index].primary_keyword || rows[index].keyword || "").trim();
+      if (other && !seen.has(other.toLowerCase())) {
+        seconds.unshift(other);
+        seen.add(other.toLowerCase());
+      }
+      const extras = Array.isArray(rows[index].secondary_keywords) ? rows[index].secondary_keywords : [];
+      for (const extra of extras) {
+        const text = String(extra).trim();
+        if (text && !seen.has(text.toLowerCase())) {
+          seconds.push(text);
+          seen.add(text.toLowerCase());
+        }
+      }
+      drop.add(index);
+    }
+    owner.secondary_keywords = seconds.slice(0, 10);
+  }
+  return rows.filter((_, index) => !drop.has(index));
+}
+
+function isServiceNode(row: Record<string, unknown>): boolean {
+  const kind = String(row.page_type || row.type || "").toLowerCase();
+  return kind === "service" || kind === "subservice" || kind === "sub_service";
+}
+
+function serviceLine(label: string): string {
+  const head = publishableHead(label);
+  if (head) return head;
+  const raw = label.toLowerCase().replace(/\s+/g, " ").trim();
+  if (raw === "seo" || raw === "search engine optimisation" || raw === "search engine optimization") {
+    return "search engine optimisation";
+  }
+  return "";
+}
+
+/** Drop "near me" / city boxes when the service page is already in the tree. */
+function foldModifierPages(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const homes = new Set<string>();
+  for (const row of rows) {
+    if (!isServiceNode(row)) continue;
+    const line = serviceLine(String(row.title || row.primary_keyword || row.keyword || ""));
+    if (line) homes.add(line);
+  }
+  return rows.filter((row) => {
+    const label = String(row.title || row.primary_keyword || row.keyword || "");
+    const head = publishableHead(label);
+    if (!head || isServiceNode(row)) return true;
+    return !homes.has(head);
+  });
 }
 
 function normalizeUrlMapRow(row: Record<string, unknown>): Record<string, unknown> {
@@ -194,7 +334,12 @@ function collectUrlMapRows(payload: Record<string, unknown>): Array<Record<strin
   const fromTop = asRows(payload.final_url_map);
   const fromCategory = asRows(payload.category_url_mapping).filter((r) => r.row_type !== "section");
   const raw = fromReport.length ? fromReport : fromTop.length ? fromTop : fromCategory;
-  return raw.map(normalizeUrlMapRow);
+  const seeding =
+    payload.keyword_seeding && typeof payload.keyword_seeding === "object"
+      ? (payload.keyword_seeding as Record<string, unknown>)
+      : {};
+  const synonyms = payload.offer_synonyms || report.offer_synonyms || seeding.seed_synonyms;
+  return foldSameOffer(raw.map(normalizeUrlMapRow), synonyms);
 }
 
 function strList(raw: unknown, n = 4): string {
@@ -241,34 +386,52 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
       : null;
 
   const urlMap = collectUrlMapRows(payload);
-  const categoryMapping = asRows(payload.category_url_mapping);
-  const categoryWorkbook =
-    payload.workbook && typeof payload.workbook === "object"
-      ? (payload.workbook as Record<string, unknown>)
-      : null;
-  const categoryColumns = Array.isArray(categoryWorkbook?.columns)
-    ? (categoryWorkbook!.columns as string[])
-    : [
-        "level",
-        "l1_category",
-        "l2_subcategory",
-        "l3_sub_subcategory",
-        "l4_attribution",
-        "current_url",
-        "proposed_url",
-        "status",
-        "primary_keyword",
-        "search_volume_mo",
-        "cpc",
-        "secondary_keywords",
-        "combined_cluster_volume",
-        "page_type",
-        "priority",
-        "notes",
-        "est_products",
-        "in_scope",
-      ];
-  const tree = asRows(payload.target_url_tree);
+  const mapRows = urlMap;
+  const keywordsByPath = useMemo(() => {
+    const index = new Map<string, { primary: string; secondary: string }>();
+    const pathKey = (raw: unknown) => String(raw || "").trim().replace(/\/+$/, "").toLowerCase();
+    for (const row of mapRows) {
+      const primary = String(row.primary_keyword || row.keyword || "").trim();
+      const secondary = (Array.isArray(row.secondary_keywords) ? row.secondary_keywords : [])
+        .map((item) =>
+          typeof item === "string"
+            ? item.trim()
+            : String((item as Record<string, unknown>)?.keyword || "").trim(),
+        )
+        .filter(Boolean)
+        .slice(0, 10)
+        .join(", ");
+      for (const raw of [row.current_url, row.proposed_url, row.selected_url, row.target_url, row.create_url]) {
+        const key = pathKey(raw);
+        if (key) index.set(key, { primary, secondary });
+      }
+    }
+    return index;
+  }, [mapRows]);
+  const tree = useMemo(
+    () => foldModifierPages(asRows(payload.target_url_tree)),
+    [payload.target_url_tree],
+  );
+  const [treeView, setTreeView] = useState<"map" | "table">("map");
+  const treeRows = useMemo(
+    (): TreeRow[] =>
+      tree.map((n) => ({
+        path: String(n.path || n.url || "/"),
+        title: n.title ? String(n.title) : null,
+        kind: String(n.page_type || n.type || ""),
+        parent: n.parent ? String(n.parent) : null,
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [payload.target_url_tree],
+  );
+  const treeRoot = (() => {
+    const raw = String(payload.primary_url || payload.domain || "");
+    try {
+      return raw ? new URL(/^https?:/i.test(raw) ? raw : `https://${raw}`).host.replace(/^www\./, "") : String(payload.client || "Home");
+    } catch {
+      return String(payload.client || "Home");
+    }
+  })();
   const ownership = asRows(payload.cluster_ownership);
   const nav =
     payload.navigation && typeof payload.navigation === "object"
@@ -330,25 +493,14 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
               .slice(0, 5)
               .join(", ")}`
           : ""}
-        {current.method ? ` · Crawl: ${String(current.method)}` : ""}
       </p>
-      {payload.executive_summary ? (
-        <p style={{ fontSize: 14, lineHeight: 1.5 }}>{String(payload.executive_summary)}</p>
-      ) : null}
-      {payload.competitor_ia_notes ? (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>{String(payload.competitor_ia_notes)}</p>
-      ) : null}
 
-      <WorkbookTable
-        title="Category & URL Mapping (workbook)"
-        columns={categoryColumns}
-        rows={(categoryMapping.length ? categoryMapping : urlMap).map(normalizeUrlMapRow)}
-        maxRows={25}
-        stageFocus={{ focused: focus.focused, onToggle: focus.toggle, disabled: !canAct }}
+      <UrlMapBoard
+        rows={mapRows}
+        canAct={canAct}
+        focused={focus.focused}
+        onToggle={focus.toggle}
       />
-      <p style={{ fontSize: 12, color: "var(--muted)", marginTop: -8 }}>
-        Uncheck Focus to leave a URL out of later stages.
-      </p>
 
       <div className="cs-funnel-strip">
         <span>
@@ -530,8 +682,21 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
         </p>
       ) : null}
 
-      <h4 style={{ marginBottom: 8 }}>Target URL tree</h4>
-      {tree.length ? (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+        <h4 style={{ margin: 0 }}>Target URL tree</h4>
+        {tree.length ? (
+          <span className="dp-seg" role="group" aria-label="URL tree view">
+            <button type="button" aria-pressed={treeView === "map"} onClick={() => setTreeView("map")}>
+              Map
+            </button>
+            <button type="button" aria-pressed={treeView === "table"} onClick={() => setTreeView("table")}>
+              Table
+            </button>
+          </span>
+        ) : null}
+      </div>
+      {tree.length && treeView === "map" ? <SiteMindTree rows={treeRows} rootLabel={treeRoot} /> : null}
+      {tree.length && treeView === "table" ? (
         <div style={{ overflowX: "auto", marginBottom: 14 }}>
           <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
             <thead>
@@ -539,7 +704,8 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
                 <th style={{ padding: "6px 8px" }}>Type</th>
                 <th style={{ padding: "6px 8px" }}>Path</th>
                 <th style={{ padding: "6px 8px" }}>Depth</th>
-                <th style={{ padding: "6px 8px" }}>Keyword</th>
+                <th style={{ padding: "6px 8px" }}>Primary Keyword</th>
+                <th style={{ padding: "6px 8px" }}>Secondary Keywords</th>
                 <th style={{ padding: "6px 8px" }}>Cluster</th>
                 <th style={{ padding: "6px 8px" }}>Parent</th>
                 <th style={{ padding: "6px 8px" }}>Absolute URL</th>
@@ -568,7 +734,24 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
                   </td>
                   <td style={{ padding: "6px 8px" }}>{fmtNum(n.depth)}</td>
                   <td style={{ padding: "6px 8px" }}>
-                    {String(n.primary_keyword || n.keyword || "—")}
+                    {String(
+                      n.primary_keyword ||
+                        n.keyword ||
+                        keywordsByPath.get(String(n.path || n.url || "").trim().replace(/\/+$/, "").toLowerCase())?.primary ||
+                        "—",
+                    )}
+                  </td>
+                  <td style={{ padding: "6px 8px", fontSize: 11 }}>
+                    {(() => {
+                      const listed = Array.isArray(n.secondary_keywords)
+                        ? n.secondary_keywords.map((item) => String(item).trim()).filter(Boolean).join(", ")
+                        : "";
+                      return (
+                        listed ||
+                        keywordsByPath.get(String(n.path || n.url || "").trim().replace(/\/+$/, "").toLowerCase())?.secondary ||
+                        "—"
+                      );
+                    })()}
                   </td>
                   <td style={{ padding: "6px 8px", fontSize: 11 }}>{String(n.cluster || "—")}</td>
                   <td style={{ padding: "6px 8px", fontSize: 11, color: "var(--muted)" }}>
@@ -585,113 +768,8 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
             <p style={{ fontSize: 11, color: "var(--muted)" }}>+{tree.length - 40} more URLs in payload</p>
           ) : null}
         </div>
-      ) : (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>—</p>
-      )}
-
-      <h4 style={{ marginBottom: 8 }}>URL mapping &amp; taxonomy plan</h4>
-      {urlMap.length ? (
-        <>
-          <h5 style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700 }}>Taxonomy &amp; status</h5>
-          <div style={{ overflowX: "auto", marginBottom: 14 }}>
-            <table className="kw-report-table" style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
-                  <th style={{ padding: "5px 7px" }}>Level</th>
-                  <th style={{ padding: "5px 7px" }}>L1 Category</th>
-                  <th style={{ padding: "5px 7px" }}>L2 Subcategory</th>
-                  <th style={{ padding: "5px 7px" }}>L3 Sub-Subcategory</th>
-                  <th style={{ padding: "5px 7px" }}>L4 Attribution</th>
-                  <th style={{ padding: "5px 7px", minWidth: 140 }}>Current URL</th>
-                  <th style={{ padding: "5px 7px", minWidth: 140 }}>Proposed URL (if new)</th>
-                  <th style={{ padding: "5px 7px" }}>Status</th>
-                  <th style={{ padding: "5px 7px" }}>Page Type</th>
-                  <th style={{ padding: "5px 7px" }}>Priority</th>
-                </tr>
-              </thead>
-              <tbody>
-                {urlMap.slice(0, 60).map((r, i) => (
-                  <tr
-                    key={`tax-${String(r.cluster || r.primary_keyword)}-${i}`}
-                    style={{ borderBottom: "1px solid var(--line)" }}
-                  >
-                    <td style={{ padding: "5px 7px" }}>{fmtNum(r.level)}</td>
-                    <td style={{ padding: "5px 7px" }}>{String(r.l1_category || "—")}</td>
-                    <td style={{ padding: "5px 7px" }}>{String(r.l2_subcategory || "—")}</td>
-                    <td style={{ padding: "5px 7px" }}>{String(r.l3_subsubcategory || "—")}</td>
-                    <td style={{ padding: "5px 7px" }}>{String(r.l4_attribution || "—")}</td>
-                    <td style={{ padding: "5px 7px", fontSize: 10, color: "var(--muted)" }}>
-                      {String(r.current_url || "—")}
-                    </td>
-                    <td style={{ padding: "5px 7px", fontSize: 10, fontWeight: 600 }}>
-                      {String(r.proposed_url || "—")}
-                    </td>
-                    <td style={{ padding: "5px 7px" }}>
-                      <StatusChip value={r.status || r.action} />
-                    </td>
-                    <td style={{ padding: "5px 7px" }}>
-                      <PageTypeChip value={r.page_type || r.type} />
-                    </td>
-                    <td style={{ padding: "5px 7px" }}>
-                      <StatusChip value={r.priority || r.score_band} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <h5 style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700 }}>Keywords &amp; opportunity</h5>
-          <div style={{ overflowX: "auto", marginBottom: 14 }}>
-            <table className="kw-report-table" style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
-                  <th style={{ padding: "5px 7px" }}>Primary Keyword</th>
-                  <th style={{ padding: "5px 7px" }}>Search Volume (mo)</th>
-                  <th style={{ padding: "5px 7px" }}>CPC ($)</th>
-                  <th style={{ padding: "5px 7px", minWidth: 180 }}>Secondary Keywords (5-10)</th>
-                  <th style={{ padding: "5px 7px" }}>Combined Cluster Volume</th>
-                  <th style={{ padding: "5px 7px" }}>Est. Products</th>
-                  <th style={{ padding: "5px 7px" }}>In Scope?</th>
-                  <th style={{ padding: "5px 7px", minWidth: 160 }}>Notes</th>
-                </tr>
-              </thead>
-              <tbody>
-                {urlMap.slice(0, 60).map((r, i) => (
-                  <tr
-                    key={`kw-${String(r.cluster || r.primary_keyword)}-${i}`}
-                    style={{ borderBottom: "1px solid var(--line)" }}
-                  >
-                    <td style={{ padding: "5px 7px", fontWeight: 600 }}>
-                      {String(r.primary_keyword || "—")}
-                    </td>
-                    <td style={{ padding: "5px 7px" }}>{fmtVol(r.search_volume)}</td>
-                    <td style={{ padding: "5px 7px" }}>{fmtCpc(r.cpc)}</td>
-                    <td style={{ padding: "5px 7px", fontSize: 10 }}>
-                      {fmtKwList(r.secondary_keywords_sheet)}
-                    </td>
-                    <td style={{ padding: "5px 7px" }}>{fmtVol(r.combined_cluster_volume)}</td>
-                    <td style={{ padding: "5px 7px" }}>{fmtNum(r.est_products)}</td>
-                    <td style={{ padding: "5px 7px" }}>
-                      <StatusChip value={r.in_scope} />
-                    </td>
-                    <td style={{ padding: "5px 7px", fontSize: 10, color: "var(--muted)" }}>
-                      {String(r.notes || "—")}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {urlMap.length > 60 ? (
-            <p style={{ fontSize: 11, color: "var(--muted)" }}>+{urlMap.length - 60} more rows in payload</p>
-          ) : null}
-        </>
-      ) : (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>
-          No URL mapping rows yet — run Site Architecture after Search Demand and Content Strategy.
-        </p>
-      )}
+      ) : null}
+      {!tree.length ? <p style={{ fontSize: 13, color: "var(--muted)" }}>—</p> : null}
 
       <h4 style={{ marginBottom: 8 }}>Primary navigation</h4>
       {primaryNav.length ? (

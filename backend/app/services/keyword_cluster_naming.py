@@ -1,7 +1,10 @@
-"""Claude names SERP clusters and picks a primary from members only.
+"""Claude names SERP clusters. Naming only.
 
-It never creates keywords, never moves a keyword between clusters, and never
-supplies a metric. A primary that is not already in the cluster is ignored.
+It never creates keywords, never moves a keyword between clusters, never
+supplies a metric, and never picks the primary keyword: the primary and the
+member roles are decided in one place (``keyword_cluster_roles``) from measured
+metrics, and a primary suggested here is ignored. The cluster's primary is
+shown to the model so the name fits the page's target.
 """
 
 from __future__ import annotations
@@ -11,21 +14,21 @@ import re
 from typing import Any
 
 from app.config import get_settings
-from app.integrations.llm import _parse_json_content, _skill_chat
+from app.integrations.llm import _parse_json_content, keyword_analysis_chat, keyword_analysis_ready
 from app.logging_config import get_logger
 
 log = get_logger("keyword_cluster_naming")
 
 _SYSTEM = """\
-You name keyword clusters that are already grouped. For each cluster pick a
-short name and one primary keyword.
+You name keyword clusters that are already grouped and already have a primary
+keyword. For each cluster write a short, specific name for the page it becomes.
 
 Return JSON only:
-{"clusters":[{"id":1,"name":"...","primary_keyword":"exact member"}]}
+{"clusters":[{"id":1,"name":"..."}]}
 
 Rules:
-- primary_keyword must be copied from that cluster's keyword list.
-- Do not add, remove, or reassign keywords.
+- Name the cluster around its primary keyword.
+- Do not add, remove, or reassign keywords, and do not choose a different primary.
 - Do not output search volume, CPC, competition, difficulty, or intent.
 """
 
@@ -56,7 +59,8 @@ def apply_cluster_names(
     clusters: list[dict[str, Any]],
     payload: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """Apply a Claude naming payload. Unknown ids and invented primaries are dropped."""
+    """Apply a Claude naming payload: names only. Unknown ids are dropped, and a
+    suggested primary keyword is ignored (the role decider owns the primary)."""
     if not isinstance(payload, dict):
         return clusters
     by_id: dict[int, dict[str, Any]] = {}
@@ -71,11 +75,7 @@ def apply_cluster_names(
     for index, cluster in enumerate(clusters, 1):
         updated = dict(cluster)
         suggestion = by_id.get(index)
-        members = {_norm(k): k for k in _members(cluster)}
         if suggestion:
-            primary = _norm(suggestion.get("primary_keyword"))
-            if primary in members:
-                updated["primary_keyword"] = members[primary]
             label = str(suggestion.get("name") or "").strip()
             if label:
                 updated["name"] = label[:120]
@@ -83,26 +83,48 @@ def apply_cluster_names(
     return named
 
 
-async def name_clusters(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def name_clusters(
+    clusters: list[dict[str, Any]],
+    *,
+    audit: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Name clusters with the model. ``audit`` (if given) records whether the
+    names came from the model, which model, or why they did not."""
     settings = get_settings()
-    if not clusters or settings.use_mock_llm or not settings.anthropic_api_key:
+    audit = audit if audit is not None else {}
+    audit.update({"ran": False, "model": None, "reason": None})
+    if not clusters:
+        audit["reason"] = "no clusters to name"
+        return clusters
+    if not keyword_analysis_ready():
+        audit["reason"] = "no model key configured; names come from the rules"
         return clusters
     brief = []
     for index, cluster in enumerate(clusters, 1):
         brief.append(
             {
                 "id": index,
+                "primary_keyword": cluster.get("primary_keyword"),
                 "keywords": _members(cluster)[:40],
             }
         )
-    raw = await _skill_chat(
+    raw = await keyword_analysis_chat(
         system=_SYSTEM,
         user=json.dumps({"clusters": brief}),
         model=settings.skill_model,
         max_tokens=2048,
     )
-    parsed = _parse_json_content(raw or "")
+    if not raw or not str(raw).strip():
+        log.warning("cluster_naming_empty")
+        audit["reason"] = "naming was skipped; names come from the rules"
+        return clusters
+    try:
+        parsed = _parse_json_content(raw)
+    except json.JSONDecodeError:
+        parsed = None
     if not isinstance(parsed, dict):
         log.warning("cluster_naming_unparsed")
+        audit["reason"] = "the model's reply could not be read; names come from the rules"
         return clusters
+    audit.update({"ran": True, "model": settings.skill_model})
     return apply_cluster_names(clusters, parsed)

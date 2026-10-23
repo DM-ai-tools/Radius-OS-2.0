@@ -335,8 +335,7 @@ def test_selected_service_blog_requires_a_trending_keyword():
 
     service = {"id": "meta ads", "name": "Meta Ads", "url": "/meta-ads"}
     without = ensure_selected_service_coverage([], [service], {})
-    assert not any(row.get("page_type") == "blog" for row in without)
-    assert any(row.get("page_type") == "service" for row in without)
+    assert {row.get("page_type") for row in without} == {"service"}
 
     with_trend = ensure_selected_service_coverage(
         [],

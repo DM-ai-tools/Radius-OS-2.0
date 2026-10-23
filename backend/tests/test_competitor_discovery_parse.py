@@ -1,6 +1,9 @@
 """Competitor discovery must accept the replies models actually send."""
 
+from unittest.mock import AsyncMock, patch
+
 from app.agents.competitor import _discovery_competitor_inputs
+from app.integrations import providers
 from app.integrations.providers import extract_competitor_rows
 
 
@@ -82,3 +85,57 @@ def test_discovery_field_splits_urls_and_names():
     )
     assert [s["url"] for s in seeds] == ["https://kingkong.co", "https://www.webfx.com"]
     assert hints == ["WebFX"]
+
+
+async def test_a_short_first_pass_asks_for_competitors_it_does_not_already_have():
+    """The follow-up used to be written before anyone was found, so it said
+    'already have 0' and the model repeated the same three. Deduping that
+    reply left the research stage stuck at three competitors."""
+    prompts: list[str] = []
+
+    async def _chat(*, system, user, model, max_tokens):
+        prompts.append(user)
+        if len(prompts) == 1:
+            return (
+                '{"competitors":['
+                '{"name":"Alpha","url":"https://alpha-peer.com"},'
+                '{"name":"Beta","url":"https://beta-peer.com"},'
+                '{"name":"Gamma","url":"https://gamma-peer.com"}'
+                "]}"
+            )
+        return (
+            '{"competitors":['
+            '{"name":"Delta","url":"https://delta-peer.com"},'
+            '{"name":"Echo","url":"https://echo-peer.com"},'
+            '{"name":"Foxtrot","url":"https://foxtrot-peer.com"}'
+            "]}"
+        )
+
+    settings = providers.get_settings()
+    previous = settings.use_mock_providers
+    settings.use_mock_providers = False
+    try:
+        with (
+            patch("app.integrations.llm._openrouter_chat", _chat),
+            patch(
+                "app.integrations.web_fetch.fetch_url",
+                AsyncMock(return_value={"status_code": 200, "text": "<html></html>", "url": "https://x"}),
+            ),
+        ):
+            rows = await providers.discover_competitors(
+                "Click Trends", "clicktrends.example", industry="SEO"
+            )
+    finally:
+        settings.use_mock_providers = previous
+
+    assert len(prompts) >= 2
+    assert "https://alpha-peer.com" in prompts[1]
+    assert "already have (0)" not in prompts[1].lower()
+    assert {row["url"] for row in rows} == {
+        "https://alpha-peer.com",
+        "https://beta-peer.com",
+        "https://gamma-peer.com",
+        "https://delta-peer.com",
+        "https://echo-peer.com",
+        "https://foxtrot-peer.com",
+    }

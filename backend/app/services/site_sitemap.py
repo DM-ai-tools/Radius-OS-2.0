@@ -164,6 +164,7 @@ def _entry_from_seo_page(page: dict[str, Any]) -> dict[str, Any] | None:
         "existing_keywords": _existing_keywords(page),
         "word_count": page.get("word_count"),
         "cdd_focus": bool(page.get("cdd_focus")),
+        "sitemap_section": str(page.get("sitemap_section") or ""),
         "source": "seo_audit",
     }
 

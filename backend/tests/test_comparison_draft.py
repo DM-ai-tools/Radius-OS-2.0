@@ -10,6 +10,7 @@ from app.services.content_benchmark.fetch import PageContent
 from app.services.content_production import run_content_production_plan
 from app.services.content_signals.skills import collect_skill
 from app.services.create_content import write_one_page
+from tests.test_content_brief import FAKE_DRAFT_REPLY
 
 
 def _brief(page_type: str, keyword: str, url: str) -> dict:
@@ -176,7 +177,7 @@ async def test_service_page_does_not_fetch_rival_pages():
         ) as gather,
         patch(
             "app.services.create_content.synthesize_json",
-            new=AsyncMock(return_value=None),
+            new=AsyncMock(return_value=FAKE_DRAFT_REPLY),
         ),
     ):
         out = await run_content_production_plan(

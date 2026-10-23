@@ -41,6 +41,12 @@ def test_parse_json_content_repairs_unterminated_string():
     assert "revision_guidance" not in parsed or parsed.get("revision_guidance") is None
 
 
+def test_blank_model_reply_does_not_raise():
+    assert _parse_json_content("") is None
+    assert _parse_json_content("   ") is None
+    assert _parse_json_content("```json\n```") is None
+
+
 def test_unsalvageable_junk_still_raises():
     with pytest.raises(json.JSONDecodeError):
         _parse_json_content("not json at all")

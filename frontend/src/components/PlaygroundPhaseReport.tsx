@@ -283,7 +283,7 @@ function CompetitorsReport({ data }: { data: Record<string, unknown> }) {
       tier: row.tier || row.tier_label || tier?.tier,
       tier_name: row.tier_name || tier?.tier_name,
       composite: row.composite ?? row.score ?? row.maturity_score ?? tier?.composite ?? tier?.score,
-    };
+    } as Record<string, unknown>;
   });
   const tiers = isObj(data.tiers) ? data.tiers : null;
   const service =
@@ -366,7 +366,7 @@ function StrategyReport({ data }: { data: Record<string, unknown> }) {
   const coreTopics = rows(data.core_topics);
   const pillars = coreTopics.length ? coreTopics : rows(data.pillars);
   const gaps = rows(data.content_gaps || data.competitor_content_gaps);
-  const priorityQueue = rows(data.priority_queue);
+  const priorityQueue = rows(data.content_plan || data.priority_queue);
   const queue = priorityQueue.length ? priorityQueue : rows(data.priority_pages);
   const linking = rows(data.internal_linking);
   const weekRows: Array<Record<string, unknown>> = calendarMonths.flatMap((m) =>
@@ -385,11 +385,6 @@ function StrategyReport({ data }: { data: Record<string, unknown> }) {
         </p>
       ) : null}
       <CompetitorSitesSection data={data} />
-      {data.executive_summary ? (
-        <Section title="Executive summary">
-          <p className="pg-text">{String(data.executive_summary)}</p>
-        </Section>
-      ) : null}
       {data.target_audience ? (
         <Section title="Target audience">
           <p className="pg-text">{String(data.target_audience)}</p>
@@ -424,7 +419,7 @@ function StrategyReport({ data }: { data: Record<string, unknown> }) {
         </Section>
       ) : null}
       {queue.length ? (
-        <Section title="Priority queue">
+        <Section title="Content plan">
           <div className="pg-report-table-wrap">
             <table className="pg-report-table">
               <thead>
@@ -457,7 +452,36 @@ function StrategyReport({ data }: { data: Record<string, unknown> }) {
           </div>
         </Section>
       ) : null}
-      {weekRows.length ? (
+      {calendarMonths.some((m) => m.pieces != null) ? (
+        <Section title="Calendar">
+          <div className="pg-report-table-wrap">
+            <table className="pg-report-table">
+              <thead>
+                <tr>
+                  <th>Month</th>
+                  <th>Theme</th>
+                  <th>Pieces</th>
+                  <th>Actions</th>
+                  <th>Volume</th>
+                  <th>Services</th>
+                </tr>
+              </thead>
+              <tbody>
+                {calendarMonths.slice(0, 12).map((r, i) => (
+                  <tr key={i}>
+                    <td>{String(r.month ?? "—")}</td>
+                    <td>{String(r.theme || r.label || "—")}</td>
+                    <td>{String(r.pieces ?? "—")}</td>
+                    <td>{String(r.actions_label || "—")}</td>
+                    <td>{fmtVol(r.combined_volume)}</td>
+                    <td>{String(r.services_label || "—")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      ) : weekRows.length ? (
         <Section title="Content calendar (12 weeks)">
           <div className="pg-report-table-wrap">
             <table className="pg-report-table">
@@ -584,6 +608,26 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
       ? (data.rollout_plan as Record<string, unknown>)
       : null;
   const rolloutSeq = Array.isArray(rollout?.sequence) ? (rollout!.sequence as string[]) : [];
+  const urlReport =
+    data.url_map_report && typeof data.url_map_report === "object"
+      ? (data.url_map_report as Record<string, unknown>)
+      : {};
+  const urlMap = rows(urlReport.final_url_map).length
+    ? rows(urlReport.final_url_map)
+    : rows(data.final_url_map);
+  const secondaryText = (raw: unknown) => {
+    const list = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : [];
+    const words = list
+      .map((item) =>
+        typeof item === "string"
+          ? item.trim()
+          : item && typeof item === "object"
+            ? String((item as Record<string, unknown>).keyword || "").trim()
+            : "",
+      )
+      .filter(Boolean);
+    return words.slice(0, 10).join(", ");
+  };
 
   return (
     <div className="pg-report">
@@ -595,20 +639,45 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
         </p>
       ) : null}
       <CompetitorSitesSection data={data} />
-      {data.executive_summary ? (
-        <Section title="Executive summary">
-          <p className="pg-text">{String(data.executive_summary)}</p>
-        </Section>
-      ) : null}
-      {data.competitor_ia_notes ? (
-        <Section title="Competitor IA notes">
-          <p className="pg-text">{String(data.competitor_ia_notes)}</p>
-        </Section>
-      ) : null}
       {data.gate ? (
         <p className="pg-report-meta">
           <strong>Gate:</strong> {String(data.gate)}
         </p>
+      ) : null}
+
+      {urlMap.length ? (
+        <Section title="Primary and secondary keywords">
+          <p className="pg-report-meta">{urlMap.length} mapped pages</p>
+          <div className="pg-report-table-wrap">
+            <table className="pg-report-table">
+              <thead>
+                <tr>
+                  <th>Primary Keyword</th>
+                  <th>Secondary Keywords</th>
+                  <th>URL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {urlMap.slice(0, 40).map((row, i) => (
+                  <tr key={i}>
+                    <td>
+                      <strong>{String(row.primary_keyword || row.keyword || "—")}</strong>
+                    </td>
+                    <td className="pg-report-small">
+                      {secondaryText(row.secondary_keywords || row.secondary_keywords_sheet) || "—"}
+                    </td>
+                    <td className="pg-report-small">
+                      {String(row.current_url || row.proposed_url || row.selected_url || "—")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {urlMap.length > 40 ? (
+            <p className="pg-report-meta">+{urlMap.length - 40} more pages on the site architecture card.</p>
+          ) : null}
+        </Section>
       ) : null}
 
       {Object.keys(current).length ? (
@@ -685,7 +754,8 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
                   <th>Type</th>
                   <th>Path / URL</th>
                   <th>Depth</th>
-                  <th>Keyword</th>
+                  <th>Primary Keyword</th>
+                  <th>Secondary Keywords</th>
                 </tr>
               </thead>
               <tbody>
@@ -697,6 +767,7 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
                     </td>
                     <td>{fmtNum(n.depth)}</td>
                     <td>{String(n.primary_keyword || n.keyword || "—")}</td>
+                    <td className="pg-report-small">{secondaryText(n.secondary_keywords) || "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -911,6 +982,7 @@ function WebsiteReport({ data }: { data: Record<string, unknown> }) {
 }
 
 function TechnicalSeoReport({ data }: { data: Record<string, unknown> }) {
+  const groups = rows(data.audit_groups);
   const themes = rows(data.findings_by_theme);
   const backlog = rows(data.priority_backlog).length
     ? rows(data.priority_backlog)
@@ -937,7 +1009,45 @@ function TechnicalSeoReport({ data }: { data: Record<string, unknown> }) {
           <p className="pg-text">{String(data.executive_summary)}</p>
         </Section>
       ) : null}
-      {themes.length ? (
+      {groups.length ? (
+        <Section title="Audit groups">
+          {groups.map((group, i) => (
+            <div key={i} style={{ marginBottom: 12 }}>
+              <p className="pg-report-meta">
+                <strong>{String(group.group || "Group")}</strong>
+                {" · "}
+                {group.score == null ? "not measured" : `${String(group.score)}/100`}
+                {" · "}
+                {String(group.issue_count ?? rows(group.issues).length)} issues
+              </p>
+              {group.coverage_note ? <p className="pg-text">{String(group.coverage_note)}</p> : null}
+              {rows(group.checks).length ? (
+                <div className="pg-report-table-wrap">
+                  <table className="pg-report-table">
+                    <thead>
+                      <tr>
+                        <th>Check</th>
+                        <th>Result</th>
+                        <th>Detail</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows(group.checks).map((check, j) => (
+                        <tr key={j}>
+                          <td>{String(check.check || "—")}</td>
+                          <td>{String(check.status || "—")}</td>
+                          <td className="pg-report-small">{String(check.detail || "—")}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </Section>
+      ) : null}
+      {!groups.length && themes.length ? (
         <Section title="Findings by theme">
           <div className="pg-report-table-wrap">
             <table className="pg-report-table">

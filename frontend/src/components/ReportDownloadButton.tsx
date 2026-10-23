@@ -15,6 +15,10 @@ const FORMATS: { format: ReportDownloadFormat; label: string }[] = [
   { format: "docx", label: "Word (.docx)" },
 ];
 
+/** Reports whose keyword list can also be downloaded as a spreadsheet. */
+const CSV_CARD_TYPES = new Set(["search_demand_report"]);
+const CSV_FORMAT = { format: "csv" as ReportDownloadFormat, label: "Keyword list (.csv)" };
+
 export default function ReportDownloadButton({
   clientId,
   token,
@@ -24,6 +28,7 @@ export default function ReportDownloadButton({
   onError,
 }: Props) {
   const [loading, setLoading] = useState(false);
+  const formats = CSV_CARD_TYPES.has(cardType) ? [...FORMATS, CSV_FORMAT] : FORMATS;
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -58,7 +63,7 @@ export default function ReportDownloadButton({
         className={className}
         disabled={loading || !clientId || !cardType}
         onClick={() => setOpen((v) => !v)}
-        title="Download this report as PDF or Word"
+        title={CSV_CARD_TYPES.has(cardType) ? "Download this report as PDF or Word, or the keyword list as CSV" : "Download this report as PDF or Word"}
         aria-haspopup="true"
         aria-expanded={open}
       >
@@ -66,7 +71,7 @@ export default function ReportDownloadButton({
       </button>
       {open ? (
         <div className="report-download-menu-list" role="menu">
-          {FORMATS.map((f) => (
+          {formats.map((f) => (
             <button
               key={f.format}
               type="button"

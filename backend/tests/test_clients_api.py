@@ -14,7 +14,14 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.api import clients as clients_module
-from app.models import ApiUsageLog, Client, ClientDigitalProfile
+from app.models import (
+    ApiUsageLog,
+    CddVersion,
+    Client,
+    ClientDigitalProfile,
+    KeywordRejection,
+    PhaseState,
+)
 from tests.conftest import make_user
 
 
@@ -145,3 +152,40 @@ async def test_delete_client_cleans_up_api_usage_log_rows(api_client, db_session
         await db_session.execute(select(Client).where(Client.id == client_id))
     ).scalar_one_or_none()
     assert remaining_client is None
+
+
+async def test_delete_client_clears_onboarding_records(api_client, db_session):
+    """A client that has been through discovery has CDD versions, phase state
+    and keyword rejections. Those FKs are not cascaded, so Postgres rejects
+    the Client delete unless they are removed first."""
+    client_id = await _make_client(db_session, "Onboarded Co")
+    _, token = await make_user(db_session, "head_of_department", "hod-onboard@example.com")
+
+    db_session.add(CddVersion(client_id=client_id, version_no=1, source="upload"))
+    db_session.add(PhaseState(client_id=client_id, agent_key="search_demand"))
+    db_session.add(
+        KeywordRejection(
+            client_id=client_id,
+            agent_key="search_demand",
+            keyword="unrelated term",
+            reason="off_topic",
+            source_path="provider",
+        )
+    )
+    await db_session.commit()
+
+    resp = await api_client.delete(
+        f"/api/v1/clients/{client_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 204
+
+    for model in (CddVersion, PhaseState, KeywordRejection):
+        left = (
+            await db_session.execute(select(model).where(model.client_id == client_id))
+        ).scalars().all()
+        assert left == []
+    gone = (
+        await db_session.execute(select(Client).where(Client.id == client_id))
+    ).scalar_one_or_none()
+    assert gone is None

@@ -20,6 +20,70 @@ function asRows(raw: unknown): Array<Record<string, unknown>> {
   return raw.filter((r) => r && typeof r === "object") as Array<Record<string, unknown>>;
 }
 
+function cell(value: unknown): string {
+  if (value == null || value === "") return "—";
+  if (Array.isArray(value)) return value.map((v) => cell(v)).filter((v) => v !== "—").join(", ") || "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function MiniTable({
+  title,
+  rows,
+  columns,
+}: {
+  title: string;
+  rows: Array<Record<string, unknown>>;
+  columns: Array<{ key: string; label: string }>;
+}) {
+  if (!rows.length) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      {title ? <div style={{ fontSize: 12, fontWeight: 650, marginBottom: 4 }}>{title}</div> : null}
+      <div style={{ overflowX: "auto" }}>
+        <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
+              {columns.map((col) => (
+                <th key={col.key} style={{ padding: "6px 8px" }}>
+                  {col.label}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} style={{ borderBottom: "1px solid var(--line)" }}>
+                {columns.map((col) => (
+                  <td key={col.key} style={{ padding: "6px 8px", verticalAlign: "top" }}>
+                    {cell(row[col.key])}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function wordpressRows(raw: unknown): Array<Record<string, unknown>> {
+  if (!raw || typeof raw !== "object") return [];
+  const wp = raw as Record<string, unknown>;
+  if (!wp.is_wordpress) return [];
+  const files = Array.isArray(wp.exposed_files) ? wp.exposed_files.map(String) : [];
+  return [
+    { check: "Config backups readable", result: files.join(", ") || "none of the common names" },
+    {
+      check: "XML-RPC",
+      result: wp.xmlrpc_enabled ? "enabled" : `not exposed (status ${cell(wp.xmlrpc_status)})`,
+    },
+    { check: "Version disclosed", result: cell(wp.version_exposed) },
+    { check: "readme.html public", result: wp.readme_exposed ? "yes" : "no" },
+  ];
+}
+
 const SECTION_LABELS: Record<string, string> = {
   crawlability: "Crawlability",
   indexation: "Indexation",
@@ -58,11 +122,6 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
   const site = String(payload.site || payload.primary_url || payload.client_name || "—");
   const phase6Connected = Boolean(payload.phase6_connected);
   const phase6Fallback = payload.phase6_fallback_ia === true;
-  const ahrefsAudit =
-    payload.ahrefs_site_audit && typeof payload.ahrefs_site_audit === "object"
-      ? (payload.ahrefs_site_audit as Record<string, unknown>)
-      : null;
-  const ahrefsUnavailable = ahrefsAudit && ahrefsAudit.available === false;
   const categoryScores =
     payload.category_scores && typeof payload.category_scores === "object"
       ? (payload.category_scores as Record<string, Record<string, unknown>>)
@@ -107,6 +166,34 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
       ? (payload.gsc_indexation as Record<string, unknown>)
       : null;
   const suggestionItems = asRows(payload.suggestion_items);
+  const auditGroups = asRows(payload.audit_groups);
+  const quickWins = asRows(payload.quick_wins);
+  const onPagePages = asRows(
+    payload.on_page_audit && typeof payload.on_page_audit === "object"
+      ? (payload.on_page_audit as Record<string, unknown>).pages
+      : [],
+  );
+  const canonicalAudit =
+    payload.canonical_audit && typeof payload.canonical_audit === "object"
+      ? (payload.canonical_audit as Record<string, unknown>)
+      : null;
+  const jsAudit =
+    payload.js_rendering_audit && typeof payload.js_rendering_audit === "object"
+      ? (payload.js_rendering_audit as Record<string, unknown>)
+      : null;
+  const performanceAudit =
+    payload.performance_audit && typeof payload.performance_audit === "object"
+      ? (payload.performance_audit as Record<string, unknown>)
+      : null;
+  const structuredAudit =
+    payload.structured_data_audit && typeof payload.structured_data_audit === "object"
+      ? (payload.structured_data_audit as Record<string, unknown>)
+      : null;
+  const securityAudit =
+    payload.security_audit && typeof payload.security_audit === "object"
+      ? (payload.security_audit as Record<string, unknown>)
+      : null;
+  const detailed = auditGroups.length > 0;
   const [expandedRuleId, setExpandedRuleId] = useState<string | null>(null);
   const [issueUrls, setIssueUrls] = useState<string[]>([]);
   const [issueUrlsLoading, setIssueUrlsLoading] = useState(false);
@@ -179,12 +266,6 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
       </div>
       {scoreLabel ? (
         <p style={{ fontSize: 13, color: "var(--muted)", marginTop: 0 }}>{scoreLabel}</p>
-      ) : null}
-      {ahrefsUnavailable ? (
-        <p style={{ fontSize: 12, color: "var(--coral, #b42318)", marginTop: 0 }}>
-          Ahrefs Site Audit unavailable — {String(ahrefsAudit?.reason || "not configured")}. Crawl-based
-          audit used instead; issue URL counts may be limited.
-        </p>
       ) : null}
 
       {auditCoverage ? (
@@ -344,7 +425,196 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
         </>
       ) : null}
 
-      {issuesByCategory && Object.keys(issuesByCategory).length > 0 ? (
+      {detailed ? (
+        <>
+          {quickWins.length ? (
+            <>
+              <h4 style={{ margin: "12px 0 6px" }}>Quick wins</h4>
+              <MiniTable
+                title=""
+                rows={quickWins}
+                columns={[
+                  { key: "priority", label: "Priority" },
+                  { key: "issue", label: "Issue" },
+                  { key: "fix", label: "Fix" },
+                  { key: "category", label: "Group" },
+                  { key: "affected", label: "Pages" },
+                ]}
+              />
+            </>
+          ) : null}
+          {auditGroups.map((group) => {
+            const name = String(group.group || "Group");
+            const evidence: Array<{ title: string; rows: Array<Record<string, unknown>>; columns: Array<{ key: string; label: string }> }> = [];
+            if (name === "On-page technical SEO") {
+              evidence.push({
+                title: "Sampled pages",
+                rows: onPagePages,
+                columns: [
+                  { key: "url", label: "Page" },
+                  { key: "title", label: "Title" },
+                  { key: "h1", label: "H1s" },
+                  { key: "meta", label: "Meta description" },
+                  { key: "headings", label: "Headings" },
+                  { key: "alt", label: "Alt text" },
+                  { key: "words", label: "Words" },
+                ],
+              });
+            }
+            if (name === "Canonicalisation" && canonicalAudit) {
+              evidence.push({
+                title: "Canonical tags on sampled pages",
+                rows: asRows(canonicalAudit.pages),
+                columns: [
+                  { key: "url", label: "Page" },
+                  { key: "canonical", label: "Canonical" },
+                  { key: "state", label: "State" },
+                ],
+              });
+              evidence.push({
+                title: "Duplicate URL clusters",
+                rows: asRows(canonicalAudit.duplicate_clusters),
+                columns: [
+                  { key: "cluster", label: "Cluster" },
+                  { key: "urls", label: "Pages" },
+                  { key: "count", label: "Count" },
+                ],
+              });
+            }
+            if ((name === "JavaScript/rendering" || name === "JavaScript and Rendering") && jsAudit) {
+              evidence.push({
+                title: "Raw HTML vs browser-rendered",
+                rows: asRows(jsAudit.comparison),
+                columns: [
+                  { key: "url", label: "Page" },
+                  { key: "words", label: "Words" },
+                  { key: "links", label: "Links" },
+                  { key: "h1", label: "H1" },
+                  { key: "verdict", label: "Verdict" },
+                ],
+              });
+            }
+            if (name.startsWith("Performance") && performanceAudit) {
+              evidence.push({
+                title: "Core Web Vitals and lab metrics",
+                rows: asRows(performanceAudit.metrics),
+                columns: [
+                  { key: "metric", label: "Metric" },
+                  { key: "mobile", label: "Mobile" },
+                  { key: "desktop", label: "Desktop" },
+                  { key: "rating", label: "Rating" },
+                ],
+              });
+              evidence.push({
+                title: "Page weight",
+                rows: asRows(performanceAudit.page_weight),
+                columns: [
+                  { key: "url", label: "Page" },
+                  { key: "html_kb", label: "HTML KB" },
+                  { key: "scripts", label: "Scripts" },
+                  { key: "blocking", label: "Render-blocking" },
+                  { key: "third_party", label: "Third-party hosts" },
+                  { key: "images", label: "Images" },
+                ],
+              });
+            }
+            if (name === "Structured data" && structuredAudit) {
+              evidence.push({
+                title: "Schema found per page",
+                rows: asRows(structuredAudit.pages),
+                columns: [
+                  { key: "url", label: "Page" },
+                  { key: "blocks", label: "JSON-LD blocks" },
+                  { key: "types", label: "Types" },
+                  { key: "problems", label: "Problems" },
+                ],
+              });
+              const eligible = Array.isArray(structuredAudit.rich_results_eligible)
+                ? (structuredAudit.rich_results_eligible as unknown[]).map((result) =>
+                    typeof result === "string" ? { result } : (result as Record<string, unknown>),
+                  )
+                : asRows(structuredAudit.eligible_rows);
+              evidence.push({
+                title: "Rich results the markup qualifies for",
+                rows: eligible,
+                columns: [{ key: "result", label: "Rich result" }],
+              });
+            }
+            if (name === "Security" && securityAudit) {
+              evidence.push({
+                title: "Response headers",
+                rows: asRows(securityAudit.headers),
+                columns: [
+                  { key: "header", label: "Header" },
+                  { key: "present", label: "Present" },
+                ],
+              });
+              evidence.push({
+                title: "WordPress exposure",
+                rows: asRows(securityAudit.wordpress_rows).length
+                  ? asRows(securityAudit.wordpress_rows)
+                  : wordpressRows(securityAudit.wordpress),
+                columns: [
+                  { key: "check", label: "Check" },
+                  { key: "result", label: "Result" },
+                ],
+              });
+            }
+            return (
+              <section key={name} style={{ marginTop: 16 }}>
+                <h4 style={{ margin: "0 0 4px" }}>{name}</h4>
+                <p style={{ fontSize: 12, color: "var(--muted)", margin: "0 0 6px" }}>
+                  Score {group.score == null ? "not measured" : `${String(group.score)}/100`}
+                  {" · "}
+                  {String(group.issue_count ?? asRows(group.issues).length)} issues
+                  {" · "}
+                  {String(group.fields_measured ?? 0)} fields measured
+                  {" · "}
+                  {String(group.fields_not_measured ?? 0)} not measured
+                </p>
+                {group.coverage_note ? (
+                  <p style={{ fontSize: 12, marginTop: 0 }}>{String(group.coverage_note)}</p>
+                ) : null}
+                <MiniTable
+                  title="Issues"
+                  rows={asRows(group.issues)}
+                  columns={[
+                    { key: "severity", label: "Severity" },
+                    { key: "issue", label: "Issue" },
+                    { key: "affected", label: "Pages" },
+                    { key: "examples", label: "Examples" },
+                    { key: "fix", label: "Recommended fix" },
+                  ]}
+                />
+                <MiniTable
+                  title="Checks run"
+                  rows={asRows(group.checks)}
+                  columns={[
+                    { key: "check", label: "Check" },
+                    { key: "status", label: "Result" },
+                    { key: "detail", label: "Detail" },
+                    { key: "urls", label: "URLs" },
+                  ]}
+                />
+                {evidence.map((block) => (
+                  <MiniTable key={block.title} title={block.title} rows={block.rows} columns={block.columns} />
+                ))}
+                <MiniTable
+                  title="Fields: checked vs not measured"
+                  rows={asRows(group.fields)}
+                  columns={[
+                    { key: "field", label: "Field" },
+                    { key: "status", label: "Status" },
+                    { key: "note", label: "Note" },
+                  ]}
+                />
+              </section>
+            );
+          })}
+        </>
+      ) : null}
+
+      {!detailed && issuesByCategory && Object.keys(issuesByCategory).length > 0 ? (
         <>
           <h4 style={{ margin: "12px 0 6px", fontSize: 13 }}>Issues by category</h4>
           {Object.entries(issuesByCategory).map(([cat, rows]) => (
@@ -358,7 +628,7 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
         </>
       ) : null}
 
-      {issues.length > 0 ? (
+      {!detailed && issues.length > 0 ? (
         <>
           <h4 style={{ margin: "12px 0 6px", fontSize: 13 }}>Technical issues</h4>
           <div style={{ overflowX: "auto", marginBottom: 14 }}>
@@ -449,7 +719,7 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
         </>
       ) : null}
 
-      {themes.length > 0 ? (
+      {!detailed && themes.length > 0 ? (
         <>
           <h4 style={{ marginBottom: 8 }}>Findings by theme</h4>
           {themes.map((t, i) => (
@@ -468,7 +738,7 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
             </div>
           ))}
         </>
-      ) : (
+      ) : !detailed ? (
         Object.entries(sections).map(([key, sec]) => (
           <div key={key} style={{ marginBottom: 12 }}>
             <h4 style={{ margin: "0 0 4px", fontSize: 13 }}>
@@ -481,7 +751,7 @@ export default function TechnicalSeoCard({ payload, canAct, onAction, clientId, 
             </ul>
           </div>
         ))
-      )}
+      ) : null}
 
       {broken ? (
         <>

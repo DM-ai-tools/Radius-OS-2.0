@@ -33,6 +33,12 @@ backend/data/draft_images/
 backend/data/dead_man_switch.json
 backend/data/batch_llm_checkpoints/
 backend/data/batch_llm_dead_letter/
+backend/data/agent_memory/
+backend/data/agent_memory/
+
+# Local keyword exports
+data/*.xlsx
+data/*.csv
 
 # Local editor / tool caches
 backend/.pytest_cache/
