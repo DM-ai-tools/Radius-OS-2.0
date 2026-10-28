@@ -1244,7 +1244,7 @@ html.theme-light .cc-resource-track {
   color: var(--text-muted, var(--muted));
 }
 .umap-table td.umap-keywords,
-.umap-table td:nth-child(13),
+.umap-table td.umap-title,
 .umap-table td.umap-url {
   white-space: normal;
   min-width: 160px;
@@ -1253,9 +1253,10 @@ html.theme-light .cc-resource-track {
   min-width: 180px;
   max-width: 320px;
 }
-.umap-table td:nth-child(13) {
+.umap-table td.umap-title {
   min-width: 220px;
   max-width: 360px;
+  font-weight: 600;
 }
 .umap-table tr.is-off {
   opacity: 0.45;

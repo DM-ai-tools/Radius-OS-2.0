@@ -531,6 +531,10 @@ class RelevanceContext:
     service_synonyms: list[str] = field(default_factory=list)
     # Model-suggested sub-service topics of the selected services ("seo audit" for "SEO").
     service_subtopics: list[str] = field(default_factory=list)
+    # True for the industry layer's fetch: its keywords ("digital marketing agency")
+    # belong to no one service, so the service contract judges them against every
+    # service and the industry itself (``judge_industry_keyword``).
+    industry_layer: bool = False
 
     def seed_is_supported(self, seed: str) -> bool:
         return bool(self._phrase_hit(seed) or self._token_hit(seed))
@@ -591,12 +595,14 @@ def build_relevance_context(
     geography: str | None = None,
     service_synonyms: Iterable[str] | None = None,
     service_subtopics: Iterable[str] | None = None,
+    industry_layer: bool = False,
 ) -> RelevanceContext:
     """``service_synonyms`` are other names of the selected services and
     ``service_subtopics`` the sub-service topics seeded for them ("seo audit" for SEO).
     Both count as whole phrases ("search engine optimization" is evidence of SEO) and
     as service seeds for lineage, but their single words do not become evidence
-    tokens: one model-suggested word must not widen the gate for every keyword."""
+    tokens: one model-suggested word must not widen the gate for every keyword.
+    ``industry_layer`` marks the context of the industry seeds' fetch."""
     svc = _phrases(services or [])
     cdd = _phrases(cdd_keywords or [])
     pages = list(page_terms) if page_terms is not None else page_terms_from_website(website)
@@ -648,6 +654,7 @@ def build_relevance_context(
         geography=geography,
         service_synonyms=synonyms,
         service_subtopics=subtopics,
+        industry_layer=bool(industry_layer),
     )
 
 
@@ -731,19 +738,35 @@ def evaluate_keyword(
     if is_noisy_keyword(kw):
         return False, "noisy", ""
 
-    from app.services.keyword_service_contract import judge_keyword, off_topic_reason
+    from app.services.keyword_service_contract import (
+        judge_industry_keyword,
+        judge_keyword,
+        off_topic_reason,
+    )
 
     unrelated = off_topic_reason(kw)
     if unrelated:
         return False, unrelated, ""
 
-    service_for_contract = seed_text if seed_text and ctx.seed_is_service(seed_text) else seed_text
-    contract = judge_keyword(
-        kw,
-        service=service_for_contract or "",
-        cdd_keywords=list(ctx.cdd_keywords or []),
-        geography=getattr(ctx, "geography", None),
-    )
+    if getattr(ctx, "industry_layer", False):
+        # An industry seed belongs to no one service: its keyword is judged against
+        # every service the client sells, and passes when it names the industry.
+        contract = judge_industry_keyword(
+            kw,
+            industry=ctx.industry,
+            services=list(ctx.services or []),
+            cdd_keywords=list(ctx.cdd_keywords or []),
+            geography=getattr(ctx, "geography", None),
+            seed=seed_text or None,
+        )
+    else:
+        service_for_contract = seed_text if seed_text and ctx.seed_is_service(seed_text) else seed_text
+        contract = judge_keyword(
+            kw,
+            service=service_for_contract or "",
+            cdd_keywords=list(ctx.cdd_keywords or []),
+            geography=getattr(ctx, "geography", None),
+        )
     if contract.decision == "DROP":
         return False, contract.reason, contract.reason_detail
     if contract.decision == "KEEP":

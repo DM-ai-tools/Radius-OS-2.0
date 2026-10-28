@@ -834,13 +834,18 @@ async def test_a_template_draft_is_refused_before_any_manus_call(fake):
     with pytest.raises(run.PreviewError) as err:
         await run.start_build(ctx(), TEMPLATE_DRAFT)
     assert err.value.code == "draft_not_ready"
-    assert "template filler" in err.value.message and "AUTHOR INPUT REQUIRED" in err.value.message
+    # Leftover [AUTHOR INPUT REQUIRED] markers are stripped before the check
+    # (strip_publish_markers), so the filler is what blocks the build.
+    assert "template filler" in err.value.message
     assert fake.created is None
 
 
 def test_draft_problems_and_missing_figures():
     assert checks.draft_problems(DRAFT["markdown"]) == []
     assert checks.draft_problems("Prices start at $99 [VERIFY].") == []
+    # A raw draft with an unwritten placeholder is a problem; start_build strips these
+    # markers first (strip_publish_markers), so this guards the check itself.
+    assert any("AUTHOR INPUT REQUIRED" in p for p in checks.draft_problems("Intro.\n[AUTHOR INPUT REQUIRED: answer]\n"))
     md = "## A\n\n[FIGURE hero] AI Marketing \u2014 hero\n\nText.\n"
     assert "[FIGURE" not in checks.strip_missing_figures(md)
     assert "Text." in checks.strip_missing_figures(md)

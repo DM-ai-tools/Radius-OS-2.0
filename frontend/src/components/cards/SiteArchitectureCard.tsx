@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { titleForMapRow } from "../../lib/headline";
 import SiteMindTree, { type TreeRow } from "./SiteMindTree";
 import UrlMapBoard from "./UrlMapBoard";
 import { useStageFocus } from "../../lib/stageFocus";
@@ -227,7 +228,17 @@ function offerIndex(raw: unknown): Map<string, string> {
   return index;
 }
 
-/** One row when the offer is the same line, such as SEO and search engine optimisation. */
+/** One row when two service pages name the same offer. A guide or a blog stays its own row. */
+function isOwnPage(row: Record<string, unknown>): boolean {
+  const type = String(row.page_type || "").toLowerCase();
+  if (type === "guide" || type === "blog") return true;
+  if (row.page_job === "draft_guide") return true;
+  const primary = String(row.primary_keyword || row.keyword || "").toLowerCase();
+  return /^(?:what is|what are|how to|how do|how does)\b|\b(?:tips|guide|checklist|meaning|definition)\b/.test(
+    primary,
+  );
+}
+
 function foldSameOffer(
   rows: Array<Record<string, unknown>>,
   synonyms: unknown,
@@ -235,6 +246,7 @@ function foldSameOffer(
   const index = offerIndex(synonyms);
   const groups = new Map<string, number[]>();
   rows.forEach((row, indexNo) => {
+    if (isOwnPage(row)) return;
     const line =
       publishableHead(String(row.primary_keyword || row.keyword || "")) ||
       publishableHead(String(row.l1_category || ""));
@@ -276,7 +288,7 @@ function foldSameOffer(
       }
       drop.add(index);
     }
-    owner.secondary_keywords = seconds.slice(0, 10);
+    owner.secondary_keywords = seconds;
   }
   return rows.filter((_, index) => !drop.has(index));
 }
@@ -323,6 +335,85 @@ function normalizeUrlMapRow(row: Record<string, unknown>): Record<string, unknow
     secondary_keywords_sheet:
       row.secondary_keywords_sheet ?? row.secondary_keywords,
   };
+}
+
+function mapPath(row: Record<string, unknown>): string {
+  const current = String(row.current_url || "").trim();
+  const proposed = String(row.proposed_url || row.create_url || row.selected_url || "").trim();
+  let path = current && current !== "/" ? current : proposed;
+  if (!path || path === "/") return "";
+  if (/^https?:\/\//i.test(path)) {
+    try {
+      path = new URL(path).pathname || "";
+    } catch {
+      /* keep the raw value */
+    }
+  }
+  path = path.split(/[?#]/)[0];
+  if (!path.startsWith("/")) path = `/${path}`;
+  if (path.length > 1) path = path.replace(/\/+$/, "");
+  return path === "/" ? "" : path;
+}
+
+function mapTreeKind(row: Record<string, unknown>): string {
+  const label = String(row.page_type || "").trim().toLowerCase();
+  const job = String(row.page_job || "");
+  if (job === "optimize_service_page" || label === "hub page" || label === "hub") return "hub";
+  if (job === "related_service_page" || label === "collection") return "spoke";
+  if (label === "blog") return "blog";
+  if (job === "draft_guide" || label === "guide") return "guide";
+  const allowed = new Set([
+    "home", "hub", "spoke", "service", "subservice", "sub_service", "service_hub",
+    "comparison", "blog", "utility", "article", "pillar", "cluster", "supporting",
+    "product", "location", "commercial", "landing", "faq", "guide", "listicle",
+    "tool", "page", "planned",
+  ]);
+  return allowed.has(label) ? label : "page";
+}
+
+function isMapHub(row: Record<string, unknown>): boolean {
+  const label = String(row.page_type || "").trim().toLowerCase();
+  const level = String(row.level || "").trim().toLowerCase();
+  return row.page_job === "optimize_service_page" || label === "hub page" || label === "hub" || level === "1" || level === "l1";
+}
+
+/** One tree node per URL-map row, nested under that row's service hub. */
+function treeFromMapRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const byPath = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const path = mapPath(row);
+    if (!path) continue;
+    if (!byPath.has(path) || isMapHub(row)) byPath.set(path, row);
+  }
+  const hubs = new Map<string, string>();
+  for (const [path, row] of byPath) {
+    if (!isMapHub(row)) continue;
+    const group = String(row.l1_category || row.cluster || row.service || "").trim().toLowerCase();
+    if (group && !hubs.has(group)) hubs.set(group, path);
+  }
+  const nodes: Array<Record<string, unknown>> = [];
+  for (const [path, row] of byPath) {
+    const group = String(row.l1_category || row.cluster || row.service || "").trim().toLowerCase();
+    const hub = hubs.get(group);
+    const hubRow = !hub || hub === path || isMapHub(row);
+    const kind = mapTreeKind(row);
+    nodes.push({
+      url: path,
+      path,
+      parent: hubRow ? "/" : hub,
+      depth: hubRow ? 1 : hub!.replace(/^\/|\/$/g, "").split("/").length + 1,
+      title: hubRow
+        ? String(row.l1_category || row.primary_keyword || path.replace(/^\//, "").replace(/-/g, " "))
+        : String(row.primary_keyword || row.l2_subcategory || row.l1_category || ""),
+      primary_keyword: row.primary_keyword,
+      keyword: row.primary_keyword,
+      headline: titleForMapRow(row),
+      cluster: row.cluster || row.l1_category,
+      page_type: kind,
+      type: kind,
+    });
+  }
+  return nodes;
 }
 
 function collectUrlMapRows(payload: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -399,7 +490,6 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
             : String((item as Record<string, unknown>)?.keyword || "").trim(),
         )
         .filter(Boolean)
-        .slice(0, 10)
         .join(", ");
       for (const raw of [row.current_url, row.proposed_url, row.selected_url, row.target_url, row.create_url]) {
         const key = pathKey(raw);
@@ -408,10 +498,11 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
     }
     return index;
   }, [mapRows]);
-  const tree = useMemo(
-    () => foldModifierPages(asRows(payload.target_url_tree)),
-    [payload.target_url_tree],
-  );
+  const tree = useMemo(() => {
+    const fromMap = treeFromMapRows(mapRows);
+    if (fromMap.length) return fromMap;
+    return foldModifierPages(asRows(payload.target_url_tree));
+  }, [mapRows, payload.target_url_tree]);
   const [treeView, setTreeView] = useState<"map" | "table">("map");
   const treeRows = useMemo(
     (): TreeRow[] =>
@@ -421,8 +512,7 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
         kind: String(n.page_type || n.type || ""),
         parent: n.parent ? String(n.parent) : null,
       })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [payload.target_url_tree],
+    [tree],
   );
   const treeRoot = (() => {
     const raw = String(payload.primary_url || payload.domain || "");
@@ -437,12 +527,7 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
     payload.navigation && typeof payload.navigation === "object"
       ? (payload.navigation as Record<string, unknown>)
       : {};
-  const primaryNav = asRows(nav.primary_nav);
   const remediation = asRows(nav.depth_remediation);
-  const breadcrumbs =
-    nav.breadcrumb_pattern && typeof nav.breadcrumb_pattern === "object"
-      ? (nav.breadcrumb_pattern as Record<string, unknown>)
-      : null;
   const types = asRows(payload.page_type_model);
   const redirects = asRows(payload.redirect_map);
   const handoffs = asRows(payload.handoffs);
@@ -705,6 +790,7 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
                 <th style={{ padding: "6px 8px" }}>Path</th>
                 <th style={{ padding: "6px 8px" }}>Depth</th>
                 <th style={{ padding: "6px 8px" }}>Primary Keyword</th>
+                <th style={{ padding: "6px 8px" }}>Title</th>
                 <th style={{ padding: "6px 8px" }}>Secondary Keywords</th>
                 <th style={{ padding: "6px 8px" }}>Cluster</th>
                 <th style={{ padding: "6px 8px" }}>Parent</th>
@@ -741,6 +827,9 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
                         "—",
                     )}
                   </td>
+                  <td style={{ padding: "6px 8px", fontWeight: 600 }}>
+                    {String(n.headline || titleForMapRow(n) || "—")}
+                  </td>
                   <td style={{ padding: "6px 8px", fontSize: 11 }}>
                     {(() => {
                       const listed = Array.isArray(n.secondary_keywords)
@@ -770,46 +859,6 @@ export default function SiteArchitectureCard({ payload, canAct, onAction }: Prop
         </div>
       ) : null}
       {!tree.length ? <p style={{ fontSize: 13, color: "var(--muted)" }}>—</p> : null}
-
-      <h4 style={{ marginBottom: 8 }}>Primary navigation</h4>
-      {primaryNav.length ? (
-        <div style={{ overflowX: "auto", marginBottom: 10 }}>
-          <table className="kw-report-table" style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", borderBottom: "1px solid var(--line)" }}>
-                <th style={{ padding: "6px 8px" }}>Label</th>
-                <th style={{ padding: "6px 8px" }}>URL</th>
-                <th style={{ padding: "6px 8px" }}>Depth</th>
-              </tr>
-            </thead>
-            <tbody>
-              {primaryNav.map((n, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid var(--line)" }}>
-                  <td style={{ padding: "6px 8px", fontWeight: 600 }}>{String(n.label || "—")}</td>
-                  <td style={{ padding: "6px 8px", fontSize: 11 }}>{String(n.url || "—")}</td>
-                  <td style={{ padding: "6px 8px" }}>{fmtNum(n.depth)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p style={{ fontSize: 13, color: "var(--muted)" }}>—</p>
-      )}
-      {nav.rule ? (
-        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 0 }}>{String(nav.rule)}</p>
-      ) : null}
-      {nav.notes ? (
-        <p style={{ fontSize: 13, marginTop: 4 }}>{String(nav.notes)}</p>
-      ) : null}
-      {breadcrumbs ? (
-        <p style={{ fontSize: 12, marginTop: 4 }}>
-          <strong>Breadcrumbs:</strong>{" "}
-          {Object.entries(breadcrumbs)
-            .map(([k, v]) => `${k}: ${String(v)}`)
-            .join(" · ")}
-        </p>
-      ) : null}
 
       {remediation.length ? (
         <>

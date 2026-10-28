@@ -19,6 +19,7 @@ from app.models.governance import (
 )
 from app.models.identity import Role, RolePermission, User
 from app.models.integrations import ApiCredential, ContentEmbedding
+from app.models.keyword_pool import KeywordPoolEntry, KeywordPoolFetch
 from app.models.operations import ApiUsageLog
 
 __all__ = [
@@ -37,6 +38,8 @@ __all__ = [
     "ContentEmbedding",
     "DiscoveryResponse",
     "FindingsLedger",
+    "KeywordPoolEntry",
+    "KeywordPoolFetch",
     "KeywordRejection",
     "PhaseState",
     "PhaseValidation",

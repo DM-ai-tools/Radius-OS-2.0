@@ -81,6 +81,61 @@ def test_railway_public_postgres_url_is_accepted_by_asyncpg():
     assert "ssl" in connect_args
 
 
+def test_production_broker_follows_redis_when_unset(monkeypatch):
+    monkeypatch.setenv("SECRET_KEY", "a-fine-secret-key-for-this-test-only")
+    monkeypatch.setenv("ENCRYPTION_KEY", "a-fine-encryption-key-for-this-test-only")
+    monkeypatch.setenv("REDIS_URL", "redis://redis.railway.internal:6379")
+    monkeypatch.delenv("CELERY_BROKER_URL", raising=False)
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        frontend_url="https://app.example.com",
+        oauth_redirect_uri="https://app.example.com/api/v1/oauth/callback",
+        cors_origins="https://app.example.com",
+    )
+    assert settings.celery_broker_url == "redis://redis.railway.internal:6379"
+
+
+def test_explicit_broker_is_kept_in_production(monkeypatch):
+    monkeypatch.setenv("SECRET_KEY", "a-fine-secret-key-for-this-test-only")
+    monkeypatch.setenv("ENCRYPTION_KEY", "a-fine-encryption-key-for-this-test-only")
+    monkeypatch.setenv("REDIS_URL", "redis://redis.railway.internal:6379")
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://redis.railway.internal:6379/1")
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        frontend_url="https://app.example.com",
+        oauth_redirect_uri="https://app.example.com/api/v1/oauth/callback",
+        cors_origins="https://app.example.com",
+    )
+    assert settings.celery_broker_url == "redis://redis.railway.internal:6379/1"
+
+
+def test_localhost_redis_keeps_the_default_broker_in_production(monkeypatch):
+    monkeypatch.setenv("SECRET_KEY", "a-fine-secret-key-for-this-test-only")
+    monkeypatch.setenv("ENCRYPTION_KEY", "a-fine-encryption-key-for-this-test-only")
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+    monkeypatch.delenv("CELERY_BROKER_URL", raising=False)
+    settings = Settings(
+        _env_file=None,
+        environment="production",
+        frontend_url="https://app.example.com",
+        oauth_redirect_uri="https://app.example.com/api/v1/oauth/callback",
+        cors_origins="https://app.example.com",
+    )
+    assert settings.celery_broker_url == "redis://127.0.0.1:6379/1"
+
+
+def test_local_broker_stays_on_localhost(monkeypatch):
+    monkeypatch.setenv("SECRET_KEY", "a-fine-secret-key-for-this-test-only")
+    monkeypatch.setenv("ENCRYPTION_KEY", "a-fine-encryption-key-for-this-test-only")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("CELERY_BROKER_URL", raising=False)
+    settings = Settings(_env_file=None, environment="development")
+    assert settings.redis_url == "redis://127.0.0.1:6379/0"
+    assert settings.celery_broker_url == "redis://127.0.0.1:6379/1"
+
+
 def test_accepts_a_real_looking_key(monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "a-fine-secret-key-for-this-test-only")
     monkeypatch.setenv("ENCRYPTION_KEY", "a-fine-encryption-key-for-this-test-only")

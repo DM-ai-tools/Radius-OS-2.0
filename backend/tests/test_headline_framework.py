@@ -135,6 +135,33 @@ def test_supplied_pain_point_is_used_and_boosted():
     assert title.lower().startswith("struggling with")
 
 
+def test_mapped_page_titles_follow_the_framework():
+    from app.services.headline_framework import mapped_page_title, title_for_map_row
+
+    question = mapped_page_title("what is seo", page_type="guide", intent="informational")
+    assert question == "What Is SEO? A Clear Guide"
+    howto = mapped_page_title("how to improve site seo", page_type="guide", intent="informational")
+    assert howto == "How to Improve Site SEO"
+    service = mapped_page_title(
+        "search engine optimisation", page_type="service", intent="commercial"
+    )
+    assert service == "A Clear Path To Search Engine Optimisation"
+    guide = mapped_page_title("cost of seo marketing", page_type="guide", intent="informational")
+    assert guide == "The Practical Guide to Cost of SEO Marketing"
+    blog = title_for_map_row({"primary_keyword": "seo tips", "page_type": "Blog", "page_job": "draft_guide"})
+    assert blog == "The Practical Guide to SEO Tips"
+    hub = title_for_map_row(
+        {"primary_keyword": "email marketing", "page_type": "Hub Page", "page_job": "optimize_service_page"}
+    )
+    assert hub == "A Clear Path To Email Marketing"
+    for title in (question, howto, service, guide, blog, hub):
+        assert len(title) <= 60
+        low = title.lower()
+        assert "guaranteed" not in low
+        assert "harvard" not in low
+        assert "50,000" not in low
+
+
 def test_specific_page_title_uses_framework():
     title = specific_page_title(
         "share of search",

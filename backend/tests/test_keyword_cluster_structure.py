@@ -173,7 +173,7 @@ ROWS = [
 
 @pytest.mark.asyncio
 async def test_full_rule_run_carries_structure_and_cdp_keeps_it():
-    report = await run_keyword_clustering([dict(r) for r in ROWS], use_llm=False)
+    report = await run_keyword_clustering([dict(r) for r in ROWS], within_deadline=False)
     assert report["keyword_accounting"]["balanced"] is True
     assert {"pillars", "size_discipline", "clustering_provenance", "content_roadmap"} <= set(report)
     prov = report["clustering_provenance"]
@@ -347,8 +347,8 @@ async def test_rule_fallback_when_the_model_fails_says_so():
         "app.services.keyword_llm_clustering.llm_cluster_keywords",
         new=AsyncMock(return_value={"skipped": "mock_or_no_key", "clusters": []}),
     ):
-        settings.return_value.keyword_cluster_use_llm = True
-        report = await run_keyword_clustering([dict(r) for r in ROWS], use_llm=True)
+        settings.return_value.keyword_clustering_use_model = True
+        report = await run_keyword_clustering([dict(r) for r in ROWS], within_deadline=True)
     prov = report["clustering_provenance"]
     assert prov["grouping"] == "rules" and prov["model_clustering_reason"] == "no model key configured"
     assert report["serp_clustering"]["reason"] == "rule_fallback"

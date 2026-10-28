@@ -38,6 +38,7 @@ from app.services.content_pipeline import (
 )
 from app.services.keyword_cluster_structure import stable_cluster_id
 from app.services.keyword_opportunity import detect_intent
+from app.services.keyword_service_contract import INDUSTRY_ORIGIN
 from app.services.page_clusters import (
     cdd_terms_from_commercial,
     classify_audit_page,
@@ -304,6 +305,9 @@ def _fold_same_line_pages(
     """
     groups: dict[str, list[int]] = {}
     for index, entry in enumerate(entries):
+        if entry.get("is_home"):
+            # The home page targets the industry term; it neither owns nor absorbs a service page.
+            continue
         head = _publishable_head(str(entry.get("primary_keyword") or ""), offer_index)
         if not head:
             head = _publishable_head(str(entry.get("l1_category") or ""), offer_index)
@@ -589,7 +593,8 @@ def apply_workbook_taxonomy(
     phrases = _service_phrases(entries, commercial=commercial, offer_synonyms=offer_synonyms)
     tagged: list[dict[str, Any]] = []
     for entry in entries:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get("is_home"):
+            # The home row sits above the tree, so it is neither labelled nor a parent here.
             continue
         label = _page_label(entry)
         slug = _slug_phrase(entry)
@@ -741,8 +746,13 @@ def _sheet_secondary_keywords(
 ) -> list[str]:
     """Secondary keywords are the other measured phrases in this cluster.
 
-    The column is not padded with city, country, buy, best, or online variants.
-    Those appear only when keyword research actually returned them.
+    This step takes only what keyword research returned for the cluster; it adds no
+    city, country, buy, best, or online variants of its own. A row left with fewer than
+    ``keyword_secondary_target`` of them is topped up later, in Phase 6, by
+    ``secondary_keywords.top_up_secondary_keywords``: it adds variants of the primary
+    keyword with a modifier ("best", "company", "agency", "firm" ...), each only when
+    it has a measured search volume and passes the relevance and buyer-fit filters.
+    A row with no measured variant stays empty.
     """
     del geography  # market is not a reason to invent a keyword
     primary_key = " ".join(str(primary or "").split()).lower()
@@ -1974,6 +1984,8 @@ def map_cluster_to_url(
         "current_url": current_url,
         "proposed_url": proposed_url,
         "search_volume": metrics["volume"],
+        # measured, estimated or unverified: the URL tree counts only a measured volume.
+        "search_volume_status": _primary_volume_status(cluster),
         "cpc": metrics["cpc"],
         "ia_page_type": ia_page_type,
         "est_products": _estimate_products(cluster, commercial),
@@ -2075,6 +2087,247 @@ def cluster_is_page_ready(cluster: dict[str, Any]) -> bool:
     return True
 
 
+# --------------------------------------------------------------------------- home page
+# The industry layer fetches category terms for the client's industry ("digital marketing
+# agency"). They belong to no service: the home page targets them. Phase 5 tags every such
+# row ``seed_origin="industry"``; clusters made mostly of those rows are merged into one row.
+
+HOME_URL = "/"
+_HOME_SECONDARY_LIMIT = 10
+
+
+def is_industry_cluster(cluster: dict[str, Any]) -> bool:
+    """True when most of the cluster's keyword rows came from the industry layer."""
+    if not isinstance(cluster, dict):
+        return False
+    rows = [row for row in cluster.get("keywords") or [] if isinstance(row, dict)]
+    if not rows:
+        return False
+    industry = sum(1 for row in rows if row.get("seed_origin") == INDUSTRY_ORIGIN)
+    return industry * 2 > len(rows)
+
+
+def _measured_volume(row: dict[str, Any]) -> int | None:
+    value = row.get("volume")
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _volume_rank(row: dict[str, Any]) -> int:
+    """The row's volume, or -1 so that a row without one ranks below every row with one."""
+    volume = _measured_volume(row)
+    return volume if volume is not None else -1
+
+
+def _volume_tier(row: dict[str, Any]) -> int:
+    """0 for a measured volume, 1 for an estimated one, 2 for none (the shared ``volume_status``)."""
+    from app.services.keyword_seeding import VOLUME_ESTIMATED, VOLUME_MEASURED, volume_status
+
+    status = VOLUME_ESTIMATED if row.get("volume_status") == VOLUME_ESTIMATED else volume_status(row)
+    return 0 if status == VOLUME_MEASURED else 1 if status == VOLUME_ESTIMATED else 2
+
+
+def _primary_volume_status(cluster: dict[str, Any]) -> str:
+    """measured, estimated or unverified, for the cluster's primary keyword row."""
+    primary = _norm_kw(identify_primary_keyword(cluster))
+    for row in cluster.get("keywords") or []:
+        if isinstance(row, dict) and _norm_kw(str(row.get("keyword") or "")) == primary:
+            return ("measured", "estimated", "unverified")[_volume_tier(row)]
+    return "unverified"
+
+
+def _volume_order(row: dict[str, Any]) -> tuple[int, int]:
+    """Sort key, best first: measured volumes, then estimated ones, then rows without a volume.
+
+    An estimate is never shown as the winner over a measured volume, whatever its size."""
+    return (_volume_tier(row), -_volume_rank(row))
+
+
+def _names_a_place(keyword: str) -> bool:
+    from app.services.shared_keyword_pool.location import is_location_specific
+
+    return is_location_specific(keyword) or bool(_named_city(keyword))
+
+
+def _industry_row_state(row: dict[str, Any]) -> str | None:
+    """How the home row treats one keyword row: "usable", "other_origin" or "out_of_scope".
+
+    "other_origin" is a row that did not come from the industry layer; "out_of_scope" is an
+    industry row that is unverified or not eligible. None for a row with no keyword.
+    """
+    if not str(row.get("keyword") or "").strip():
+        return None
+    if row.get("seed_origin") != INDUSTRY_ORIGIN:
+        return "other_origin"
+    if row.get("relevance_unverified") or row.get("relevance_reason") == "relevance_unverified":
+        return "out_of_scope"
+    if row.get("commercial_target_eligible") is False:
+        return "out_of_scope"
+    return "usable"
+
+
+def _industry_rows(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The in-scope industry keywords of these clusters, one row per keyword (best volume)."""
+    best: dict[str, dict[str, Any]] = {}
+    for cluster in clusters:
+        for row in cluster.get("keywords") or []:
+            if not isinstance(row, dict) or _industry_row_state(row) != "usable":
+                continue
+            text = " ".join(str(row.get("keyword") or "").split())
+            key = _norm_kw(text)
+            kept = best.get(key)
+            if kept is None or _volume_order(row) < _volume_order(kept):
+                best[key] = {**row, "keyword": text}
+    return list(best.values())
+
+
+def _left_out_rows(clusters: list[dict[str, Any]]) -> dict[str, int]:
+    """How many rows of these clusters the home row does not carry, and why (counts only)."""
+    counts = {"other_origin": 0, "out_of_scope": 0}
+    for cluster in clusters:
+        for row in cluster.get("keywords") or []:
+            state = _industry_row_state(row) if isinstance(row, dict) else None
+            if state in counts:
+                counts[state] += 1
+    return counts
+
+
+def _merge_industry_clusters(clusters: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """One cluster for the home page, or None when no industry keyword can lead it.
+
+    The primary is the highest-volume in-scope industry keyword that names no place (a
+    home page targets the broad term). A measured volume outranks any estimated one, and an
+    estimated one outranks a keyword with none. The other in-scope industry keywords are its
+    secondary members, in the same order.
+    """
+    ranked = sorted(
+        _industry_rows(clusters),
+        key=lambda r: (*_volume_order(r), len(str(r["keyword"]).split()), str(r["keyword"]).lower()),
+    )
+    primary = next((row for row in ranked if not _names_a_place(str(row["keyword"]))), None)
+    if primary is None:
+        return None
+    from app.services.topic_naming import phrase_title
+
+    members = [{**primary, "role": "Primary"}] + [
+        {**row, "role": "Secondary"} for row in ranked if row is not primary
+    ]
+    difficulties = [
+        float(m["difficulty"])
+        for m in members
+        if isinstance(m.get("difficulty"), (int, float)) and not isinstance(m.get("difficulty"), bool)
+    ]
+    home: dict[str, Any] = {
+        "name": phrase_title(str(primary["keyword"])),
+        "primary_keyword": primary["keyword"],
+        "keywords": members,
+        "keyword_count": len(members),
+        "avg_difficulty": round(sum(difficulties) / len(difficulties), 1) if difficulties else None,
+    }
+    if primary.get("intent"):
+        home["intent"] = primary["intent"]
+    home["cluster_id"] = stable_cluster_id(home)
+    return home
+
+
+def _build_home_entry(
+    home: dict[str, Any],
+    merged: list[dict[str, Any]],
+    *,
+    serp_map: dict[str, dict[str, Any]],
+    commercial: dict[str, Any] | None,
+    client_domain: str | None,
+    offer_index: dict[str, str],
+    stats: dict[str, Any],
+) -> dict[str, Any]:
+    """The one URL-map row for the site root.
+
+    It is built like any row, then pinned to ``/``: the site's root exists for any client with a
+    site, so the row optimizes it. The crawl pool leaves the root out (``collect_crawl_pages``),
+    so it is never scored: the row's band, score and confidence are None (``band_source
+    "not_scored"``), not a LOW match. Its levels stay empty (the home page sits above the tree)
+    and ``is_home`` marks it for the tree builder.
+    """
+    primary = str(home["primary_keyword"])
+    entry = map_cluster_to_url(
+        home,
+        crawled_pages=[],
+        serp_summary=serp_map.get(_norm_kw(primary)) or serp_map.get(primary),
+        commercial=commercial,
+        client_domain=client_domain,
+        offer_index=offer_index,
+        site_stats=stats,
+    )
+    entry["market"] = _market_from(home, commercial)
+    secondaries = [str(m["keyword"]) for m in home["keywords"] if m.get("role") != "Primary"]
+    secondaries = secondaries[:_HOME_SECONDARY_LIMIT]
+    lead = home["keywords"][0]
+    volume, tier = _measured_volume(lead), _volume_tier(lead)
+    shown = (
+        f"({volume:,}/mo)"
+        if tier == 0
+        else f"({volume:,}/mo, estimated)"
+        if tier == 1 and volume is not None
+        else "(volume not measured)"
+    )
+    reason = (
+        f"Home page: {len(home['keywords'])} industry keyword(s) from {len(merged)} cluster(s) merge into "
+        f"one row for the site root. The primary is '{primary}' {shown}, "
+        "the highest-volume in-scope industry keyword that names no place."
+    )
+    trail = [
+        reason,
+        "The root page is not part of the URL candidate pool, so it is not scored: "
+        "this row has no URL match score or band.",
+    ]
+    left_out = _left_out_rows(merged)
+    parts = []
+    if left_out["other_origin"]:
+        parts.append(f"{left_out['other_origin']} not from the industry layer")
+    if left_out["out_of_scope"]:
+        parts.append(f"{left_out['out_of_scope']} industry row(s) not in scope")
+    if parts:
+        trail.append("Rows of the merged clusters left off this row: " + ", ".join(parts) + ".")
+    entry.update(
+        {
+            "is_home": True,
+            "merged_cluster_ids": [str(c.get("cluster_id") or stable_cluster_id(c)) for c in merged],
+            "current_url": HOME_URL,
+            "proposed_url": None,
+            "selected_url": HOME_URL,
+            "target_url": HOME_URL,
+            "create_url": HOME_URL,
+            "action": "OPTIMIZE_EXISTING",
+            "url_status": "existing_url_needs_optimization",
+            "mapping_status": "existing_url_needs_optimization",
+            "target_type": "existing_page",
+            "dedicated_url": True,
+            "status": "LIVE",
+            "ia_page_type": "home",
+            "secondary_keywords": secondaries,
+            "secondary_keywords_sheet": list(secondaries),
+            "mapping_reason": reason,
+            # The root is never scored, so the band, the score and the confidence are unavailable,
+            # not LOW or 0: no priority penalty, no band count, no "no match" text.
+            "score_band": None,
+            "url_score": None,
+            "band_source": "not_scored",
+            "match_confidence": None,
+            "confidence": None,
+            # The trail of the generic mapping (no match, an initial action, a modifier retitle)
+            # described a URL this row no longer maps to; the home row says what it is instead.
+            "decision_trail": trail,
+        }
+    )
+    _set_taxonomy(entry, _taxonomy_levels(HOME_URL))
+    _set_priority(entry)
+    return entry
+
+
 def build_final_url_map(
     cluster_report: dict[str, Any],
     *,
@@ -2085,6 +2338,7 @@ def build_final_url_map(
     client_domain: str | None = None,
     pillar_structure: list[dict[str, Any]] | None = None,
     offer_synonyms: list[dict[str, Any]] | None = None,
+    service_catalog: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Map every cluster to a final URL with score band and action.
 
@@ -2094,6 +2348,16 @@ def build_final_url_map(
     fold together, collisions are checked across the whole map, every row
     gets its fields and URL hygiene verdict, and finally the consistency guard
     rejects any row whose action, status and URL columns disagree.
+
+    Clusters made mostly of industry-layer keywords are merged first into one home
+    row (``is_home``, mapped to ``/``). ``home_page`` in the result says where the
+    home page's keyword came from: ``industry``, or ``service_fallback`` when no
+    industry cluster could lead it (then no home row is added).
+
+    With a ``service_catalog``, L1 to L4 come from the catalog and the sub-topics the
+    keywords show (``url_tree.apply_url_tree``); ``url_tree`` in the result lists the
+    rows placed, the rows that need review and any broken invariant. Without one the
+    workbook taxonomy's levels stand and ``url_tree`` is empty.
     """
     crawled = collect_crawl_pages(website=website, content_audit=content_audit)
     conventions = _site_url_conventions(crawled)
@@ -2124,6 +2388,14 @@ def build_final_url_map(
                     f"Pillar '{pillar_name}' lists cluster '{item.get('name')}', which matches no cluster."
                 )
 
+    # Industry clusters (category terms for the client's industry) become the one home row.
+    # With none to use, every cluster maps as before and the result says the home page fell back.
+    industry_clusters = [c for c in clusters if is_industry_cluster(c)]
+    home_cluster = _merge_industry_clusters(industry_clusters)
+    if home_cluster is not None:
+        merged_ids = {id(c) for c in industry_clusters}
+        clusters = [c for c in clusters if id(c) not in merged_ids]
+
     entries: list[dict[str, Any]] = []
     for cluster in clusters:
         primary = identify_primary_keyword(cluster)
@@ -2149,11 +2421,32 @@ def build_final_url_map(
             )
         entries.append(entry)
 
+    home_entry = None
+    if home_cluster is not None:
+        home_entry = _build_home_entry(
+            home_cluster,
+            industry_clusters,
+            serp_map=serp_map,
+            commercial=commercial,
+            client_domain=client_domain,
+            offer_index=offer_index,
+            stats=stats,
+        )
+        # Before supporting rows resolve, so a row whose parent was merged here finds it.
+        entries.insert(0, home_entry)
+    home_page = {
+        "keyword": home_entry["primary_keyword"] if home_entry else None,
+        "source": "industry" if home_entry else "service_fallback",
+    }
+
     conversions = _convert_live_proposals(entries, conventions)
     _resolve_supporting_targets(entries)
     _fold_same_line_pages(entries, offer_index)
     collisions = conversions + _resolve_url_collisions(entries, conventions)
     apply_workbook_taxonomy(entries, commercial=commercial, offer_synonyms=offer_synonyms)
+    from app.services.url_tree import apply_url_tree
+
+    url_tree = apply_url_tree(entries, service_catalog=service_catalog or [])
     _enrich_entries(entries, crawled, conventions)
     rejected = check_url_map_consistency(entries)
     for problem in rejected:
@@ -2184,6 +2477,8 @@ def build_final_url_map(
         "offer_synonyms": offer_synonyms or [],
         "crawl_page_count": len(crawled),
         "mapped_cluster_count": len(entries),
+        "home_page": home_page,
+        "url_tree": url_tree,
         "duplicate_proposed_urls": duplicate_proposed,
         "url_collisions": collisions,
         "inconsistent_rows": rejected,
@@ -2381,6 +2676,10 @@ def _resolve_supporting_targets(entries: list[dict[str, Any]]) -> None:
     """
     by_id = {str(e.get("cluster_id")): e for e in entries if isinstance(e, dict) and e.get("cluster_id")}
     by_name = {str(e.get("cluster") or ""): e for e in entries if isinstance(e, dict) and e.get("cluster")}
+    for entry in entries:
+        # Industry clusters merged into the home row are still found by their own ids.
+        for merged_id in entry.get("merged_cluster_ids") or []:
+            by_id.setdefault(str(merged_id), entry)
     for entry in entries:
         parent_id = str(entry.get("supporting_parent_id") or "")
         parent_name = str(entry.get("supporting_parent") or "")

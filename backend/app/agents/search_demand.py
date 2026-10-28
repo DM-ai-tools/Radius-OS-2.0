@@ -81,6 +81,12 @@ from app.services.keyword_pool import (
     resolve_client_pool_target,
     resolve_keyword_pool_limits,
 )
+from app.services.industry_keywords import (
+    IndustryKeywordResolver,
+    IndustryTerms,
+    fallback_terms,
+    industry_key,
+)
 from app.services.keyword_rejection_log import record_keyword_rejections
 from app.services.keyword_metrics import measured_rows_for_pool
 from app.services.keyword_seed_identification import identify_multiple_seed_clusters
@@ -104,14 +110,118 @@ from app.services.service_labs_research import (
 )
 from app.services.service_seeding import (
     flatten_service_plans,
+    industry_seed_plan,
+    is_industry_run,
     plan_service_seeds,
-    round_robin_seeds,
+    related_seed_pairs,
     run_service_scoped_seeding,
-    extra_seeds_last,
+    subservice_context,
 )
+from app.services.shared_keyword_pool.location import client_places
+from app.services.shared_keyword_pool.reuse import PoolContext
+from app.services.subservice_expansion import SubserviceExpansionResolver
 from app.services.url_mapping import classify_clusters_against_sitemap
 
 log = get_logger("search_demand")
+
+
+def _sub_service_notice(entries: list[dict[str, Any]]) -> str | None:
+    """One chat line per service: sub-service seeds by source, what they returned,
+    and any that were skipped or never fetched."""
+    parts: list[str] = []
+    for entry in entries:
+        counts = entry.get("counts") or {}
+        seeds = entry.get("seeds") or []
+        if not seeds and not counts.get("skipped"):
+            continue
+        returned = sum(1 for s in seeds if s.get("status") == "fetched")
+        empty = sum(1 for s in seeds if s.get("status") == "fetched_no_keywords")
+        unfetched = sum(1 for s in seeds if s.get("status") in {"dropped_for_budget", "service_fetch_failed"})
+        bits = [f"{counts.get('catalog', 0)} catalog + {counts.get('model', 0)} suggested"]
+        bits.append(f"{returned} returned keywords")
+        if empty:
+            bits.append(f"{empty} returned none")
+        if unfetched:
+            bits.append(f"{unfetched} not fetched (budget)")
+        if counts.get("skipped"):
+            bits.append(f"{counts['skipped']} skipped")
+        parts.append(f"{entry.get('service')}: " + ", ".join(bits))
+    return ("Sub-service seeds: " + "; ".join(parts) + ".") if parts else None
+
+
+def _keyword_pool_notice(report: dict[str, Any]) -> str | None:
+    """One chat line on the shared keyword pool: seeds served from saved keywords, seeds
+    fetched, provider calls avoided. ``None`` when the pool did nothing this run
+    (switched off, a mock or sandbox provider, no language, no seeds)."""
+    totals = (report or {}).get("totals") or {}
+    seeds = int(totals.get("seeds") or 0)
+    if not seeds:
+        return None
+    outcomes = totals.get("outcomes") or {}
+    reused = int(outcomes.get("reused") or 0) + int(outcomes.get("reused_empty") or 0)
+    line = f"Reused saved keywords for {reused} of {seeds} seed(s); fetched {seeds - reused}"
+    avoided = int(totals.get("calls_avoided") or 0)
+    if avoided:
+        line += f" ({avoided} provider call{'' if avoided == 1 else 's'} avoided)"
+    topup = int(totals.get("place_topup_rows") or 0)
+    if topup:
+        line += f"; added {topup} place keyword(s) for this client's own areas"
+    failed = int(outcomes.get("pool_error") or 0)
+    if failed:
+        line += f"; saved keywords were unavailable for {failed} seed(s), which were fetched directly"
+    return line + "."
+
+
+async def _industry_terms_or_fallback(
+    industry: str | None,
+    market: str | None,
+    services: list[str],
+    *,
+    location_code: int,
+    language_code: str,
+) -> IndustryTerms:
+    """The industry layer's terms. The layer is optional: an unexpected error is logged
+    and the fallback terms (the industry name) are used, so it never fails the phase."""
+    try:
+        return await IndustryKeywordResolver(
+            industry,
+            market,
+            services,
+            location_code=location_code,
+            language_code=language_code,
+        ).resolve()
+    except Exception as exc:  # noqa: BLE001 - never fail the phase for the industry layer
+        log.warning("industry_terms_failed", error=f"{type(exc).__name__}: {str(exc)[:160]}")
+    try:
+        limit = max(0, int(get_settings().keyword_industry_max_seeds or 0))
+        terms = fallback_terms(industry, services=services, limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("industry_terms_fallback_failed", error=type(exc).__name__)
+        terms = []
+    return IndustryTerms(terms=terms, source="fallback", industry_key=industry_key(industry))
+
+
+_INDUSTRY_SOURCES = {
+    "model": "suggested by the model",
+    "pool": "saved from an earlier client in this industry",
+    "fallback": "the industry name; the model gave none",
+}
+
+
+def _industry_notice(entry: dict[str, Any]) -> str | None:
+    """One chat line on the industry layer: its seeds, where they came from, what they
+    returned. ``None`` when the layer had no seeds."""
+    seeds = entry.get("seeds") or []
+    if not seeds:
+        return None
+    source = _INDUSTRY_SOURCES.get(str(entry.get("source")), str(entry.get("source")))
+    line = f"Industry seeds for {entry.get('industry')} ({source}): {', '.join(seeds)}"
+    status = str(entry.get("status") or "")
+    if status == "ok":
+        line += f"; {int(entry.get('keyword_count') or 0)} keyword(s)"
+    elif status:
+        line += f"; {status.replace('_', ' ')}"
+    return line + "."
 
 # Research depth offered on the service-selection card. Each preset drives both
 # the keyword pool target and how many seed roots Phase 5 will expand — the root
@@ -1174,18 +1284,49 @@ async def run_search_demand(
     # to rebuild CDD and competitor services through separate paths.
     prioritization["service_catalog"] = service_catalog
     # Each service is also searched by its other names ("search engine optimization"
-    # for "SEO"). Sub-services stay under the service and are not separate seeds.
+    # for "SEO"), and each of its sub-services is a seed of its own (2026-10-27):
+    # the catalog's offered sub-services, then topics the model suggests, at most
+    # `subservice_expansion_max_seeds` per service (0 turns the model's off).
     seed_market = str(geo.get("location_name") or geo.get("geographic_focus") or "") or None
-    max_expansions = 0
-    synonym_results = await SeedSynonymResolver(
+    max_expansions = max(0, int(getattr(get_settings(), "subservice_expansion_max_seeds", 0) or 0))
+    sub_existing: dict[str, list[str]] = {}
+    sub_excluded: dict[str, list[str]] = {}
+    for name in services:
+        sub_existing[name], sub_excluded[name] = subservice_context(name, service_catalog, prioritization)
+    synonym_task = SeedSynonymResolver(
         industry=client.industry,
         market=seed_market,
         other_services=services,
     ).resolve_all(services)
-    expansion_results: dict = {}
+    # Category terms for the client's industry ("digital marketing agency"), the searches
+    # a home page targets, asked alongside the synonyms. Saved terms of an earlier client
+    # in the same industry, country and language are reused instead of asking again.
+    industry_task = _industry_terms_or_fallback(
+        client.industry,
+        seed_market,
+        services,
+        location_code=labs_location_code,
+        language_code=language_code,
+    )
+    if max_expansions:
+        synonym_results, expansion_results, industry_terms = await asyncio.gather(
+            synonym_task,
+            SubserviceExpansionResolver(
+                industry=client.industry,
+                market=seed_market,
+                existing=sub_existing,
+                excluded=sub_excluded,
+                other_services=services,
+                limit=max_expansions,
+            ).resolve_all(services),
+            industry_task,
+        )
+    else:
+        synonym_results, industry_terms = await asyncio.gather(synonym_task, industry_task)
+        expansion_results = {}
     synonym_terms = [s for result in synonym_results.values() for s in result.synonyms]
-    # Seeds are generated PER SERVICE: the service root, its synonyms, and the
-    # candidate keywords / pages / themes that belong to it. Sub-services are not seeds.
+    # Seeds are generated PER SERVICE: the service root, its synonyms, then its
+    # sub-services as seeds of their own (each carrying the parent).
     # `seed_roots` and `seed_targets` below are only the flat union, for the steps that
     # report on or measure seeds; keywords are fetched per service from that service's
     # own seeds.
@@ -1211,7 +1352,9 @@ async def run_search_demand(
         events.append({"type": "system_notice", "content": subservice_notice})
     # Only topics that became seeds count as relevance evidence; one the scope or the
     # catalog turned away must not widen the gate.
-    subtopic_terms = [t for plan in service_plans for t in plan.expansions_added]
+    subtopic_terms = [
+        t for plan in service_plans for t in [*plan.catalog_subs_added, *plan.expansions_added]
+    ]
     seed_roots, seed_targets = flatten_service_plans(service_plans)
 
     pool_limits = resolve_keyword_pool_limits(
@@ -1235,8 +1378,9 @@ async def run_search_demand(
         }
     )
 
-    def _build_ctx(ctx_seeds: list[str]):
-        """The relevance context for one set of seeds (a single service's, or the union)."""
+    def _build_ctx(ctx_seeds: list[str], *, industry_layer: bool = False):
+        """The relevance context for one set of seeds (a single service's, the industry
+        layer's, or the union)."""
         if is_prioritization_confirmed(prioritization) and services:
             scoped_pages = [
                 t
@@ -1262,6 +1406,7 @@ async def run_search_demand(
                 geography=str(geo.get("geographic_focus") or "") or None,
                 service_synonyms=synonym_terms,
                 service_subtopics=subtopic_terms,
+                industry_layer=industry_layer,
             )
         return build_relevance_context(
             services=services,
@@ -1276,6 +1421,7 @@ async def run_search_demand(
             geography=str(geo.get("geographic_focus") or "") or None,
             service_synonyms=synonym_terms,
             service_subtopics=subtopic_terms,
+            industry_layer=industry_layer,
         )
 
     # The union context only answers "is there any business evidence at all?".
@@ -1390,11 +1536,27 @@ async def run_search_demand(
     # judged against a relevance context built from ITS seeds, and one service failing
     # does not stop the others. Three services expand at once; the shared DataForSEO
     # gate keeps every concurrent call under the account's simultaneous-request limit.
+    # Saved keywords from earlier clients: a seed another client already fetched for this
+    # country and language is served from the shared pool instead of the provider. The
+    # client's own places let a reused seed still get "<seed> <place>" keywords.
+    pool = PoolContext(
+        places=tuple(client_places(geo)),
+        enabled=bool(get_settings().keyword_pool_enabled),
+        industry_key=industry_terms.industry_key,
+    )
+    # The industry terms are fetched as one more plan beside the services, on top of the
+    # seed budget, and judged against every service and the industry itself. The plan is
+    # never added to `service_plans`: everything per service below reads services only.
+    industry_plan = (
+        industry_seed_plan(client.industry or "", industry_terms.terms)
+        if industry_terms.terms
+        else None
+    )
     seeding = await run_service_scoped_seeding(
-        service_plans,
+        [*service_plans, industry_plan] if industry_plan else service_plans,
         fetch=run_multi_mode_seeding,
         total_cap=min(max_seed_roots, pool_limits["max_seeds"]),
-        relevance_context_for=lambda plan: _build_ctx(plan.seeds),
+        relevance_context_for=lambda plan: _build_ctx(plan.seeds, industry_layer=plan.is_industry),
         service_concurrency=3,
         country=country,
         min_volume=min_volume,
@@ -1406,9 +1568,36 @@ async def run_search_demand(
         query_variants=QueryVariantResolver(
             industry=client.industry, market=seed_market, language=language_code
         ),
+        pool=pool,
     )
+    seeding["keyword_pool"] = pool.report.as_dict()
     seeding["seed_synonyms"] = synonym_audit
     seeding["subservice_expansion"] = expansion_audit
+    service_runs = [r for r in seeding.get("service_runs") or [] if not is_industry_run(r)]
+    industry_run = next((r for r in seeding.get("service_runs") or [] if is_industry_run(r)), {})
+    # The industry layer, reported on its own and never as a service: its terms, where
+    # they came from (model, saved by an earlier client, or the fallback) and its fetch.
+    seeding["industry_keywords"] = {
+        "industry": client.industry or None,
+        "industry_key": industry_terms.industry_key,
+        "source": industry_terms.source,
+        "terms": list(industry_terms.terms),
+        "seeds": list(industry_plan.seeds) if industry_plan else [],
+        "status": industry_run.get("status") or "not_run",
+        "keyword_count": int(industry_run.get("keyword_count") or 0),
+    }
+    # Per service: sub-service seeds from the catalog and the model, the skips and
+    # why, and what each fetched seed returned (or that it was never fetched).
+    seeding["sub_service_seeding"] = [
+        {
+            "service": r.get("service"),
+            "counts": r.get("sub_service_counts") or {},
+            "seeds": r.get("sub_service_seeds") or [],
+            "skipped": r.get("sub_service_skipped") or [],
+        }
+        for r in service_runs
+        if r.get("sub_service_counts") is not None
+    ]
     _mark("expansion")
 
     # Related-keyword lookups need only the seeds each service actually fetched, so
@@ -1423,14 +1612,20 @@ async def run_search_demand(
                 location_code=labs_location_code,
                 language_code=language_code,
             )
+            sub = (seed_targets.get(seed.lower()) or {}) if service else {}
             for row in rows:
                 if isinstance(row, dict):
                     row["service"] = service
                     row["seed"] = seed
+                    if sub.get("target_type") == "sub_service" and sub.get("service") == service:
+                        row["sub_service"] = sub.get("sub_service") or sub.get("target")
+                        row["parent_service"] = service
             return rows, errs
 
-    related_pairs = round_robin_seeds(
-        extra_seeds_last(seeding.get("service_runs") or [], service_plans), max_seed_roots
+    # The services' own seeds share the cap in rotation; every fetched sub-service
+    # seed is added on top, so the cap is raised by them rather than spent on them.
+    related_pairs = related_seed_pairs(
+        service_runs, service_plans, max_seed_roots
     ) or [("", r) for r in seed_roots[:max_seed_roots]]
     if related_pairs:
         prefetch.start(
@@ -1453,11 +1648,20 @@ async def run_search_demand(
                 )
                 if r["status"] == "ok"
                 else f"{r['service']} {r['status'].replace('_', ' ')}"
-                for r in seeding.get("service_runs") or []
+                for r in service_runs
             )
             + ".",
         }
     )
+    industry_notice = _industry_notice(seeding["industry_keywords"])
+    if industry_notice:
+        events.append({"type": "system_notice", "content": industry_notice})
+    sub_notice = _sub_service_notice(seeding.get("sub_service_seeding") or [])
+    if sub_notice:
+        events.append({"type": "system_notice", "content": sub_notice})
+    pool_notice = _keyword_pool_notice(seeding["keyword_pool"])
+    if pool_notice:
+        events.append({"type": "system_notice", "content": pool_notice})
     provider_errors.extend(seeding.get("provider_errors") or [])
     seed_clusters = list(seeding.get("seed_clusters") or [])
     keyword_dataset = list(seeding.get("keyword_dataset") or [])
@@ -2223,7 +2427,9 @@ async def run_search_demand(
         relevance_context=relevance_ctx,
         location_code=location_code,
         language_code=language_code,
-        use_llm=time.monotonic() < phase_deadline,
+        # The engine comes from settings; the deadline is only a guard, and a
+        # fallback it forces is recorded on the report (clustering.deadline_fallback).
+        within_deadline=time.monotonic() < phase_deadline,
         # Primary selection weighs difficulty against what this site can rank
         # for, but only on a measured Domain Rating, never an estimate.
         site_strength=float(authority) if authority is not None and authority_source == "provider" else None,
@@ -2241,18 +2447,40 @@ async def run_search_demand(
     # are excluded from sitemap classification, CDP, and topic drafting.
     from app.services.cluster_validation_gate import validate_clusters_coherence
 
+    clustering_info = cluster_report.get("clustering") or {}
+    clustering_ran = bool(clustering_info.get("ran", True))
     raw_clusters = [
         c for c in (cluster_report.get("clusters") or []) if isinstance(c, dict)
     ]
-    events.append(
-        {
-            "type": "system_notice",
-            "content": (
-                f"Validating {len(raw_clusters)} keyword clusters for topic coherence…"
-            ),
-        }
-    )
-    kept_clusters, rejected_clusters, cluster_sense_audit = await validate_clusters_coherence(
+    if not clustering_ran:
+        events.append(
+            {
+                "type": "system_notice",
+                "content": f"Keyword clustering did not run: {clustering_info.get('reason')}.",
+            }
+        )
+    elif clustering_info.get("deadline_fallback"):
+        events.append(
+            {
+                "type": "system_notice",
+                "content": (
+                    "Keyword clustering used the rules instead of the model: the phase ran out "
+                    "of time. A run with time left would cluster with the model."
+                ),
+            }
+        )
+    if clustering_ran:
+        events.append(
+            {
+                "type": "system_notice",
+                "content": (
+                    f"Validating {len(raw_clusters)} keyword clusters for topic coherence…"
+                ),
+            }
+        )
+    kept_clusters, rejected_clusters, cluster_sense_audit = (
+        [], [], {"skipped": True, "reason": "clustering_not_run"}
+    ) if not clustering_ran else await validate_clusters_coherence(
         raw_clusters,
         client_id=str(client.id),
         client_name=client.display_name,
@@ -2266,7 +2494,9 @@ async def run_search_demand(
     _mark("cluster_coherence")
     # Keep rejected clusters in the report (stamped) so operators can see why;
     # only coherent clusters continue into topic / CDP paths.
-    cluster_report["clusters"] = kept_clusters + rejected_clusters
+    if clustering_ran:
+        # Not run means no clusters key at all, never an empty or rule-built one.
+        cluster_report["clusters"] = kept_clusters + rejected_clusters
     cluster_report["clusters_created"] = len(kept_clusters)
     cluster_report["cluster_sense_gate"] = cluster_sense_audit
     cluster_report["rejected_clusters"] = [
@@ -2438,6 +2668,7 @@ async def run_search_demand(
 
     summary = enrich_phase5_pack(
         {
+        "clustering": cluster_report.get("clustering") or {},
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "seed_keywords": seeds,
         "cdd_keywords": cdd_keywords,
@@ -2482,8 +2713,19 @@ async def run_search_demand(
             "seed_synonyms": seeding.get("seed_synonyms") or [],
             # Per service: sub-service topics the model suggested, which became seeds
             # (target_type="sub_service", seed_origin="subservice_expansion"), which were
-            # skipped and why (duplicate, in_catalog, excluded_by_scope, ...).
+            # skipped and why (duplicate_of_catalog, excluded_by_operator, over_limit, ...).
             "subservice_expansion": seeding.get("subservice_expansion") or [],
+            # Per service: catalog and model sub-service seed counts, the skips, and
+            # each sub-service seed's outcome (fetched / fetched_no_keywords /
+            # dropped_for_budget) with its keyword count.
+            "sub_service_seeding": seeding.get("sub_service_seeding") or [],
+            # Per service (and in total): how many seeds were served from keywords an
+            # earlier client fetched, how many were fetched, provider calls avoided and the
+            # age of the saved keywords. No client names or URLs; the pool is public keyword data.
+            "keyword_pool": seeding.get("keyword_pool") or {},
+            # The industry layer (category terms for the home page, seed_origin="industry"):
+            # its terms, their source (model / pool / fallback), its seeds and what they returned.
+            "industry_keywords": seeding.get("industry_keywords") or {},
             # measured / estimated / unverified volume, funnel mix, and per seed the
             # informational share before and after the variant pull and top-up.
             "volume_coverage": seeding.get("volume_coverage") or {},
@@ -2551,6 +2793,10 @@ async def run_search_demand(
 
     summary = attach_workbook_to_search_demand(summary)
     summary = json_safe(summary)
+    if not clustering_ran:
+        # Clustering was switched off: no clusters key, so nothing downstream can
+        # mistake an empty list for a clustering result. `clustering` says why.
+        summary.pop("clusters", None)
 
     # A phase reset clears confirmed_at in the database while this run may
     # still be holding the selection it loaded at the start. Write that reopen

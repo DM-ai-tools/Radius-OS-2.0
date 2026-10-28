@@ -977,6 +977,23 @@ async def run_site_architecture_plan(
         client_domain=domain,
         pillar_structure=None,
         offer_synonyms=((demand.get("keyword_seeding") or {}).get("seed_synonyms") or []),
+        # The catalog is the skeleton of the URL map's L1 to L4 tree.
+        service_catalog=list(demand.get("service_catalog") or prioritization.get("service_catalog") or []),
+    )
+    # Every row needs secondary keywords. Rows the clusters left short are topped up with
+    # measured variants of their primary keyword ("best ...", "... company"); a row with
+    # none measured stays empty. Added before the map is merged into the architecture. The
+    # counts are logged, not stored in the report.
+    from app.services.secondary_keywords import top_up_url_map_secondaries
+
+    await top_up_url_map_secondaries(
+        url_map_report,
+        demand=demand,
+        commercial=commercial,
+        marketing=marketing,
+        website=website,
+        client_name=client_name,
+        domain=domain,
     )
     blueprint = apply_url_map_to_architecture(blueprint, url_map_report)
     blueprint["url_map_report"] = url_map_report
@@ -1225,6 +1242,18 @@ async def run_site_architecture_plan(
             blueprint["source"] = "site_architecture_skill"
     except Exception as exc:  # noqa: BLE001
         log.warning("site_architecture_llm_polish_failed", client=client_name, error=str(exc))
+
+    from app.services.content_strategy import attach_page_plan
+
+    blueprint = attach_page_plan(blueprint)
+    saved_audit = blueprint.get("sitemap_audit")
+    if isinstance(saved_audit, dict) and saved_audit.get("status") == "available":
+        from app.services.sitemap_audit import stamp_target_url_tree as _stamp_tree
+
+        blueprint["target_url_tree"] = _stamp_tree(
+            list(blueprint.get("target_url_tree") or []),
+            saved_audit,
+        )
 
     if not blueprint.get("executive_summary"):
         cs = blueprint["current_state"]

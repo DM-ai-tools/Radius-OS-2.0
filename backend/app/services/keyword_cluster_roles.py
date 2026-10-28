@@ -89,7 +89,8 @@ _GEO_WORDS = {
     "geelong", "australia", "auckland", "wellington", "near", "me", "nearby", "local",
 }
 # Adding or dropping one of these keeps the search the same page's target.
-_LIGHT_MODIFIERS = _GEO_WORDS | {"best", "top", "online", "professional", "expert", "provider"}
+# A city, a country, or "near me" does not: that is a different search.
+_LIGHT_MODIFIERS = {"best", "top", "online", "professional", "expert", "provider"}
 _QUESTION_START = re.compile(
     r"^(what|how|why|when|where|which|who|can|does|do|is|are|should|will|would)\b"
 )

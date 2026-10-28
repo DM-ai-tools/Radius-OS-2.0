@@ -114,6 +114,16 @@ function fmtCpc(v: unknown): string {
 
 const FUNNEL_ORDER = ["TOFU", "MOFU", "BOFU"];
 
+function funnelFromRow(row: Record<string, unknown>): string {
+  const existing = String(row.funnel_stage ?? row.funnel ?? "").trim().toUpperCase();
+  if (FUNNEL_ORDER.includes(existing)) return existing;
+  const intent = String(row.intent || "").trim().toLowerCase();
+  if (intent === "informational") return "TOFU";
+  if (intent === "commercial") return "MOFU";
+  if (intent === "transactional" || intent === "navigational") return "BOFU";
+  return "";
+}
+
 function funnelRank(row: Record<string, unknown>): number {
   const stage = String(row.funnel_stage ?? row.funnel ?? "").toUpperCase();
   const index = FUNNEL_ORDER.indexOf(stage);
@@ -178,13 +188,13 @@ function enrichKeyword(
         keyword: row.keyword || extra.keyword,
         search_volume_mo:
           extra.search_volume_mo ?? row.volume ?? row.search_volume_mo,
-        funnel_stage: extra.funnel_stage ?? row.funnel ?? row.funnel_stage,
+        funnel_stage: extra.funnel_stage ?? row.funnel ?? row.funnel_stage ?? funnelFromRow(row),
         competition: extra.competition ?? row.difficulty ?? row.competition,
       }
     : {
         ...row,
         search_volume_mo: row.volume ?? row.search_volume_mo,
-        funnel_stage: row.funnel ?? row.funnel_stage,
+        funnel_stage: row.funnel ?? row.funnel_stage ?? funnelFromRow(row),
         competition: row.difficulty ?? row.competition,
         parent_category: row.parent_topic || row.target || row.seed || row.parent_category,
         category_dimension: row.target_type || row.category_dimension,
@@ -231,6 +241,18 @@ function HighlightList({
   );
 }
 
+function seedKeywordRows(seed: Record<string, unknown>): Array<Record<string, unknown>> {
+  const direct = kwRows(seed.keywords);
+  if (direct.length) return direct;
+  const merged: Array<Record<string, unknown>> = [];
+  for (const match of ["exact", "phrase", "related", "broad"]) {
+    for (const row of kwRows(seed[match])) {
+      merged.push({ ...row, match_class: row.match_class || match });
+    }
+  }
+  return merged;
+}
+
 function SeedKeywordBlock({
   seed,
   analysis,
@@ -240,9 +262,15 @@ function SeedKeywordBlock({
   analysis: Map<string, Record<string, unknown>>;
   keywordFocus: KeywordFocus;
 }) {
-  const allKeywords = byFunnelThenVolume(
-    kwRows(seed.keywords).map((k) => enrichKeyword(k, analysis)),
-  );
+  const [open, setOpen] = useState(false);
+  // Thousands of seed rows were mounted while the section was still closed,
+  // so a finished run never appeared. Build the table only after it is opened.
+  const allKeywords = useMemo(() => {
+    if (!open) return [];
+    return byFunnelThenVolume(
+      seedKeywordRows(seed).map((k) => enrichKeyword(k, analysis)),
+    );
+  }, [open, seed, analysis]);
   const keywords = useIntentFilter(allKeywords);
   const filtered = keywords.length !== allKeywords.length;
   const counts =
@@ -257,7 +285,10 @@ function SeedKeywordBlock({
   if (filtered && keywords.length === 0) return null;
 
   return (
-    <details style={{ marginTop: 8 }}>
+    <details
+      style={{ marginTop: 8 }}
+      onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
+    >
       <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 700 }}>
         {String(seed.seed_label || "Seed")}: {String(seed.seed || "—")}{" "}
         <span style={{ fontWeight: 500, color: "var(--muted)" }}>
@@ -277,12 +308,14 @@ function SeedKeywordBlock({
             color: "var(--muted)",
           }}
         >
-          Exact {Number(counts.exact ?? 0)} · Phrase {Number(counts.phrase ?? 0)} · Related{" "}
-          {Number(counts.related ?? 0)} · Broad {Number(counts.broad ?? 0)}
+          {(["exact", "phrase", "related", "broad"] as const)
+            .filter((name) => Number(counts[name] || 0) > 0)
+            .map((name) => `${name[0].toUpperCase()}${name.slice(1)} ${Number(counts[name])}`)
+            .join(" · ") || `${Number(seed.keyword_count ?? keywords.length)} keywords`}
           {missing.length ? ` · no results for: ${missing.join(", ")}` : ""}
         </span>
       </summary>
-      <div style={{ overflowX: "auto", paddingBottom: 8 }}>
+      {open ? <div style={{ overflowX: "auto", paddingBottom: 8 }}>
         <table
           className="kw-report-table"
           style={{ width: "100%", fontSize: 11, borderCollapse: "collapse" }}
@@ -395,32 +428,43 @@ function SeedKeywordBlock({
             No keywords above the volume threshold were returned for this seed.
           </p>
         ) : null}
-      </div>
+      </div> : null}
     </details>
   );
 }
 
-function ServiceSeedGroups({
-  services,
+function serviceKeywordCount(service: Record<string, unknown>, seeds: Array<Record<string, unknown>>): number {
+  const fromSeeds = seeds.reduce((sum, seed) => {
+    const listed = kwRows(seed.keywords).length;
+    return sum + Number(seed.keyword_count || listed || 0);
+  }, 0);
+  const subs = kwRows(service.subservices).reduce((sum, sub) => {
+    const subSeeds = kwRows(sub.seeds);
+    return sum + serviceKeywordCount(sub, subSeeds);
+  }, 0);
+  return Number(service.keyword_count || 0) || fromSeeds + subs;
+}
+
+function ServiceSeedGroup({
+  service,
   analysis,
   keywordFocus,
 }: {
-  services: Array<Record<string, unknown>>;
+  service: Record<string, unknown>;
   analysis: Map<string, Record<string, unknown>>;
   keywordFocus: KeywordFocus;
 }) {
+  const [open, setOpen] = useState(false);
+  const seeds = kwRows(service.seeds);
+  const subservices = kwRows(service.subservices);
+  const keywordCount = serviceKeywordCount(service, seeds);
+  const categoryLeader =
+    service.category_leader && typeof service.category_leader === "object"
+      ? (service.category_leader as Record<string, unknown>)
+      : null;
   return (
-    <>
-      {services.map((service, si) => {
-        const seeds = kwRows(service.seeds);
-        const subservices = kwRows(service.subservices);
-        const categoryLeader =
-          service.category_leader && typeof service.category_leader === "object"
-            ? (service.category_leader as Record<string, unknown>)
-            : null;
-        return (
           <details
-            key={`${String(service.service)}-${si}`}
+            onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
             style={{
               marginBottom: 8,
               border: "1px solid var(--line)",
@@ -451,7 +495,7 @@ function ServiceSeedGroups({
               <span style={{ fontWeight: 500, color: "var(--muted)" }}>
                 ({Number(service.seed_count ?? seeds.length)} seeds
                 {subservices.length ? ` · ${subservices.length} subservices` : ""} ·{" "}
-                {Number(service.keyword_count ?? 0)} keywords
+                {keywordCount} keywords
                 {service.total_volume != null
                   ? ` · vol ${fmtVol(service.total_volume)}`
                   : ""}
@@ -473,7 +517,7 @@ function ServiceSeedGroups({
                 </span>
               ) : null}
             </summary>
-            <div style={{ padding: "0 12px 10px" }}>
+            {open ? <div style={{ padding: "0 12px 10px" }}>
               {subservices.map((sub, subIdx) => {
                 const subSeeds = kwRows(sub.seeds);
                 const gapCount = Number(sub.gap_keyword_count ?? 0);
@@ -509,7 +553,7 @@ function ServiceSeedGroups({
                       </span>
                       {String(sub.subservice || "—")}{" "}
                       <span style={{ fontWeight: 500, color: "var(--muted)" }}>
-                        ({Number(sub.keyword_count ?? 0)} keywords
+                        ({serviceKeywordCount(sub, subSeeds)} keywords
                         {gapCount ? ` · ${gapCount} gaps` : ""})
                       </span>
                       {sub.page_path ? (
@@ -562,10 +606,30 @@ function ServiceSeedGroups({
                   keywordFocus={keywordFocus}
                 />
               ))}
-            </div>
+            </div> : null}
           </details>
-        );
-      })}
+  );
+}
+
+function ServiceSeedGroups({
+  services,
+  analysis,
+  keywordFocus,
+}: {
+  services: Array<Record<string, unknown>>;
+  analysis: Map<string, Record<string, unknown>>;
+  keywordFocus: KeywordFocus;
+}) {
+  return (
+    <>
+      {services.map((service, si) => (
+        <ServiceSeedGroup
+          key={`${String(service.service)}-${si}`}
+          service={service}
+          analysis={analysis}
+          keywordFocus={keywordFocus}
+        />
+      ))}
     </>
   );
 }
@@ -581,42 +645,14 @@ function FlatSeedClusters({
 }) {
   return (
     <>
-      {seeds.map((cluster, i) => {
-        const exact = kwRows(cluster.exact).map((r) => ({
-          ...enrichKeyword(r, analysis),
-          match_class: "exact",
-        }));
-        const phrase = kwRows(cluster.phrase).map((r) => ({
-          ...enrichKeyword(r, analysis),
-          match_class: "phrase",
-        }));
-        const related = kwRows(cluster.related).map((r) => ({
-          ...enrichKeyword(r, analysis),
-          match_class: "related",
-        }));
-        const broad = kwRows(cluster.broad).map((r) => ({
-          ...enrichKeyword(r, analysis),
-          match_class: "broad",
-        }));
-        const merged = [...exact, ...phrase, ...related, ...broad];
-        return (
+      {seeds.map((cluster, i) => (
           <SeedKeywordBlock
             key={`${String(cluster.seed)}-${i}`}
-            seed={{
-              ...cluster,
-              keywords: merged.length ? merged : kwRows(cluster.keywords),
-              class_counts: {
-                exact: exact.length,
-                phrase: phrase.length,
-                related: related.length,
-                broad: broad.length,
-              },
-            }}
+            seed={cluster}
             analysis={analysis}
             keywordFocus={keywordFocus}
           />
-        );
-      })}
+      ))}
     </>
   );
 }
@@ -696,152 +732,18 @@ function keywordStage(row: Record<string, unknown>, fallback: unknown): string {
   return FUNNEL_ORDER.includes(stage) ? stage : "—";
 }
 
-function focusViews(cluster: Record<string, unknown>): Array<Record<string, unknown>> {
-  const keywords = kwRows(cluster.keywords);
-  const groups = new Map<string, Array<Record<string, unknown>>>();
-  for (const row of keywords) {
-    const funnel = keywordStage(row, cluster.funnel);
-    const intent = keywordIntent(row, cluster.intent);
-    const key = `${funnel}|${intent}`;
-    const bucket = groups.get(key) || [];
-    bucket.push(row);
-    groups.set(key, bucket);
-  }
-  if (groups.size <= 1) return [cluster];
-  const base = String(cluster.name || cluster.primary_keyword || "Cluster");
-  return [...groups.entries()]
-    .sort((a, b) => {
-      const [aFunnel, aIntent] = a[0].split("|");
-      const [bFunnel, bIntent] = b[0].split("|");
-      const stage = FUNNEL_ORDER.indexOf(aFunnel) - FUNNEL_ORDER.indexOf(bFunnel);
-      if (stage) return stage;
-      return INTENTS.indexOf(aIntent as (typeof INTENTS)[number]) - INTENTS.indexOf(bIntent as (typeof INTENTS)[number]);
-    })
-    .map(([key, rows]) => {
-      const [funnel, intent] = key.split("|");
-      const volume = rows.reduce((sum, row) => {
-        const n = Number(row.volume);
-        return sum + (Number.isFinite(n) ? n : 0);
-      }, 0);
-      return {
-        ...cluster,
-        name: `${base} (${funnel} · ${intent})`,
-        funnel,
-        intent,
-        keywords: rows,
-        keyword_count: rows.length,
-        est_traffic: volume || null,
-      };
-    });
-}
-
-function ClusterKeywords({
-  cluster: c,
-  index: i,
-  keywordFocus,
-}: {
-  cluster: Record<string, unknown>;
-  index: number;
-  keywordFocus: KeywordFocus;
-}) {
-  const all = kwRows(c.keywords);
-  const kws = useIntentFilter(all);
-  if (kws.length === 0 && all.length) return null;
-  const funnel = keywordStage(kws[0] || {}, c.funnel);
-  const intent = keywordIntent(kws[0] || {}, c.intent);
-  return (
-    <details open={i === 0} style={{ marginBottom: 8, fontSize: 13 }}>
-      <summary style={{ cursor: "pointer" }}>
-        <strong>{String(c.name || c.primary_keyword || `Cluster ${i + 1}`)}</strong>
-        <span style={{ marginLeft: 8 }}>
-          <FunnelBadge stage={funnel} />
-        </span>
-        <span style={{ color: "var(--muted)", fontWeight: 500 }}>
-          {" "}
-          · {intent}
-          {" "}
-          · {kws.length === all.length ? `${all.length} keywords` : `${kws.length} of ${all.length} keywords`}
-          {c.est_traffic != null || c.total_volume != null
-            ? ` · vol ${fmtVol(c.est_traffic ?? c.total_volume)}`
-            : ""}
-        </span>
-      </summary>
-      <div style={{ color: "var(--muted)", marginTop: 4, fontSize: 12 }}>
-        {String(c.recommended_content || c.content_type || "—")} ·{" "}
-        {String(c.recommended_url || "—")}
-      </div>
-      <ul className="missing-list" style={{ marginTop: 6 }}>
-        {kws.map((k) => {
-          const keyword = String(k.keyword || "");
-          const focused = keywordFocus.focused(keyword);
-          return (
-            <li key={keyword} style={{ opacity: focused ? 1 : 0.45 }}>
-              <label style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
-                <input
-                  type="checkbox"
-                  checked={focused}
-                  disabled={keywordFocus.disabled || !keyword}
-                  aria-label={`Focus ${keyword || "keyword"}`}
-                  onChange={() => keywordFocus.onToggle(keyword)}
-                />
-                <span>
-                  <FunnelBadge stage={keywordStage(k, funnel)} /> {keyword || "—"}
-                  {k.volume != null ? ` · vol ${fmtVol(k.volume)}` : ""}
-                  {k.role ? ` · ${String(k.role)}` : ""}
-                  {` · ${keywordIntent(k, intent)}`}
-                  <VariantNote row={k} />
-                </span>
-              </label>
-            </li>
-          );
-        })}
-      </ul>
-    </details>
-  );
-}
-
 function ClusterSection({
-  clusterReport,
-  reportClusters,
   orphans,
   roadmap,
   keywordFocus,
 }: {
-  clusterReport: Record<string, unknown>;
-  reportClusters: Array<Record<string, unknown>>;
   orphans: Array<Record<string, unknown>>;
   roadmap: Array<Record<string, unknown>>;
   keywordFocus: KeywordFocus;
 }) {
   const shownOrphans = useIntentFilter(orphans);
-  const focused = reportClusters
-    .flatMap((cluster) => focusViews(cluster))
-    .sort((a, b) => {
-      const stage = funnelRank(a) - funnelRank(b);
-      if (stage) return stage;
-      const intent =
-        INTENTS.indexOf(keywordIntent({}, a.intent) as (typeof INTENTS)[number]) -
-        INTENTS.indexOf(keywordIntent({}, b.intent) as (typeof INTENTS)[number]);
-      if (intent) return intent;
-      return String(a.name || "").localeCompare(String(b.name || ""));
-    });
   return (
     <section style={{ marginTop: 8, marginBottom: 16 }}>
-      <h4 style={{ marginBottom: 6 }}>Keyword clusters</h4>
-      <p style={{ fontSize: 13, marginTop: 0 }}>
-        Each cluster is one topic, one funnel stage, and one search intent. Total:{" "}
-        {String(clusterReport.total_keywords ?? "—")} · Clusters:{" "}
-        {String(focused.length || clusterReport.clusters_created || reportClusters.length)} · Orphans:{" "}
-        {String(clusterReport.orphan_count ?? orphans.length)}
-      </p>
-      {focused.map((c, i) => (
-        <ClusterKeywords
-          key={`${String(c.name || c.primary_keyword)}-${i}`}
-          cluster={c}
-          index={i}
-          keywordFocus={keywordFocus}
-        />
-      ))}
       {roadmap.length ? (
         <>
           <h4 style={{ marginBottom: 6, marginTop: 12 }}>Content roadmap</h4>
@@ -897,7 +799,6 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
     payload.cluster_report && typeof payload.cluster_report === "object"
       ? (payload.cluster_report as Record<string, unknown>)
       : null;
-  const reportClusters = kwRows(clusterReport?.clusters);
   const serviceClusters = kwRows(clusterReport?.service_clusters);
   const subserviceMatrix = kwRows(payload.subservice_competitor_matrix);
   const orphans = kwRows(clusterReport?.orphans);
@@ -1178,11 +1079,19 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
               {Number(classCounts.related ?? 0)} · Broad{" "}
               {Number(classCounts.broad ?? 0)}
               {targetCounts
-                ? ` · Roots: services ${Number(targetCounts.service ?? 0)}, subservices ${Number(
-                    targetCounts.sub_service ?? 0,
-                  )}, pages ${Number(targetCounts.page ?? 0)}, keywords ${Number(
-                    targetCounts.keyword ?? 0,
-                  )}`
+                ? ` · Roots: ${
+                    (
+                      [
+                        ["services", targetCounts.service],
+                        ["subservices", targetCounts.sub_service],
+                        ["pages", targetCounts.page],
+                        ["keywords", targetCounts.keyword],
+                      ] as const
+                    )
+                      .filter(([, count]) => Number(count || 0) > 0)
+                      .map(([label, count]) => `${label} ${Number(count)}`)
+                      .join(", ") || "none recorded"
+                  }`
                 : ""}
               {seedingMeta?.seeds_with_all_classes !== undefined
                 ? ` · All 4 classes: ${Number(seedingMeta.seeds_with_all_classes)}/${
@@ -1233,14 +1142,8 @@ export default function SearchDemandCard({ payload, canAct, onAction }: Props) {
         </section>
       )}
 
-      {clusterReport ? (
-        <ClusterSection
-          clusterReport={clusterReport}
-          reportClusters={reportClusters}
-          orphans={orphans}
-          roadmap={roadmap}
-          keywordFocus={keywordFocus}
-        />
+      {roadmap.length || orphans.length ? (
+        <ClusterSection orphans={orphans} roadmap={roadmap} keywordFocus={keywordFocus} />
       ) : null}
 
       <section className="report-section" style={{ marginTop: 8 }}>

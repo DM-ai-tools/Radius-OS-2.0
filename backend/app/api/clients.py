@@ -446,9 +446,23 @@ async def get_client(
     client = result.scalar_one_or_none()
     if not client:
         raise HTTPException(404, "Client not found")
+    profile_out = ProfileOut.model_validate(client.profile) if client.profile else None
+    if profile_out and profile_out.search_demand_summary:
+        # The page reads the keyword report from the chat card. Shared memory
+        # on this response is the short pack, so opening the client is not a
+        # multi-megabyte download that never paints.
+        from app.services.memory_packs import slim_search_demand_memory
+
+        profile_out = profile_out.model_copy(
+            update={
+                "search_demand_summary": slim_search_demand_memory(
+                    profile_out.search_demand_summary
+                )
+            }
+        )
     return ClientDetail(
         **client_out(client).model_dump(),
-        profile=ProfileOut.model_validate(client.profile) if client.profile else None,
+        profile=profile_out,
     )
 
 

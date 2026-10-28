@@ -8,10 +8,13 @@ import pytest
 
 from app.services.keyword_relevance import build_relevance_context, evaluate_keyword
 from app.services.service_seeding import (
+    CATALOG_SUB_ORIGIN,
     EXPANSION_ORIGIN,
     generate_service_seeds,
     plan_service_seeds,
+    related_seed_pairs,
     run_service_scoped_seeding,
+    sub_service_report,
     subservice_context,
 )
 from app.services.subservice_expansion import (
@@ -214,53 +217,81 @@ def _plan(service, subtopics, *, pool=None, max_expansions=10):
     )
 
 
-def test_topics_are_not_added_as_seeds():
+def test_topics_become_sub_service_seeds_after_the_catalog_ones():
     plan = _plan("SEO", ["technical seo", "seo audit"], pool=["seo melbourne"])
-    assert plan.expansions_added == []
-    assert {s["reason"] for s in plan.expansions_skipped} == {"sub_service"}
-    lowered = {s.lower() for s in plan.seeds}
-    assert "technical seo" not in lowered and "seo audit" not in lowered
-    assert "local seo" not in lowered
-    assert "seo melbourne" not in lowered
-    assert "seo" in lowered
+    # Root, then the catalog's offered sub-service, then the model's topics.
+    assert plan.seeds == ["SEO", "Local SEO", "technical seo", "seo audit"]
+    assert plan.catalog_subs_added == ["Local SEO"]
+    assert plan.expansions_added == ["technical seo", "seo audit"]
+    for seed, origin in (("local seo", CATALOG_SUB_ORIGIN), ("technical seo", EXPANSION_ORIGIN)):
+        meta = plan.seed_targets[seed]
+        assert meta["target_type"] == "sub_service"
+        assert meta["parent_segment"] == "SEO" and meta["parent_service"] == "SEO"
+        assert meta["seed_origin"] == origin
+        assert meta["service"] == "SEO"
+    assert "seo melbourne" not in {s.lower() for s in plan.seeds}
+    # Excluded by the operator: never seeded, recorded as excluded.
+    assert "link building" not in {s.lower() for s in plan.seeds}
+    assert {"phrase": "Link Building", "reason": "excluded_by_operator"} in plan.catalog_subs_skipped
 
 
 def test_topics_skip_catalog_scope_duplicates_and_other_services():
     plan = _plan(
         "SEO",
-        [
-            "link building",
-            "instagram ads",
-            "local seo",
-            "seo melbourne",
-            "meta ads",
-            "technical seo",
-        ],
+        ["link building", "instagram ads", "local seo", "seo melbourne", "meta ads", "technical seo"],
         pool=["seo melbourne"],
     )
-    assert plan.expansions_added == []
-    assert {s.lower() for s in plan.seeds} == {"seo"}
-    assert all(s["reason"] == "sub_service" for s in plan.expansions_skipped)
+    assert plan.expansions_added == ["technical seo"]
+    reasons = {s["phrase"]: s["reason"] for s in plan.expansions_skipped}
+    assert reasons == {
+        "link building": "duplicate_of_catalog",  # the catalog's version wins (and is excluded)
+        "instagram ads": "another_service_sub_service",
+        "local seo": "duplicate_of_catalog",
+        "seo melbourne": "location_qualifier",
+        "meta ads": "another_service",
+    }
+    # The parent's own seeds are unchanged: the service name only.
+    assert [s for s in plan.seeds if not plan.is_sub_service(s)] == ["SEO"]
 
 
 def test_an_excluded_sub_service_is_never_brought_back():
     plan = _plan("Meta Ads", ["tiktok marketing", "facebook retargeting", "lookalike audiences"])
-    assert plan.expansions_added == []
     assert not any("tiktok" in s.lower() for s in plan.seeds)
-    assert "facebook retargeting" not in {s.lower() for s in plan.seeds}
+    assert {"phrase": "tiktok marketing", "reason": "excluded_by_operator"} in plan.expansions_skipped
+    assert {"phrase": "TikTok Ads", "reason": "excluded_by_operator"} in plan.catalog_subs_skipped
+    assert plan.seeds == ["Meta Ads", "Instagram Ads", "facebook retargeting", "lookalike audiences"]
 
 
-def test_a_service_with_no_catalog_sub_services_stays_the_service_name():
+def test_a_service_with_no_catalog_sub_services_gets_the_models_topics():
     plan = _plan("Email Marketing", ["welcome sequence", "abandoned cart emails", "klaviyo setup"])
-    assert plan.expansions_added == []
-    assert plan.seeds == ["Email Marketing"]
+    assert plan.seeds == ["Email Marketing", "welcome sequence", "abandoned cart emails", "klaviyo setup"]
+    assert plan.catalog_subs_added == []
 
 
-def test_the_cap_limits_how_many_are_seeded():
+def test_the_cap_limits_how_many_model_topics_are_seeded():
     plan = _plan("Email Marketing", ["a b", "c d", "e f", "g h"], max_expansions=2)
-    assert plan.expansions_added == []
-    assert plan.seeds == ["Email Marketing"]
-    assert [s["reason"] for s in plan.expansions_skipped] == ["sub_service"] * 4
+    assert plan.expansions_added == ["a b", "c d"]
+    assert plan.seeds == ["Email Marketing", "a b", "c d"]
+    assert [s["reason"] for s in plan.expansions_skipped] == ["over_limit", "over_limit"]
+
+
+def test_a_sub_service_is_seeded_under_one_parent_only():
+    catalog = [
+        {"id": "seo", "name": "SEO", "subservices": []},
+        {"id": "content marketing", "name": "Content Marketing", "subservices": []},
+    ]
+    plans = plan_service_seeds(
+        ["SEO", "Content Marketing"],
+        pool_roots=[],
+        pool_targets={},
+        catalog=catalog,
+        prioritization={},
+        service_subtopics={"SEO": ["content audits"], "Content Marketing": ["content audits", "blog writing"]},
+    )
+    by_service = {p.service: p for p in plans}
+    assert by_service["SEO"].expansions_added == ["content audits"]
+    assert by_service["Content Marketing"].expansions_added == ["blog writing"]
+    assert {"phrase": "content audits", "reason": "seeded_under:SEO"} in by_service["Content Marketing"].expansions_skipped
 
 
 def test_plan_service_seeds_routes_topics_to_their_own_service():
@@ -273,31 +304,55 @@ def test_plan_service_seeds_routes_topics_to_their_own_service():
         service_subtopics={"SEO": ["technical seo"], "Email Marketing": ["welcome sequence"]},
     )
     by_service = {p.service: p for p in plans}
-    assert by_service["SEO"].expansions_added == []
-    assert by_service["Email Marketing"].expansions_added == []
-    assert "technical seo" not in {s.lower() for s in by_service["SEO"].seeds}
+    assert by_service["SEO"].expansions_added == ["technical seo"]
+    assert by_service["Email Marketing"].expansions_added == ["welcome sequence"]
     assert "welcome sequence" not in {s.lower() for s in by_service["SEO"].seeds}
+    assert "technical seo" not in {s.lower() for s in by_service["Email Marketing"].seeds}
 
 
-async def test_expansions_ride_on_top_of_the_budget_without_breaking_the_share():
-    # SEO has more own seeds than its share; every extra seed must still be fetched,
-    # and exactly `share` of the service's own seeds.
-    plan = _plan(
-        "SEO",
-        ["technical seo", "seo audit", "keyword research"],
-        pool=["seo melbourne", "seo agency melbourne", "seo pricing"],
-    )
+async def test_sub_service_seeds_are_fetched_on_top_of_the_budget_and_attributed():
+    # SEO's own share is one seed; every sub-service seed must still be fetched.
+    plan = _plan("SEO", ["technical seo", "seo audit"])
     fetched: list[list[str]] = []
 
     async def fetch(seeds, **kw):
         fetched.append(list(seeds))
-        return {"seed_clusters": [{"seed": s} for s in seeds], "keyword_dataset": []}
+        dataset = [
+            {"keyword": f"{s} melbourne", "seed": s}
+            for s in seeds
+            if s.lower() != "seo audit"  # this one returns nothing
+        ]
+        return {"seed_clusters": [{"seed": s} for s in seeds], "keyword_dataset": dataset}
 
-    await run_service_scoped_seeding([plan], fetch=fetch, total_cap=2)
-    seeds = [s.lower() for s in fetched[0]]
-    assert "technical seo" not in seeds and "seo audit" not in seeds
-    assert "keyword research" not in seeds
-    assert seeds == [s.lower() for s in plan.seeds][:2]
+    merged = await run_service_scoped_seeding([plan], fetch=fetch, total_cap=1)
+    assert fetched[0] == ["SEO", "Local SEO", "technical seo", "seo audit"]
+    rows = {r["keyword"]: r for r in merged["keyword_dataset"]}
+    assert "sub_service" not in rows["SEO melbourne"]
+    assert rows["Local SEO melbourne"]["sub_service"] == "Local SEO"
+    assert rows["Local SEO melbourne"]["sub_service_origin"] == "catalog"
+    assert rows["technical seo melbourne"]["sub_service"] == "technical seo"
+    assert rows["technical seo melbourne"]["sub_service_origin"] == "model"
+    assert rows["technical seo melbourne"]["service"] == "SEO"
+    run = merged["service_runs"][0]
+    report = {r["seed"]: r for r in run["sub_service_seeds"]}
+    assert report["Local SEO"]["status"] == "fetched" and report["Local SEO"]["keyword_count"] == 1
+    assert report["seo audit"]["status"] == "fetched_no_keywords"
+    assert run["sub_service_counts"] == {"catalog": 1, "model": 2, "skipped": 1}
+
+
+def test_a_sub_service_not_fetched_is_reported_as_dropped_for_budget():
+    plan = _plan("SEO", ["technical seo"])
+    report = sub_service_report(plan, ["SEO", "Local SEO"], {"keyword_dataset": []})
+    by_seed = {r["seed"]: r["status"] for r in report}
+    assert by_seed == {"Local SEO": "fetched_no_keywords", "technical seo": "dropped_for_budget"}
+
+
+def test_related_lookups_add_every_sub_service_seed_on_top_of_the_cap():
+    plans = [_plan("SEO", ["technical seo"]), _plan("Email Marketing", ["welcome sequence"])]
+    runs = [{"service": p.service, "seeds": p.seeds} for p in plans]
+    pairs = related_seed_pairs(runs, plans, 2)
+    assert pairs[:2] == [("SEO", "SEO"), ("Email Marketing", "Email Marketing")]
+    assert set(pairs[2:]) == {("SEO", "Local SEO"), ("SEO", "technical seo"), ("Email Marketing", "welcome sequence")}
 
 
 # ------------------------------------------------------------------ relevance
@@ -341,9 +396,39 @@ def test_audit_and_notice():
     plan = _plan("Meta Ads", ["tiktok marketing", "facebook retargeting"])
     results = {"Meta Ads": generator.ExpansionResult(service="Meta Ads", terms=("tiktok marketing", "facebook retargeting"))}
     entries = audit_entries(results, [plan])
-    assert entries[0]["added"] == []
-    assert {row["reason"] for row in entries[0]["skipped"]} == {"sub_service"}
+    assert entries[0]["added"] == ["facebook retargeting"]
+    assert {row["reason"] for row in entries[0]["skipped"]} == {"excluded_by_operator"}
     notice = operator_notice(entries) or ""
-    assert "+1" not in notice
+    assert "Meta Ads +1" in notice
     failed = [{"service": "SEO", "status": "timeout", "added": []}]
     assert operator_notice(failed) == "Sub-service seeds: SEO: model timed out, catalog sub-services only."
+
+
+def test_sub_services_are_found_when_the_catalog_row_has_another_name():
+    # Selected as "Website Development"; the catalog row is "Web Development". The
+    # operator's scope decision for the service still finds its sub-services.
+    catalog = [
+        {
+            "id": "web development",
+            "name": "Web Development",
+            "subservices": [
+                {"id": "wordpress development", "name": "WordPress Development"},
+                {"id": "website design", "name": "Website Design"},
+            ],
+        }
+    ]
+    prioritization = {
+        "service_scope": {
+            "website development": {
+                "name": "Website Development",
+                "offered": [{"id": "wordpress development", "name": "WordPress Development"}],
+                "excluded": [{"id": "website design", "name": "Website Design"}],
+            }
+        }
+    }
+    plan = generate_service_seeds(
+        "Website Development", pool_roots=[], pool_targets={}, catalog=catalog, prioritization=prioritization
+    )
+    assert plan.seeds == ["Website Development", "WordPress Development"]
+    assert plan.service_id == "website development"
+    assert {"phrase": "Website Design", "reason": "excluded_by_operator"} in plan.catalog_subs_skipped

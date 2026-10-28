@@ -13,7 +13,6 @@ from app.models import AgentJob, Client, FindingsLedger
 from app.services.agent_handoff import blocked_events, consume_events, handoff_events
 from app.services.agent_runtime import get_profile, supersede_pending_findings
 from app.services.audit import log_event
-from app.services.content_strategy import run_content_strategy_plan
 from app.services.role_skills import required_role_for
 
 
@@ -43,8 +42,15 @@ async def run_content_strategy(
         )
     )
 
+    from app.services.content_strategy import attach_page_plan, run_content_strategy_plan, url_map_entries
+
     demand = dict(profile.search_demand_summary or {})
-    if profile.search_demand_status != "complete":
+    architecture = attach_page_plan(dict(profile.site_architecture_summary or {}))
+    has_map = bool(url_map_entries(architecture) or architecture.get("target_url_tree"))
+    demand_ready = profile.search_demand_status in ("complete", "pending_signoff") or bool(
+        demand.get("cluster_report") or demand.get("clusters") or demand.get("topics")
+    )
+    if not demand_ready and not has_map:
         events.extend(
             blocked_events(
                 "content_strategy",
@@ -54,8 +60,6 @@ async def run_content_strategy(
         )
         return events
 
-    architecture = dict(profile.site_architecture_summary or {})
-    has_map = bool(architecture.get("final_url_map") or architecture.get("target_url_tree"))
     if profile.site_architecture_status != "complete" and not has_map:
         events.extend(
             blocked_events(
@@ -95,7 +99,7 @@ async def run_content_strategy(
         demand=demand,
         domain=domain,
         content_audit=content_audit,
-        site_architecture=dict(profile.site_architecture_summary or {}),
+        site_architecture=architecture,
     )
     summary["generated_at"] = datetime.now(timezone.utc).isoformat()
     summary["skills_loaded"] = {"content_strategy": skill_chars}
@@ -109,7 +113,8 @@ async def run_content_strategy(
     # the same every time.
     from app.services.site_architecture import merge_strategy_nodes_into_tree
 
-    architecture = dict(profile.site_architecture_summary or {})
+    if architecture is not profile.site_architecture_summary:
+        profile.site_architecture_summary = architecture
     if architecture:
         enriched = merge_strategy_nodes_into_tree(architecture, summary)
         if enriched is not architecture:

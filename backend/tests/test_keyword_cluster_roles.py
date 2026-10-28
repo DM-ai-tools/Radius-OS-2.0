@@ -272,6 +272,33 @@ def test_secondary_is_a_close_variant_and_counts_follow_merit():
     assert none["role_counts"]["Secondary"] == 0
 
 
+def test_a_city_keyword_is_not_a_secondary_of_the_national_search():
+    from app.services.keyword_clustering import clusters_one_search_each
+
+    rows = [
+        _row("brisbane seo company", 400, provider="commercial"),
+        _row("brisbane seo agency", 200, provider="commercial"),
+        _row("seo agency", 4400, provider="commercial"),
+        _row("seo firm", 300, provider="commercial"),
+    ]
+    cluster = finalize_cluster({"keywords": [dict(r) for r in rows]}, RoleContext.build(rows))
+    roles = {m["keyword"]: m["role"] for m in cluster["keywords"]}
+    primary = cluster["primary_keyword"]
+    if "brisbane" in primary:
+        assert roles["brisbane seo agency"] == "Secondary"
+        assert roles["seo agency"] == "Supporting"
+    else:
+        assert roles["seo agency"] == "Primary"
+        assert roles["seo firm"] == "Secondary"
+        assert roles["brisbane seo company"] == "Supporting"
+    split = clusters_one_search_each(
+        [{"name": "Brisbane SEO Company", "primary_keyword": "brisbane seo company", "keywords": rows, "funnel": "BOFU", "intent": "commercial"}]
+    )
+    groups = [{m["keyword"] for m in item["keywords"]} for item in split]
+    assert any("seo agency" in group and "brisbane seo company" not in group for group in groups)
+    assert any("brisbane seo company" in group and "seo agency" not in group for group in groups)
+
+
 # --------------------------------------------------------------- 1. one primary
 
 
@@ -364,7 +391,7 @@ async def test_full_runs_keep_keyword_accounting_and_one_primary_per_cluster():
     from app.services.keyword_clustering import run_keyword_clustering
 
     rows = [dict(r) for r in ROWS] + [_row("what is local seo", 700), _row("local seo checklist", 90)]
-    report = await run_keyword_clustering(rows, use_llm=False)
+    report = await run_keyword_clustering(rows, within_deadline=False)
     assert report["keyword_accounting"]["balanced"] is True
     for cluster in report["clusters"]:
         _assert_one_primary(cluster)
@@ -417,8 +444,8 @@ async def test_model_path_does_not_let_naming_or_model_roles_pick_the_primary():
         new=AsyncMock(side_effect=lambda cs, **_kw: apply_cluster_names(
             cs, {"clusters": [{"id": 1, "name": "Named", "primary_keyword": "affordable seo melbourne"}]})),
     ):
-        settings.return_value.keyword_cluster_use_llm = True
-        report = await run_keyword_clustering([dict(r) for r in ROWS[:3]] + [dict(ROWS[3])], use_llm=True)
+        settings.return_value.keyword_clustering_use_model = True
+        report = await run_keyword_clustering([dict(r) for r in ROWS[:3]] + [dict(ROWS[3])], within_deadline=True)
     cluster = next(c for c in report["clusters"] if any(m["keyword"] == "seo agency melbourne" for m in c["keywords"]))
     _assert_one_primary(cluster)
     assert cluster["primary_keyword"] == "seo agency melbourne"

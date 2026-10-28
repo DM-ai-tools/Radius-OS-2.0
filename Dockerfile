@@ -5,7 +5,9 @@
 FROM node:20-alpine AS frontend
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+# Railway injects NODE_ENV=production into the build. Vite and TypeScript are
+# devDependencies, so the install must keep them or the SPA build fails.
+RUN npm ci --include=dev
 COPY frontend/ ./
 # Empty VITE_API_URL → browser calls same-origin /api (served by FastAPI)
 ENV VITE_API_URL=
@@ -27,7 +29,7 @@ COPY backend/requirements.txt .
 # and its system deps still need to be in the image either way.
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
-    && pip uninstall -y pytest pytest-asyncio || true \
+    && (pip uninstall -y pytest pytest-asyncio || true) \
     && apt-get update \
     && playwright install --with-deps chromium \
     && apt-get purge -y build-essential \

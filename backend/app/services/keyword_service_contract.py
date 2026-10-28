@@ -14,6 +14,10 @@ from typing import Any
 
 CLASSIFIER_VERSION = "service_contract_v2"
 
+# Seeds and keyword rows of the industry layer carry this ``seed_origin`` ("digital
+# marketing agency" for an agency client). They belong to no single service.
+INDUSTRY_ORIGIN = "industry"
+
 _NORM_RE = re.compile(r"[^a-z0-9+&]+")
 
 # Words that appear in service names but never prove a query is about that service.
@@ -172,6 +176,26 @@ _DICTIONARY_LOOKUPS = frozenset(
 )
 _ACRONYM_ON_TOPIC = _COMMERCIAL | _AU_CITIES | frozenset(
     {
+        # Ways a buyer names the work: "ppc ads", "seo reseller", "ppc campaign".
+        "ads",
+        "advertising",
+        "campaign",
+        "campaigns",
+        "help",
+        "reseller",
+        "resellers",
+        "outsourcing",
+        "outsourced",
+        "advanced",
+        "advance",
+        "analysis",
+        "competitor",
+        "competitors",
+        "coach",
+        "cheapest",
+        "paid",
+        "social",
+        "media",
         "agencies",
         "companies",
         "consultants",
@@ -993,13 +1017,133 @@ def judge_keyword(
     )
 
 
+# Words that name the form of a business, not what it does: "agency" in "digital
+# marketing agency". A query names the industry when it holds every other word of it.
+_BUSINESS_FORM_WORDS = frozenset(
+    {
+        "agency",
+        "agencies",
+        "company",
+        "companies",
+        "firm",
+        "firms",
+        "business",
+        "businesses",
+        "service",
+        "services",
+        "provider",
+        "providers",
+        "solution",
+        "solutions",
+        "industry",
+        "and",
+        "the",
+        "of",
+        "&",
+    }
+)
+
+
+def _folded(token: str) -> str:
+    """A word without its plural "s" ("clinics" -> "clinic"; "business" stays)."""
+    return token[:-1] if len(token) > 3 and token.endswith("s") and not token.endswith("ss") else token
+
+
+def names_industry(keyword: str, industry: str | None) -> bool:
+    """True when the query names the client's industry: it holds the industry's name, or
+    every word of it that says what the business does, singular or plural ("digital
+    marketing" of a "Digital Marketing Agency", "dental clinic" of "Dental Clinics")."""
+    name = _norm(industry or "")
+    if not name:
+        return False
+    if _has_phrase(keyword, name):
+        return True
+    core = {_folded(token) for token in name.split() if token not in _BUSINESS_FORM_WORDS}
+    return bool(core) and core <= {_folded(token) for token in _tokens(keyword)}
+
+
+def judge_industry_keyword(
+    keyword: str,
+    *,
+    industry: str | None,
+    services: list[str] | tuple[str, ...],
+    cdd_keywords: list[str] | None = None,
+    geography: str | None = None,
+    seed: str | None = None,
+) -> ServiceVerdict:
+    """KEEP, REVIEW, DROP, or SKIP for a query of the industry layer.
+
+    Such a query ("digital marketing agency") belongs to no one service, so it is
+    judged against every service the client sells, each with ``judge_keyword``
+    unchanged, and kept when any of them keeps it. Naming the industry counts as a
+    service phrase and nothing more: a negative concept or entity of one of the
+    client's services, a place outside the market, or an off-topic query still drops
+    it. Holding its own ``seed`` (a category term the industry resolver vetted, such as
+    "online marketing company" or "plumber") counts as naming the industry. Otherwise
+    the most lenient service verdict stands (REVIEW, then SKIP, then the mismatch). A
+    client none of whose services has a contract gets SKIP, as an unknown service does,
+    unless the query names the industry.
+    """
+    names = [name for name in dict.fromkeys(str(s or "").strip() for s in services) if name]
+    verdicts = [
+        judge_keyword(keyword, service=name, cdd_keywords=cdd_keywords, geography=geography)
+        for name in names
+    ]
+    kept = [v for v in verdicts if v.decision == "KEEP"]
+    if kept:
+        return max(kept, key=lambda v: v.service_match)
+    hard = next((v for v in verdicts if v.decision == "DROP" and v.reason != "service_mismatch"), None)
+    if hard is not None:
+        return hard
+    if names_industry(keyword, industry) or (seed and _has_phrase(keyword, seed)):
+        geo_score, geo_reason = _geo_score(keyword, geography)
+        reason = geo_reason or off_topic_reason(keyword)
+        return ServiceVerdict(
+            decision="DROP" if reason else "KEEP",
+            family=INDUSTRY_ORIGIN,
+            reason=reason or "industry_match",
+            reason_detail=reason or "industry_match",
+            service_match=0.1 if reason else 0.9,
+            intent_match=_intent_score(keyword),
+            geo_match=geo_score,
+            entity_risk=0.3 if reason else 0.05,
+            ambiguity=0.2 if reason else 0.1,
+            negative_match=False,
+            matched_positive=() if reason else (_norm(industry or ""),),
+        )
+    contracted = [v for v in verdicts if v.family]
+    for decision in ("REVIEW", "SKIP", "DROP"):
+        found = next((v for v in contracted if v.decision == decision), None)
+        if found is not None:
+            return found
+    return ServiceVerdict(
+        decision="SKIP",
+        family="",
+        reason="no_service_contract",
+        reason_detail="",
+        service_match=0.0,
+        intent_match=0.0,
+        geo_match=0.0,
+        entity_risk=0.0,
+        ambiguity=0.0,
+        negative_match=False,
+    )
+
+
 def partition_service_rejects(
     rows: list[dict[str, Any]],
     *,
     cdd_keywords: list[str] | None = None,
     geography: str | None = None,
+    services: list[str] | None = None,
+    industry: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split rows the service contract can reject before an LLM call."""
+    """Split rows the service contract can reject before an LLM call.
+
+    A row of the industry layer (``seed_origin="industry"``) is judged against all of
+    the client's ``services`` and its ``industry`` (``judge_industry_keyword``); every
+    other row against its own service, as before.
+    """
     kept: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
     for row in rows:
@@ -1007,12 +1151,22 @@ def partition_service_rejects(
             kept.append(row)
             continue
         service = str(row.get("service") or row.get("target") or row.get("seed") or "")
-        verdict = judge_keyword(
-            str(row.get("keyword") or ""),
-            service=service,
-            cdd_keywords=cdd_keywords,
-            geography=geography,
-        )
+        if row.get("seed_origin") == INDUSTRY_ORIGIN:
+            verdict = judge_industry_keyword(
+                str(row.get("keyword") or ""),
+                industry=industry,
+                services=list(services or []),
+                cdd_keywords=cdd_keywords,
+                geography=geography,
+                seed=str(row.get("seed") or "") or None,
+            )
+        else:
+            verdict = judge_keyword(
+                str(row.get("keyword") or ""),
+                service=service,
+                cdd_keywords=cdd_keywords,
+                geography=geography,
+            )
         if verdict.decision == "DROP":
             dropped.append(
                 {

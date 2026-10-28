@@ -9,6 +9,7 @@ from typing import Any
 
 from reportlab.platypus import KeepTogether, Spacer
 
+from app.logging_config import get_logger
 from app.services.report_export import resolve_report_title
 from app.services.report_pdf_normalize import normalize_report_payload
 from app.services.report_pdf_theme import (
@@ -24,6 +25,8 @@ from app.services.report_pdf_theme import (
     section_rule,
     summary_panel,
 )
+
+log = get_logger("report_pdf_document")
 
 SKIP = frozenset(
     {
@@ -1123,6 +1126,85 @@ REPORT_BLUEPRINTS: dict[str, list[SectionSpec]] = {
 }
 
 
+# Payload keys each report deliberately leaves out, with the reason. The section
+# list says what a report shows; this says what it chose not to show, so deleting a
+# section spec never brings the data back through the automatic sections. The keys
+# stay in the payload because other consumers read them.
+_PIPELINE = "Pipeline diagnostics for the app, not the client report."
+_ECHOED = "Input carried from an earlier phase; that phase's report shows it."
+_EXPORTED = "Raw working data; it is in the CSV / workbook export and the app."
+_DUPLICATE = "Already shown by a curated section of this report."
+
+REPORT_SUPPRESSED_KEYS: dict[str, dict[str, str]] = {
+    "search_demand_report": {
+        "clusters": "Keyword clusters have their own Keyword Clusters sections (kc_*).",
+        "cluster_report": "Rendered as the Keyword Clusters sections (kc_*).",
+        "topics": "Topic selection belongs to the content strategy report.",
+        "topic_plan": "Topic selection belongs to the content strategy report.",
+        "topic_selection_context": _PIPELINE,
+        "timings": _PIPELINE,
+        "skills_used": _PIPELINE,
+        "providers_used": _PIPELINE,
+        "provider_errors": _PIPELINE,
+        "phase_pipeline": _PIPELINE,
+        "keyword_pool_limits": _PIPELINE,
+        "keyword_seeding": _PIPELINE,
+        "keyword_cleaning": _PIPELINE,
+        "relevance_audit": _PIPELINE,
+        "live_site_scan": _PIPELINE,
+        "competitor_page_stats": _PIPELINE,
+        "sitemap_classification": _PIPELINE,
+        "intent_balance": _PIPELINE,
+        "products": _ECHOED,
+        "services": _ECHOED,
+        "competitors": _ECHOED,
+        "competitor_names": _ECHOED,
+        "competitor_domains": _ECHOED,
+        "cdd_keywords": _ECHOED,
+        "service_catalog": _ECHOED,
+        "service_prioritization": _ECHOED,
+        "keyword_dataset": _EXPORTED,
+        "search_demand_analysis": _EXPORTED,
+        "seed_clusters": _EXPORTED,
+        "seed_keywords": _EXPORTED,
+        "workbook": _EXPORTED,
+        "competitor_page_keywords": _EXPORTED,
+        "keyword_table": _DUPLICATE,
+        "head_terms": _DUPLICATE,
+        "strong_evergreen": _DUPLICATE,
+        "best_opportunities": _DUPLICATE,
+    },
+    "content_strategy_report": {
+        "workbook": _EXPORTED,
+        "skills_used": _PIPELINE,
+        "source_phase5_providers": _PIPELINE,
+        "competitors": _ECHOED,
+        "competitor_names": _ECHOED,
+        "competitor_domains": _ECHOED,
+        "selected_services": _ECHOED,
+        "content_plan_summary": "Shown as Content Plan Summary (content_plan_summary_view).",
+    },
+    "competitor_landscape": {
+        "target_business": _ECHOED,
+        "discovery_sources": _PIPELINE,
+    },
+    "website_audit": {
+        "tabs_run": _PIPELINE,
+        "audit_ids": _PIPELINE,
+    },
+    "phase_validation_report": {
+        "company_context_keys": _PIPELINE,
+        "applicable_parameters": _PIPELINE,
+    },
+    "tracking_report": {
+        "known_change_fields": "Form field definitions for the app's change dialog.",
+    },
+    "tracking_confirmation": {
+        "known_change_fields": "Form field definitions for the app's change dialog.",
+    },
+}
+
+
 def _resolve_blueprint(card_type: str, payload: dict[str, Any]) -> list[SectionSpec]:
     if card_type in REPORT_BLUEPRINTS:
         return REPORT_BLUEPRINTS[card_type]
@@ -1271,12 +1353,14 @@ def _render_section(
     return True
 
 
-def _append_auto_sections(
-    flow: list,
-    payload: dict[str, Any],
-    blueprint: list[SectionSpec],
-    section_num: int,
-) -> int:
+AUTO_SECTION_LABEL = "Automatic section"
+AUTO_SECTION_NOTE = (
+    "Shown automatically: this data has no section in the report's design yet, so it "
+    "is laid out generically. Curated sections above are unaffected."
+)
+
+
+def _covered_keys(blueprint: list[SectionSpec]) -> set[str]:
     covered = {s.table_source for s in blueprint if s.table_source}
     covered |= {s.groups.source for s in blueprint if s.groups}
     covered |= {t.source.split(".", 1)[0] for s in blueprint for t in s.tables}
@@ -1285,31 +1369,46 @@ def _append_auto_sections(
     # A metrics path's top-level key (e.g. "funnel_balance.TOFU" -> "funnel_balance")
     # is already rendered explicitly — don't let it also fall through to auto-render.
     covered |= {path.split(".", 1)[0] for s in blueprint for _, path in s.metrics}
+    # A dotted table source ("url_map_report.final_url_map") covers its top key too.
+    covered |= {str(s.table_source).split(".", 1)[0] for s in blueprint if s.table_source}
+    return covered
 
+
+def suppressed_keys(card_type: str) -> frozenset[str]:
+    """Payload keys this report type deliberately does not render."""
+    return frozenset(REPORT_SUPPRESSED_KEYS.get(card_type, {}))
+
+
+def auto_section_specs(
+    card_type: str, payload: dict[str, Any], blueprint: list[SectionSpec]
+) -> list[SectionSpec]:
+    """Sections for payload keys the blueprint neither renders nor suppresses.
+
+    The safety net for genuinely new data. A key a blueprint removed on purpose
+    belongs in ``REPORT_SUPPRESSED_KEYS``; it never comes back through here.
+    Every spec is titled and introduced as automatic, so a reader can tell it from
+    a curated section.
+    """
+    covered = _covered_keys(blueprint) | suppressed_keys(card_type)
+    specs: list[SectionSpec] = []
     for key, value in payload.items():
         if key in SKIP or key in SUMMARY_KEYS or key in covered:
             continue
+        title = f"{AUTO_SECTION_LABEL}: {key.replace('_', ' ').title()}"
         if isinstance(value, list) and value:
             if isinstance(value[0], dict):
-                section_num += 1
                 headers, keys = _infer_columns(_rows(value))
-                spec = SectionSpec(
-                    title=key.replace("_", " ").title(),
-                    table_source=key,
-                    table_headers=headers,
-                    table_keys=keys,
+                specs.append(
+                    SectionSpec(
+                        title=title,
+                        intro=AUTO_SECTION_NOTE,
+                        table_source=key,
+                        table_headers=headers,
+                        table_keys=keys,
+                    )
                 )
-                if _render_section(flow, section_num, spec, payload, leading_rule=True):
-                    covered.add(key)
-                else:
-                    section_num -= 1
             elif isinstance(value[0], str):
-                section_num += 1
-                spec = SectionSpec(title=key.replace("_", " ").title(), bullets_source=key)
-                if _render_section(flow, section_num, spec, payload, leading_rule=True):
-                    covered.add(key)
-                else:
-                    section_num -= 1
+                specs.append(SectionSpec(title=title, intro=AUTO_SECTION_NOTE, bullets_source=key))
         elif isinstance(value, dict) and value:
             scalar_items = [
                 (k, str(v))
@@ -1317,15 +1416,41 @@ def _append_auto_sections(
                 if v not in (None, "", [], {}) and not isinstance(v, (list, dict))
             ]
             if len(scalar_items) >= 2:
-                section_num += 1
-                spec = SectionSpec(
-                    title=key.replace("_", " ").title(),
-                    metrics=[(k.replace("_", " ").title(), f"{key}.{k}") for k, _ in scalar_items[:8]],
+                specs.append(
+                    SectionSpec(
+                        title=title,
+                        intro=AUTO_SECTION_NOTE,
+                        metrics=[(k.replace("_", " ").title(), f"{key}.{k}") for k, _ in scalar_items[:8]],
+                    )
                 )
-                if _render_section(flow, section_num, spec, payload, leading_rule=True):
-                    covered.add(key)
-                else:
-                    section_num -= 1
+    return specs
+
+
+def _spec_key(spec: SectionSpec) -> str:
+    if spec.table_source:
+        return spec.table_source
+    if spec.bullets_source:
+        return spec.bullets_source
+    return spec.metrics[0][1].split(".", 1)[0] if spec.metrics else spec.title
+
+
+def _append_auto_sections(
+    flow: list,
+    payload: dict[str, Any],
+    blueprint: list[SectionSpec],
+    section_num: int,
+    *,
+    card_type: str = "",
+) -> int:
+    rendered: list[str] = []
+    for spec in auto_section_specs(card_type, payload, blueprint):
+        if _render_section(flow, section_num + 1, spec, payload, leading_rule=True):
+            section_num += 1
+            rendered.append(_spec_key(spec))
+    if rendered:
+        # Loud on purpose: an automatic section is either new data that needs a
+        # designed section, or a removed one that needs suppressing.
+        log.warning("report_auto_sections_rendered", card_type=card_type or "(none)", keys=rendered)
     return section_num
 
 
@@ -1365,4 +1490,4 @@ def render_document_report(
         if _render_section(flow, section_num + 1, spec, payload, leading_rule=True):
             section_num += 1
 
-    _append_auto_sections(flow, payload, blueprint, section_num)
+    _append_auto_sections(flow, payload, blueprint, section_num, card_type=card_type)

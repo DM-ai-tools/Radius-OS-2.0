@@ -25,6 +25,287 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+_PAGE_JOBS = {"optimize_service_page", "related_service_page", "draft_guide"}
+
+
+def url_map_entries(architecture: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The URL map the later stages should follow.
+
+    The report written by URL mapping wins over an older copy stored beside it.
+    """
+    arch = dict(architecture or {})
+    report = arch.get("url_map_report") if isinstance(arch.get("url_map_report"), dict) else {}
+    rows = [row for row in (report.get("final_url_map") or []) if isinstance(row, dict)]
+    if rows:
+        return rows
+    return [row for row in (arch.get("final_url_map") or []) if isinstance(row, dict)]
+
+
+def is_page_plan(rows: list[dict[str, Any]]) -> bool:
+    return any(row.get("page_job") in _PAGE_JOBS for row in rows)
+
+
+def work_rows_from_url_map(rows: list[dict[str, Any]], domain: str) -> list[dict[str, Any]]:
+    """Titles and the calendar follow the URL map, one row per decided page.
+
+    A live page is optimized at its current URL. A page that does not exist yet
+    is created at its proposed URL. The path is not invented again.
+    """
+    from app.services.headline_framework import title_for_map_row
+    from app.services.url_mapping import url_n
+
+    host = (domain or "").strip().strip("/")
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        current = url_n(str(row.get("current_url") or ""))
+        proposed = url_n(str(row.get("proposed_url") or row.get("create_url") or ""))
+        live = bool(current and current != "/")
+        path = current if live else proposed
+        if not path or path == "/":
+            path = url_n(str(row.get("selected_url") or ""))
+        if not path or path == "/":
+            continue
+        job = str(row.get("page_job") or "")
+        action = "optimize" if live or str(row.get("action") or "").upper() == "OPTIMIZE_EXISTING" else "create"
+        if job == "draft_guide":
+            page_type = "blog" if row.get("page_type") == "Blog" else "guide"
+        elif job == "related_service_page":
+            page_type = "collection"
+        else:
+            page_type = "service page"
+        keyword = str(row.get("primary_keyword") or "").strip()
+        service = str(row.get("l1_category") or row.get("service") or "").strip()
+        title = title_for_map_row(
+            {**row, "primary_keyword": keyword or service or path.strip("/").replace("-", " ")}
+        )
+        absolute = f"https://{host}{path}" if host else path
+        secondaries = [str(item) for item in (row.get("secondary_keywords") or []) if str(item).strip()]
+        out.append(
+            {
+                "title": title,
+                "keyword": keyword or title,
+                "primary_keyword": keyword or title,
+                "secondary_keywords": secondaries,
+                "action": action,
+                "work_label": "Optimize existing page" if action == "optimize" else f"Create {page_type}",
+                "content_type": page_type,
+                "page_type": page_type,
+                "priority": "Quick win" if action == "optimize" else "Big bet",
+                "intent": "commercial" if job != "draft_guide" else "informational",
+                "funnel": "BOFU" if job != "draft_guide" else "TOFU",
+                "est_words": 1500 if job != "draft_guide" else 1200,
+                "suggested_url": absolute,
+                "url": path,
+                "service": service,
+                "cluster": row.get("cluster") or service,
+                "from_selected_service": True,
+                "from_url_map": True,
+                "from_phase5_topic": False,
+                "volume": row.get("search_volume"),
+                "opportunity_score": 80 if action == "optimize" else 60,
+                "rationale": (
+                    f"Optimize {path}. The primary is {keyword or title}."
+                    if action == "optimize"
+                    else f"Create {path} for {keyword or title}."
+                ),
+            }
+        )
+    return out
+
+
+def _tree_page_type(row: dict[str, Any]) -> str:
+    """IA nodes only accept the public page-type names."""
+    allowed = {
+        "home", "hub", "spoke", "service", "subservice", "sub_service", "service_hub",
+        "comparison", "blog", "utility", "article", "pillar", "cluster", "supporting",
+        "product", "location", "commercial", "landing", "faq", "guide", "listicle",
+        "tool", "page", "planned",
+    }
+    job = str(row.get("page_job") or "")
+    label = str(row.get("page_type") or row.get("type") or "").strip().lower()
+    if job == "optimize_service_page" or label in {"hub page", "hub"}:
+        return "hub"
+    if job == "related_service_page" or label == "collection":
+        return "spoke"
+    if label == "blog" or (job == "draft_guide" and label == "blog"):
+        return "blog"
+    if job == "draft_guide" or label == "guide":
+        return "guide"
+    if label in allowed:
+        return label
+    return "page"
+
+
+def _map_page_path(row: dict[str, Any]) -> str:
+    from app.services.url_mapping import url_n
+
+    current = url_n(str(row.get("current_url") or ""))
+    proposed = url_n(str(row.get("proposed_url") or row.get("create_url") or row.get("selected_url") or ""))
+    if current and current != "/":
+        return current
+    if proposed and proposed != "/":
+        return proposed
+    return ""
+
+
+def _is_map_hub(row: dict[str, Any]) -> bool:
+    label = str(row.get("page_type") or "").strip().lower()
+    job = str(row.get("page_job") or "")
+    level = str(row.get("level") or "").strip().lower()
+    return job == "optimize_service_page" or label in {"hub page", "hub"} or level in {"1", "l1"}
+
+
+def tree_from_url_map(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One tree node per URL-map page, nested under that row's service hub.
+
+    The map is the page list. A second service catalog, or a keyword that the
+    map already folded into a hub, does not get its own box.
+    """
+    by_path: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        path = _map_page_path(row)
+        if not path:
+            continue
+        if path not in by_path or _is_map_hub(row):
+            by_path[path] = row
+    hubs: dict[str, str] = {}
+    for path, row in by_path.items():
+        if not _is_map_hub(row):
+            continue
+        group = str(row.get("l1_category") or row.get("cluster") or row.get("service") or "").strip().lower()
+        if group and group not in hubs:
+            hubs[group] = path
+    nodes: list[dict[str, Any]] = []
+    for path, row in by_path.items():
+        group = str(row.get("l1_category") or row.get("cluster") or row.get("service") or "").strip().lower()
+        hub = hubs.get(group)
+        if _is_map_hub(row) or not hub or hub == path:
+            parent = "/"
+            depth = 0 if path == "/" else 1
+            title = str(row.get("l1_category") or row.get("primary_keyword") or path.strip("/").replace("-", " ")).strip()
+        else:
+            parent = hub
+            depth = hub.strip("/").count("/") + 2
+            title = str(row.get("primary_keyword") or row.get("l2_subcategory") or row.get("l1_category") or "").strip()
+        kind = _tree_page_type(row)
+        nodes.append(
+            {
+                "url": path,
+                "path": path,
+                "parent": parent,
+                "depth": depth,
+                "title": title,
+                "primary_keyword": row.get("primary_keyword"),
+                "keyword": row.get("primary_keyword"),
+                "cluster": row.get("cluster") or row.get("l1_category"),
+                "page_type": kind,
+                "type": kind,
+                "url_map_action": row.get("action"),
+                "from_url_map": True,
+            }
+        )
+    return nodes
+
+
+def ownership_from_url_map(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One ownership row per URL-map page, using that page's topic and URL.
+
+    The cluster column is the map's primary keyword, and the owner is the
+    page the map assigned to it. Older keyword-cluster names are not kept.
+    """
+    owners: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        path = _map_page_path(row)
+        topic = str(row.get("primary_keyword") or row.get("l1_category") or "").strip()
+        if not path or not topic:
+            continue
+        key = (topic.lower(), path)
+        if key in seen:
+            continue
+        seen.add(key)
+        action = str(row.get("action") or "").upper()
+        if action == "OPTIMIZE_EXISTING":
+            disposition = "optimize"
+        elif action == "CREATE":
+            disposition = "create"
+        elif action in {"REVIEW_MERGE_REDIRECT", "FOLD_INTO_NEW_PARENT"}:
+            disposition = "review"
+        else:
+            disposition = "keep"
+        owners.append(
+            {
+                "cluster": topic,
+                "canonical_owner_url": path,
+                "owner_url": path,
+                "competing_urls": row.get("competing_urls") or [],
+                "disposition": disposition,
+                "note": str(row.get("l1_category") or "").strip() or None,
+            }
+        )
+    return owners
+
+
+def _map_decides_the_tree(rows: list[dict[str, Any]]) -> bool:
+    if is_page_plan(rows):
+        return True
+    labels = {"hub page", "guide", "collection", "blog"}
+    return any(str(row.get("page_type") or "").strip().lower() in labels for row in rows)
+
+
+def attach_page_plan(architecture: dict[str, Any]) -> dict[str, Any]:
+    """Copy the URL map onto the fields the next stages already read.
+
+    When the map is the page list, the tree becomes those pages. Guides and
+    collections sit under the hub for their category.
+    """
+    rows = url_map_entries(architecture)
+    if not rows:
+        return architecture
+    out = dict(architecture)
+    out["final_url_map"] = rows
+    if _map_decides_the_tree(rows):
+        out["target_url_tree"] = tree_from_url_map(rows)
+        out["cluster_ownership"] = ownership_from_url_map(rows)
+        out["cluster_owners"] = out["cluster_ownership"]
+        return out
+    from app.services.url_mapping import url_n
+
+    tree = [node for node in (out.get("target_url_tree") or []) if isinstance(node, dict)]
+    seen = {url_n(str(node.get("url") or node.get("path") or "")) for node in tree}
+    for row in rows:
+        path = _map_page_path(row)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        parent = "/"
+        if path.count("/") > 1:
+            parent = "/" + path.strip("/").split("/")[0]
+        tree.append(
+            {
+                "url": path,
+                "path": path,
+                "parent": parent,
+                "depth": path.strip("/").count("/") + 1,
+                "primary_keyword": row.get("primary_keyword"),
+                "keyword": row.get("primary_keyword"),
+                "cluster": row.get("cluster") or row.get("l1_category"),
+                "page_type": _tree_page_type(row),
+                "type": _tree_page_type(row),
+                "url_map_action": row.get("action"),
+                "from_url_map": True,
+            }
+        )
+    out["target_url_tree"] = tree
+    return out
+
+
 def _est_words(role: str, intent: str | None = None) -> int:
     if role == "pillar":
         return 3000
@@ -1024,19 +1305,23 @@ async def run_content_strategy_plan(
         dict(site_architecture or {}),
         demand,
     )
-    priority_queue = build_priority_queue(
-        best=best,
-        evergreen=evergreen,
-        trends=trends,
-        avoid=avoid,
-        report_clusters=report_clusters,
-        domain=domain,
-        industry=industry,
-        location=location_name if location_name not in ("United States", None) else geo_focus,
-        topic_plan=topic_plan,
-        topics=topics,
-        selected_services=selected_services,
-    )
+    mapped = url_map_entries(site_architecture)
+    if is_page_plan(mapped):
+        priority_queue = work_rows_from_url_map(mapped, domain)
+    else:
+        priority_queue = build_priority_queue(
+            best=best,
+            evergreen=evergreen,
+            trends=trends,
+            avoid=avoid,
+            report_clusters=report_clusters,
+            domain=domain,
+            industry=industry,
+            location=location_name if location_name not in ("United States", None) else geo_focus,
+            topic_plan=topic_plan,
+            topics=topics,
+            selected_services=selected_services,
+        )
     content_gaps = build_gaps(best, evergreen, website, competitor_domains)
     # Enrich gaps with competitor blog titles when Phase 5 crawled them
     if competitor_sites and content_gaps:

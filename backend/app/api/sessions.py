@@ -9,6 +9,7 @@ from app.deps import get_current_user
 from app.models import ChatMessage, ChatSession, Client, User
 from app.schemas.session import MessageOut, SessionCreate, SessionOut
 from app.services.audit import log_event
+from app.services.message_display import display_message_payload
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -80,4 +81,13 @@ async def list_messages(
         .order_by(ChatMessage.created_at.asc())
         .limit(limit)
     )
-    return list(result.scalars().all())
+    # Copy for the response. The stored row keeps the full report.
+    shown: list[MessageOut] = []
+    for row in result.scalars().all():
+        payload = row.structured_payload if isinstance(row.structured_payload, dict) else None
+        shown.append(
+            MessageOut.model_validate(row).model_copy(
+                update={"structured_payload": display_message_payload(payload)}
+            )
+        )
+    return shown

@@ -264,6 +264,11 @@ def test_map_cluster_low_score_existing_page_uses_current_url():
 
 
 def test_secondary_keywords_are_the_cluster_not_a_modifier_pattern():
+    """The mapping step takes the cluster's own measured keywords and invents none.
+
+    Rows left short are topped up afterwards, in Phase 6, with variants that have a
+    measured volume (tests/test_secondary_keywords.py); a place variant is never built.
+    """
     cluster = {
         "name": "Bookcase",
         "primary_keyword": "bookcase",

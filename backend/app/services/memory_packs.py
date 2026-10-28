@@ -184,23 +184,25 @@ def _slim_clusters(rows: Any, *, limit: int = 10) -> list[dict[str, Any]]:
         if isinstance(raw_kws, list):
             for item in raw_kws[:8]:
                 if isinstance(item, dict) and item.get("keyword"):
-                    kws.append(
-                        {
-                            "keyword": item.get("keyword"),
-                            "volume": item.get("volume"),
-                            "difficulty": item.get("difficulty"),
-                            "intent": item.get("intent"),
-                            "funnel": item.get("funnel"),
-                            "role": item.get("role"),
-                            # Where each label came from and how sure it is.
-                            "role_reason": item.get("role_reason"),
-                            "intent_source": item.get("intent_source"),
-                            "intent_confidence": item.get("intent_confidence"),
-                            "funnel_source": item.get("funnel_source"),
-                            "funnel_confidence": item.get("funnel_confidence"),
-                            "label_disagreement": item.get("label_disagreement"),
-                        }
-                    )
+                    slim_kw = {
+                        "keyword": item.get("keyword"),
+                        "volume": item.get("volume"),
+                        "difficulty": item.get("difficulty"),
+                        "intent": item.get("intent"),
+                        "funnel": item.get("funnel"),
+                        "role": item.get("role"),
+                        # Where each label came from and how sure it is.
+                        "role_reason": item.get("role_reason"),
+                        "intent_source": item.get("intent_source"),
+                        "intent_confidence": item.get("intent_confidence"),
+                        "funnel_source": item.get("funnel_source"),
+                        "funnel_confidence": item.get("funnel_confidence"),
+                        "label_disagreement": item.get("label_disagreement"),
+                    }
+                    if item.get("seed_origin"):
+                        # Phase 6 reads this pack; the tag tells it which clusters are industry clusters.
+                        slim_kw["seed_origin"] = item["seed_origin"]
+                    kws.append(slim_kw)
                 elif isinstance(item, str) and item.strip():
                     kws.append({"keyword": item.strip()})
         vol = c.get("total_volume")
@@ -331,6 +333,11 @@ def slim_search_demand_memory(full: dict[str, Any] | None) -> dict[str, Any]:
                 "seed": c.get("seed"),
                 "target": c.get("target"),
                 "target_type": c.get("target_type"),
+                # The service and, for a sub-service seed, the sub-service it
+                # belongs to, so later phases can group by sub-service.
+                "service": c.get("service"),
+                "sub_service": c.get("sub_service"),
+                "parent_service": c.get("parent_service"),
                 "keyword_count": c.get("keyword_count"),
                 "classes_missing": list(c.get("classes_missing") or []),
                 "exact": [

@@ -25,6 +25,12 @@ def _open_section(flow: list, number: int, title: str) -> None:
     flow.extend(header_band(f"{number}. {title}"))
 
 
+def _map_title(row: dict[str, Any]) -> str:
+    from app.services.headline_framework import title_for_map_row
+
+    return title_for_map_row(row) or "—"
+
+
 def _rows(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
@@ -120,7 +126,6 @@ def render_site_architecture_blueprint(
 
     payload = report.get("payload") if isinstance(report.get("payload"), dict) else {}
     current = payload.get("current_state") if isinstance(payload.get("current_state"), dict) else {}
-    nav = payload.get("navigation") if isinstance(payload.get("navigation"), dict) else {}
     url_rules = (
         payload.get("url_convention_rules")
         if isinstance(payload.get("url_convention_rules"), dict)
@@ -137,7 +142,6 @@ def render_site_architecture_blueprint(
     url_map = numbered(_rows((url_map_report or {}).get("final_url_map")))
     tree = _rows(payload.get("target_url_tree"))
     ownership = _rows(payload.get("cluster_ownership"))
-    primary_nav = _rows(nav.get("primary_nav"))
     types = _rows(payload.get("page_type_model"))
     redirects = _rows(payload.get("redirect_map"))
     handoffs = _rows(payload.get("handoffs"))
@@ -263,8 +267,8 @@ def render_site_architecture_blueprint(
         flow.extend(bullet_list(money_pages, max_items=12))
     flow.append(Spacer(1, 10))
 
-    # 4. Target URL Tree & Primary Navigation
-    _open_section(flow, 4, "Target URL Tree & Primary Navigation")
+    # 4. Target URL Tree
+    _open_section(flow, 4, "Target URL Tree")
     flow.append(
         body("The target URL tree operationalizes the keyword targeting strategy across primary hubs and service spokes.")
     )
@@ -288,27 +292,6 @@ def render_site_architecture_blueprint(
     )
     if len(tree) > 40:
         flow.append(body(f"+{len(tree) - 40} more URLs in blueprint"))
-    flow.append(subsection("Primary Navigation Architecture"))
-    nav_bits: list[str] = []
-    if primary_nav:
-        nav_bits.append(
-            "Primary navigation features "
-            + ", ".join(f"{n.get('label')} ({n.get('url')})" for n in primary_nav[:6])
-            + "."
-        )
-    if nav.get("rule"):
-        nav_bits.append(str(nav["rule"]))
-    if nav.get("notes"):
-        nav_bits.append(str(nav["notes"]))
-    breadcrumbs = nav.get("breadcrumb_pattern") if isinstance(nav.get("breadcrumb_pattern"), dict) else None
-    if breadcrumbs:
-        nav_bits.append(
-            "Breadcrumbs strictly mirror URL hierarchy (e.g., "
-            + ", ".join(f"{k}: {v}" for k, v in list(breadcrumbs.items())[:3])
-            + ")."
-        )
-    flow.append(body(" ".join(nav_bits) if nav_bits else "—"))
-    flow.append(Spacer(1, 10))
 
     # 5. URL Mapping & Taxonomy Plan
     _open_section(flow, 5, "URL Mapping & Taxonomy Plan")
@@ -340,7 +323,7 @@ def render_site_architecture_blueprint(
                 ]
                 for u in url_map
             ],
-            [0.3, 0.45, 0.75, 0.65, 0.65, 0.65, 1.3, 1.3, 0.9, 0.75, 0.8],
+            [0.4, 0.45, 0.75, 0.65, 0.65, 0.65, 1.25, 1.25, 0.9, 0.75, 0.8],
             max_rows=40,
         )
     )
@@ -351,6 +334,7 @@ def render_site_architecture_blueprint(
             [
                 "#",
                 "Primary Keyword",
+                "Title",
                 "Vol/mo",
                 "CPC",
                 "Secondary Keywords (5-10)",
@@ -363,6 +347,7 @@ def render_site_architecture_blueprint(
                 [
                     u.get("row_no"),
                     u.get("primary_keyword"),
+                    _map_title(u),
                     _fmt_vol(u.get("search_volume")),
                     _fmt_cpc(u.get("cpc")),
                     _fmt_kw_list(u.get("secondary_keywords_sheet") or u.get("secondary_keywords")),
@@ -373,7 +358,7 @@ def render_site_architecture_blueprint(
                 ]
                 for u in url_map
             ],
-            [0.3, 1.0, 0.5, 0.5, 1.8, 0.7, 0.6, 0.5, 1.4],
+            [0.4, 1.0, 1.0, 0.7, 0.6, 1.1, 0.85, 0.8, 0.65, 0.8],
             max_rows=40,
         )
     )

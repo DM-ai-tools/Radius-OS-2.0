@@ -203,7 +203,14 @@ def test_glosses_typos_other_languages_and_film_titles_do_not_pass():
     for keyword in blocked:
         keep, reason, _note = evaluate_keyword(keyword, ctx, match_class="phrase", seed="SEO")
         assert keep is False, keyword
-        assert reason in {"dictionary_lookup", "broken_query", "foreign_language", "entertainment", "acronym_homonym"}
+        assert reason in {
+            "dictionary_lookup",
+            "broken_query",
+            "foreign_language",
+            "entertainment",
+            "acronym_homonym",
+            "consumer_platform",  # "google definitions": someone using Google, not hiring for it
+        }
     from app.services.keyword_service_contract import off_topic_reason
 
     for keyword in (

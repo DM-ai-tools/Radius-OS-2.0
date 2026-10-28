@@ -375,7 +375,8 @@ async def test_service_page_draft_reads_as_publishable_service_copy():
         ("service", "/seo/"),
         ("landing", "/pricing/seo/"),
         ("guide", "/guides/measure-seo/"),
-        ("comparison", "/compare/seo-vs-ppc/"),
+        # "comparison" is not here: it is refused without rival pages to compare
+        # (see test_comparison_draft.py), never drafted from the brief alone.
     ],
 )
 @pytest.mark.asyncio

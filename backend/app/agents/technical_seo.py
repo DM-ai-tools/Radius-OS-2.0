@@ -57,7 +57,17 @@ async def run_technical_seo(
         )
     )
 
-    if profile.site_architecture_status != "complete":
+    from app.services.content_strategy import attach_page_plan, is_page_plan, url_map_entries
+
+    ia = attach_page_plan(dict(profile.site_architecture_summary or {}))
+    has_plan = is_page_plan(url_map_entries(ia)) or bool(ia.get("final_url_map") or ia.get("target_url_tree"))
+    strategy_pack = dict(profile.seo_strategy_summary or {})
+    has_calendar = bool(
+        strategy_pack.get("priority_queue")
+        or strategy_pack.get("content_calendar")
+        or strategy_pack.get("content_plan")
+    )
+    if profile.site_architecture_status not in ("complete", "pending_signoff") and not has_plan:
         events.extend(
             blocked_events(
                 "technical_seo",
@@ -66,7 +76,7 @@ async def run_technical_seo(
             )
         )
         return events
-    if profile.seo_strategy_status != "complete":
+    if profile.seo_strategy_status not in ("complete", "pending_signoff") and not has_calendar:
         events.extend(
             blocked_events(
                 "technical_seo",
@@ -75,8 +85,8 @@ async def run_technical_seo(
             )
         )
         return events
-
-    ia = dict(profile.site_architecture_summary or {})
+    if ia is not profile.site_architecture_summary:
+        profile.site_architecture_summary = ia
     ia_status = str(profile.site_architecture_status or "not_started")
     has_tree = bool(ia.get("target_url_tree") or ia.get("redirect_map"))
     ia_fallback = False

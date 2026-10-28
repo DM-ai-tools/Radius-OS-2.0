@@ -444,7 +444,7 @@ def test_saved_selection_ids_follow_canonical_names():
     assert saved["selected_subservice_ids"] == ["hire purchases", "unknown thing"]  # not mutated
 
 
-def test_attribute_offerings_are_still_seeded_for_their_service_only():
+def test_attribute_offerings_are_not_seeded_but_sub_services_are():
     catalog = [
         {
             "id": "home loan broking", "name": "Home Loan Broking", "source": "cdd",
@@ -466,7 +466,9 @@ def test_attribute_offerings_are_still_seeded_for_their_service_only():
         other_service_names=["Asset Finance"],
     )
     seeds = {s.lower() for s in plan.seeds}
-    assert {"home loan broking", "refinancing", "first home buyer", "hindi brokers"} <= seeds
+    # Sub-services are seeds again (2026-10-27); keyword qualifiers are never promoted to seeds.
+    assert {"home loan broking", "refinancing"} <= seeds
+    assert not {"first home buyer", "hindi brokers"} & seeds
     assert "truck finance for tradies" not in seeds
     assert all(t["service"] == "Home Loan Broking" for t in plan.seed_targets.values())
 

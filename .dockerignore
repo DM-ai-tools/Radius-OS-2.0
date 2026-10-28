@@ -21,6 +21,8 @@ backend/.venv
 backend/**/__pycache__
 backend/tests
 backend/scripts
+backend/data
+validation
 backend/.pytest_cache
 *.db
 *.log

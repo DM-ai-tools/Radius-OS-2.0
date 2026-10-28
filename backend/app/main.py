@@ -72,10 +72,11 @@ async def lifespan(_: FastAPI):
     last_err: Exception | None = None
     for attempt in range(1, 21):
         try:
+            from app.db import ensure_pgvector, ensure_phase56_columns
+
+            await ensure_pgvector()
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-            from app.db import ensure_phase56_columns
-
             await ensure_phase56_columns()
             async with AsyncSessionLocal() as db:
                 await seed_all(db, seed_demo_data=settings.environment != "production")

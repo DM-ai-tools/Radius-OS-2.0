@@ -1,3 +1,4 @@
+import logging
 import os
 from functools import lru_cache
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -75,10 +76,20 @@ class Settings(BaseSettings):
     # on every seed. Off unless set.
     keyword_extra_idea_pulls: bool = False
     # Stop starting new Search Demand calls once this run has committed this
-    # much. Headroom under $8 covers calls already in flight.
-    search_demand_budget_usd: float = 7.0
+    # much. Each selected service is given an equal share before expansion
+    # starts, so the first services cannot spend the rest of the run.
+    search_demand_budget_usd: float = 15.0
     keyword_relevance_max_tokens: int = 8192
-    keyword_cluster_use_llm: bool = False
+    # Keyword clustering (Phase 5). False skips clustering entirely: the report
+    # records that it did not run and why, and carries no clusters.
+    keyword_clustering_enabled: bool = True
+    # Which engine clusters when clustering runs: the model (True) or the rules
+    # (False). A phase deadline can still force the rules; the report says so.
+    keyword_clustering_use_model: bool | None = None
+    # Deprecated name of keyword_clustering_use_model (KEYWORD_CLUSTER_USE_LLM). Still
+    # read when the new name is unset, with a warning, so existing deployments keep
+    # their setting.
+    keyword_cluster_use_llm: bool | None = None
     # Per-keyword LLM relevance gate (Phase 5). Judges every seeded keyword
     # against its own service + CDD + competitor context, and fails closed:
     # anything it could not judge is quarantined, never silently kept.
@@ -140,6 +151,22 @@ class Settings(BaseSettings):
     # formats, audience segments, topic verticals). They are fetched on top of the seed
     # budget, so each one adds a keyword fetch and gate work to Phase 5. 0 turns it off.
     subservice_expansion_max_seeds: int = 10
+    # Reuse saved keyword fetches across clients (place-free keywords only). False fetches every seed fresh.
+    keyword_pool_enabled: bool = True
+    # Days a saved keyword fetch is trusted before it is fetched again.
+    keyword_pool_ttl_days: int = 180
+    # Most of a client's own places tried (as "<seed> <place>" volume lookups) when a saved seed is reused.
+    keyword_pool_place_cap: int = 5
+    # Most industry-level seeds added on top of the service seeds. 0 turns the industry layer off.
+    keyword_industry_max_seeds: int = 8
+    # Informational (top-of-funnel) share floor for industry seeds. Service seeds keep their own floor.
+    keyword_industry_informational_share: float = 0.10
+    # Secondary keywords wanted per URL-map entry; short entries are topped up with measured variants.
+    keyword_secondary_target: int = 5
+    # Most modifier-variant candidates checked for volume in one run (one batched call, all entries).
+    # About ten per short row, so 1000 covers a 100-row map and is one provider task
+    # (DataForSEO takes 1000 keywords per task). A run that hits the cap logs a warning.
+    keyword_secondary_lookup_cap: int = 1000
     # related_keywords depth is 0–4. Default 1 (the seed plus one hop).
     keyword_related_depth: int = 2
     # Ads volume vs clickstream volume. Flag when the larger is more than this
@@ -304,6 +331,17 @@ class Settings(BaseSettings):
         return url
 
     @model_validator(mode="after")
+    def _resolve_clustering_engine_setting(self) -> "Settings":
+        if self.keyword_clustering_use_model is None:
+            legacy = self.keyword_cluster_use_llm
+            if legacy is not None:
+                logging.getLogger("app.config").warning(
+                    "KEYWORD_CLUSTER_USE_LLM is deprecated; set KEYWORD_CLUSTERING_USE_MODEL instead."
+                )
+            self.keyword_clustering_use_model = bool(legacy)
+        return self
+
+    @model_validator(mode="after")
     def _reject_known_bad_secrets(self) -> "Settings":
         if self.encryption_key in _KNOWN_BAD_ENCRYPTION_KEYS:
             raise ValueError(
@@ -380,6 +418,23 @@ class Settings(BaseSettings):
             self.use_mock_providers = False
         if os.environ.get("USE_MOCK_LLM") is None:
             self.use_mock_llm = False
+        return self
+
+    @model_validator(mode="after")
+    def _celery_broker_follows_redis_in_production(self) -> "Settings":
+        """Railway injects REDIS_URL. A leftover localhost broker cannot reach it.
+
+        An explicit CELERY_BROKER_URL is kept. Local development is unchanged,
+        and a Redis URL that is still localhost is left on the default broker.
+        """
+        if self.environment != "production":
+            return self
+        if os.environ.get("CELERY_BROKER_URL"):
+            return self
+        redis = (self.redis_url or "").strip()
+        if not redis or "127.0.0.1" in redis or "localhost" in redis:
+            return self
+        self.celery_broker_url = redis
         return self
 
     @model_validator(mode="after")

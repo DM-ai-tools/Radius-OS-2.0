@@ -430,6 +430,7 @@ async def test_ahrefs_plan_failure_is_rechecked_after_the_window(monkeypatch):
         def __init__(self, status, text, payload=None):
             self.status_code = status
             self.text = text
+            self.headers = {}
             self._payload = payload or {}
 
         def json(self):

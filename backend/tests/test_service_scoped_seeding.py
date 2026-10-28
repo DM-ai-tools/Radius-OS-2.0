@@ -402,15 +402,14 @@ def _gen(service):
 
 def test_a_services_seeds_come_only_from_that_service():
     seo, meta = _gen("SEO"), _gen("Meta Ads")
-    assert seo.seeds == ["SEO"]
+    # The service's own seeds, then its offered sub-services as seeds of their own
+    # (2026-10-27). Excluded sub-services are never seeded.
+    assert seo.seeds == ["SEO", "Local SEO", "Technical SEO"]
     assert "seo melbourne" not in seo.seeds
-    assert "Local SEO" not in seo.seeds
-    assert "Technical SEO" not in seo.seeds
     assert "Link Building" not in seo.seeds
-    assert meta.seeds == ["Meta Ads"]
+    assert meta.seeds == ["Meta Ads", "Instagram Ads"]
     assert "meta ads agency" not in meta.seeds
     assert "facebook ads cost" not in meta.seeds
-    assert "Instagram Ads" not in meta.seeds
     assert "TikTok Ads" not in meta.seeds
     # nothing crosses
     assert not ({"Meta Ads", "Instagram Ads", "meta ads agency", "facebook ads cost"} & set(seo.seeds))
@@ -475,8 +474,10 @@ def test_plan_service_seeds_covers_each_service_and_keeps_unowned_seeds_apart():
     )
     by = {p.service: p for p in plans}
     assert set(by) == {"SEO", "Meta Ads"}
-    assert by["SEO"].seeds == ["SEO"]
-    assert by["Meta Ads"].seeds == ["Meta Ads"]
+    assert [s for s in by["SEO"].seeds if not by["SEO"].is_sub_service(s)] == ["SEO"]
+    assert [s for s in by["Meta Ads"].seeds if not by["Meta Ads"].is_sub_service(s)] == ["Meta Ads"]
+    assert by["SEO"].sub_service_seeds == ["Local SEO", "Technical SEO"]
+    assert by["Meta Ads"].sub_service_seeds == ["Instagram Ads"]
     assert "bridging loans" not in by["SEO"].seeds + by["Meta Ads"].seeds
 
 
@@ -535,6 +536,65 @@ async def test_the_real_fetcher_only_ever_expands_the_seeds_of_the_service_it_wa
     assert all(r["keyword"].split()[0][-1] == r["service"][-1] for r in flat)
 
 
+async def test_each_service_keeps_its_own_share_of_the_phase_budget():
+    """A $1.20 phase cap used to be spent by the first service. Each service now
+    gets half, so both come back with a keyword instead of the second coming back empty."""
+    from app.services.api_meter import (
+        api_meter_context,
+        apply_paid_cost,
+        begin_paid_call,
+        end_paid_call,
+    )
+
+    async def fetch(seeds, *, seed_targets=None, **kw):
+        kept = []
+        for _seed in seeds:
+            if not begin_paid_call(0.5):
+                continue
+            apply_paid_cost(0.5)
+            end_paid_call(0.5)
+            kept.append(_seed)
+        dataset = [
+            {"keyword": f"{seed} cost", "seed": seed, "match_class": "exact", "volume": 100}
+            for seed in kept
+        ]
+        return {
+            "seeds": list(seeds),
+            "seed_clusters": [
+                {
+                    "seed": seed,
+                    "target": seed,
+                    "target_type": "keyword",
+                    "exact": [row],
+                    "phrase": [],
+                    "related": [],
+                    "broad": [],
+                    "keyword_count": 1,
+                }
+                for seed, row in zip(kept, dataset)
+            ],
+            "keyword_dataset": dataset,
+            "keyword_count": len(dataset),
+            "class_counts": {"exact": len(dataset), "phrase": 0, "related": 0, "broad": 0},
+            "target_type_counts": {"keyword": len(kept)},
+            "class_coverage": [],
+            "seeds_with_all_classes": 0,
+            "provider_errors": [],
+            "providers": ["dataforseo"],
+            "excluded_keywords": [],
+            "keyword_cleaning": {},
+        }
+
+    async with api_meter_context(phase_budget_usd=1.2):
+        result = await run_service_scoped_seeding(
+            [_plan("Service A", ["a1", "a2", "a3"]), _plan("Service B", ["b1", "b2", "b3"])],
+            fetch=fetch,
+            total_cap=50,
+        )
+    counts = {r["service"]: r["keyword_count"] for r in result["service_runs"]}
+    assert counts == {"Service A": 1, "Service B": 1}
+
+
 # --- the service survives into clustering and the gates --------------------------------------
 
 
@@ -590,9 +650,11 @@ def test_scope_enforcement_follows_the_owning_service_not_the_seed_text():
     kept, dropped = partition_scope_rejects(rows, prio)
     assert [r["keyword"] for r in kept] == ["meta ads agency"]
     assert [r["keyword"] for r in dropped] == ["tiktok ads agency"]
-    # without the owner the same rows slip through (the old behaviour)
+    # A row with no owner is still dropped when the words name the switched-off platform.
     legacy = [{k: v for k, v in r.items() if k != "service"} for r in rows]
-    assert len(partition_scope_rejects(legacy, prio)[1]) == 0
+    kept_legacy, dropped_legacy = partition_scope_rejects(legacy, prio)
+    assert [r["keyword"] for r in kept_legacy] == ["meta ads agency"]
+    assert [r["keyword"] for r in dropped_legacy] == ["tiktok ads agency"]
 
 
 def test_the_service_contract_judges_a_keyword_against_its_owning_service():

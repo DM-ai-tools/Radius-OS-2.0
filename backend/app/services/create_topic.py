@@ -279,9 +279,13 @@ def _shape_from_keyword(
     else:
         angle_cat = angle_options[index % len(angle_options)]
 
-    # Keywords that already encode the query shape keep that shape in the title
+    # Query-shaped keywords still go through the headline framework.
     if nkw.startswith(("how to", "what is", "best ", "top ")) or " vs " in nkw:
-        title = _title_under_60(phrase_title(kw))
+        from app.services.headline_framework import mapped_page_title
+
+        title = _title_under_60(
+            mapped_page_title(kw, page_type=content_type, content_type=content_type, intent=intent)
+        )
         if nkw.startswith("best ") or nkw.startswith("top ") or " vs " in nkw:
             funnel = "MOFU" if funnel == "TOFU" else funnel
             intent = intent if intent != "informational" else "commercial"
@@ -382,7 +386,11 @@ def _fallback_topic_plan(
         # grounded, grammatical title via the headline framework, letting the angle
         # pick the template so repeated keywords still yield varied titles.
         if kw.lower().startswith(("how to", "what is", "best ", "top ")) or " vs " in kw.lower():
-            title = _title_under_60(phrase_title(kw))
+            from app.services.headline_framework import mapped_page_title
+
+            title = _title_under_60(
+                mapped_page_title(kw, page_type=ctype, content_type=ctype, intent=intent)
+            )
         else:
             title = _title_under_60(
                 specific_page_title(

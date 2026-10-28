@@ -286,6 +286,9 @@ def build_category_url_mapping_rows(
             selected_url=entry.get("selected_url"),
             create_url=entry.get("create_url"),
         )
+        if entry.get("is_home"):
+            # The home page is live. The rule above blanks "/" for rows that merely resolved to it.
+            current_url, proposed_url = entry.get("current_url"), None
         rows.append(
             {
                 "row_type": "data",

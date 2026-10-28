@@ -29,6 +29,7 @@ from typing import Any, Iterable
 
 from app.services.service_prioritization import (
     NOT_OFFERED_SOURCES,
+    _PLATFORM_TOKEN_ALIASES,
     _distinctive_tokens,
     _expand_platform_tokens,
     _loose_key,
@@ -196,6 +197,20 @@ def excluded_hits(text: str, entry: dict[str, Any]) -> list[str]:
     return hits
 
 
+def _platform_exclusion_hits(text: str, entry: dict[str, Any]) -> list[str]:
+    """Excluded sub-services this text names by a platform, such as TikTok.
+
+    Used when a keyword has no owning service. A broad exclusion like "Organic
+    Social" is not applied here, so an SEO term that merely says "organic" stays.
+    """
+    platforms = set().union(*_PLATFORM_TOKEN_ALIASES.values())
+    return [
+        name
+        for name in excluded_hits(text, entry)
+        if _distinctive_tokens(name) & platforms
+    ]
+
+
 def partition_scope_rejects(
     rows: list[dict[str, Any]], prioritization: dict[str, Any] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -210,7 +225,17 @@ def partition_scope_rejects(
             continue
         origin = str(row.get("service") or row.get("target") or row.get("seed") or "")
         found = resolve_scope(prioritization, origin)
-        hits = excluded_hits(str(row.get("keyword") or ""), found[1]) if found else []
+        keyword = str(row.get("keyword") or "")
+        if found:
+            hits = excluded_hits(keyword, found[1])
+        else:
+            # A keyword with no owning service still names a switched-off platform.
+            hits = []
+            for sid, entry in scope_of(prioritization).items():
+                hits = _platform_exclusion_hits(keyword, entry)
+                if hits:
+                    origin = str(entry.get("name") or sid)
+                    break
         if hits:
             dropped.append(
                 {

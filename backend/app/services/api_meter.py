@@ -7,7 +7,7 @@ every helper.
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
 from decimal import Decimal
 from typing import Any
@@ -65,6 +65,26 @@ _meter_ctx: ContextVar[_MeterContext] = ContextVar(
 )
 
 
+class _ServiceBudget:
+    """Dollars one service may spend inside a shared phase cap."""
+
+    __slots__ = ("cap", "spent", "reserved", "phase_hold")
+
+    def __init__(self, cap: float, phase_hold: float = 0.0) -> None:
+        self.cap = cap
+        self.spent = 0.0
+        self.reserved = 0.0
+        # Dollars of ``cap`` already sitting in the phase reservation.
+        self.phase_hold = phase_hold
+
+
+# Task-local. Child fetches inherit the same object, so one service's calls
+# share its cap and cannot spend a sibling service's share.
+_service_budget: ContextVar[_ServiceBudget | None] = ContextVar(
+    "service_research_budget", default=None
+)
+
+
 @asynccontextmanager
 async def api_meter_context(
     *,
@@ -87,35 +107,142 @@ async def api_meter_context(
         _meter_ctx.reset(token)
 
 
+def remaining_phase_budget_usd() -> float | None:
+    """Dollars still available on the phase cap, or None when this phase has no cap."""
+    ctx = _meter_ctx.get()
+    cap = ctx.phase_budget_usd
+    if not cap or cap <= 0:
+        return None
+    return max(0.0, cap - ctx.phase_spent - ctx.phase_reserved)
+
+
+def service_budget_shares(count: int, remaining_usd: float) -> list[float]:
+    """Split ``remaining_usd`` into ``count`` shares that sum to no more than it.
+
+    Earlier services receive a leftover tenth of a cent. A service with a zero
+    share cannot start a paid call.
+    """
+    if count <= 0:
+        return []
+    cents = int(round(max(0.0, remaining_usd) * 10000))
+    if cents <= 0:
+        return [0.0] * count
+    base, extra = divmod(cents, count)
+    return [(base + (1 if i < extra else 0)) / 10000 for i in range(count)]
+
+
+def reserve_phase_amount(amount: float) -> float:
+    """Reserve ``amount`` on the phase cap. Returns the dollars actually held.
+
+    Call this for every selected service before the first one expands. A service
+    that starts later still owns its share, because the reservation is already
+    on the cap.
+    """
+    ctx = _meter_ctx.get()
+    requested = max(0.0, float(amount))
+    cap = ctx.phase_budget_usd or 0
+    if cap <= 0:
+        return requested
+    available = max(0.0, cap - ctx.phase_spent - ctx.phase_reserved)
+    hold = min(requested, available)
+    ctx.phase_reserved += hold
+    return hold
+
+
+def release_phase_amount(amount: float) -> None:
+    """Return a reservation from ``reserve_phase_amount``. Spent cost stays in ``phase_spent``."""
+    ctx = _meter_ctx.get()
+    if not ctx.phase_budget_usd or amount <= 0:
+        return
+    ctx.phase_reserved = max(0.0, ctx.phase_reserved - float(amount))
+
+
+@contextmanager
+def service_research_budget(cap_usd: float, *, phase_hold: float = 0.0):
+    """Hold this task's paid calls to ``cap_usd`` until the block ends.
+
+    ``phase_hold`` is the part of ``cap_usd`` already reserved on the phase cap.
+    A call inside this block still has to fit the phase cap once that hold is
+    counted once.
+    """
+    token = _service_budget.set(
+        _ServiceBudget(max(0.0, float(cap_usd)), phase_hold=max(0.0, float(phase_hold)))
+    )
+    try:
+        yield
+    finally:
+        _service_budget.reset(token)
+
+
+def _phase_blocks(ctx: _MeterContext, reserve: float, *, already_held: float = 0.0) -> bool:
+    cap = ctx.phase_budget_usd
+    if not cap or cap <= 0:
+        return False
+    others = max(0.0, ctx.phase_reserved - already_held)
+    return ctx.phase_spent + others + reserve > cap
+
+
 def begin_paid_call(reserve: float) -> bool:
     """Hold ``reserve`` dollars against the phase cap. True when the call may start.
 
     No cap means every call may start. The reserve is released by ``end_paid_call``
     once the real cost is known, so concurrent calls cannot all slip under the cap.
+    A service research budget is checked first. When that service's share is
+    already reserved on the phase, it is not reserved a second time.
     """
     ctx = _meter_ctx.get()
-    cap = ctx.phase_budget_usd
-    if not cap or cap <= 0:
+    budget = _service_budget.get()
+    if budget is not None:
+        if budget.spent + budget.reserved + reserve > budget.cap or _phase_blocks(
+            ctx, budget.reserved + reserve, already_held=budget.phase_hold
+        ):
+            log.warning(
+                "service_budget_blocked",
+                agent_key=ctx.agent_key,
+                spent_usd=round(budget.spent, 4),
+                reserved_usd=round(budget.reserved, 4),
+                cap_usd=budget.cap,
+            )
+            return False
+        budget.reserved += reserve
+        if budget.phase_hold <= 0 and ctx.phase_budget_usd:
+            ctx.phase_reserved += reserve
         return True
-    if ctx.phase_spent + ctx.phase_reserved + reserve > cap:
+    if _phase_blocks(ctx, reserve):
         log.warning(
             "phase_budget_blocked",
             agent_key=ctx.agent_key,
             spent_usd=round(ctx.phase_spent, 4),
             reserved_usd=round(ctx.phase_reserved, 4),
-            cap_usd=cap,
+            cap_usd=ctx.phase_budget_usd,
         )
         return False
-    ctx.phase_reserved += reserve
+    if ctx.phase_budget_usd:
+        ctx.phase_reserved += reserve
     return True
 
 
 def end_paid_call(reserve: float) -> None:
     """Release the hold taken by ``begin_paid_call``. The logged cost stays in ``phase_spent``."""
     ctx = _meter_ctx.get()
-    if not ctx.phase_budget_usd:
+    budget = _service_budget.get()
+    if budget is not None:
+        budget.reserved = max(0.0, budget.reserved - reserve)
+        if budget.phase_hold <= 0 and ctx.phase_budget_usd:
+            ctx.phase_reserved = max(0.0, ctx.phase_reserved - reserve)
         return
-    ctx.phase_reserved = max(0.0, ctx.phase_reserved - reserve)
+    if ctx.phase_budget_usd:
+        ctx.phase_reserved = max(0.0, ctx.phase_reserved - reserve)
+
+
+def apply_paid_cost(cost: float) -> None:
+    """Add a finished call's real cost to the phase and, when set, the service share."""
+    ctx = _meter_ctx.get()
+    if ctx.phase_budget_usd:
+        ctx.phase_spent += float(cost or 0)
+    budget = _service_budget.get()
+    if budget is not None:
+        budget.spent += float(cost or 0)
 
 
 def estimate_llm_cost_usd(
@@ -300,8 +427,7 @@ async def record_api_call(
         error_detail=(error_detail or "")[:500] or None,
         request_meta=request_meta,
     )
-    if ctx.phase_budget_usd:
-        ctx.phase_spent += float(cost or 0)
+    apply_paid_cost(float(cost or 0))
     try:
         async with AsyncSessionLocal() as db:
             db.add(row)

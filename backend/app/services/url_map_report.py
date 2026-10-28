@@ -37,6 +37,9 @@ def outcome_text(entry: dict[str, Any]) -> str:
 
 
 def score_text(entry: dict[str, Any]) -> str:
+    if entry.get("band_source") == "not_scored":
+        # The home row: the root is outside the candidate pool, so there is no score to print.
+        return "Not scored: the site root is outside the URL candidate pool."
     basis = entry.get("score_basis") or {}
     available = [COMPONENT_LABELS.get(k, k) for k in basis.get("available") or []]
     missing = [COMPONENT_LABELS.get(k, k) for k in basis.get("unavailable") or []]

@@ -44,7 +44,10 @@ async def run_content_audit(
         )
     )
 
-    if profile.technical_seo_status != "complete":
+    technical = dict(profile.technical_seo_summary or {})
+    if profile.technical_seo_status not in ("complete", "pending_signoff") or (
+        profile.technical_seo_status == "pending_signoff" and not technical
+    ):
         events.extend(
             blocked_events(
                 "content_audit",

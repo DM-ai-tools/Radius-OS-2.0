@@ -25,6 +25,19 @@ elif "postgresql" in database_url or "postgres" in database_url:
 engine = create_async_engine(database_url, **engine_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+if "postgresql" in database_url or "postgres" in database_url:
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _register_pgvector_codec(dbapi_connection, _connection_record):
+        """Teach asyncpg the vector type once the extension exists."""
+        try:
+            from pgvector.asyncpg import register_vector
+
+            dbapi_connection.run_async(register_vector)
+        except Exception:  # noqa: BLE001 — extension not created yet, or sqlite-shaped driver
+            return
+
 
 class Base(DeclarativeBase):
     pass
@@ -284,3 +297,183 @@ async def ensure_hot_path_indexes() -> None:
 async def ensure_governance_columns() -> None:
     """Ensure findings_ledger.created_by exists (Architecture v1.9 author≠reviewer)."""
     await ensure_phase56_columns()
+
+
+EMBEDDING_DIMENSION = 768
+
+
+def embedding_fits_vector(value, dimension: int = EMBEDDING_DIMENSION) -> bool:
+    """True when this stored embedding can become one vector without dropping it."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        text_value = value.strip()
+        if not (text_value.startswith("[") and text_value.endswith("]")):
+            return False
+        import json
+
+        try:
+            value = json.loads(text_value)
+        except json.JSONDecodeError:
+            return False
+    if not isinstance(value, (list, tuple)) or len(value) != dimension:
+        return False
+    return all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value)
+
+
+def _as_embedding_list(value, dimension: int = EMBEDDING_DIMENSION) -> list[float] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        import json
+
+        value = json.loads(value)
+    return [float(item) for item in value]
+
+
+def embeddings_match(before, after, dimension: int = EMBEDDING_DIMENSION) -> bool:
+    """True when the vector read-back is the same embedding at float32 precision."""
+    left = _as_embedding_list(before, dimension)
+    right = _as_embedding_list(after, dimension)
+    if left is None or right is None:
+        return left is right
+    if len(left) != len(right):
+        return False
+    for original, stored in zip(left, right):
+        # pgvector stores vector as float32. This is rounding, not a dropped row.
+        limit = max(1e-5, abs(original) * 1e-5)
+        if abs(original - stored) > limit:
+            return False
+    return True
+
+
+async def _public_table_counts(conn) -> dict[str, int]:
+    from sqlalchemy import text
+
+    names = (
+        await conn.execute(
+            text(
+                "SELECT c.relname FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'public' AND c.relkind = 'r' "
+                "ORDER BY c.relname"
+            )
+        )
+    ).scalars().all()
+    counts: dict[str, int] = {}
+    for name in names:
+        quoted = '"' + str(name).replace('"', '""') + '"'
+        counts[str(name)] = int(await conn.scalar(text(f"SELECT count(*) FROM {quoted}")))
+    return counts
+
+
+class _PgvectorUnavailable(Exception):
+    """The server cannot load pgvector. The existing column stays as it is."""
+
+
+async def ensure_pgvector() -> dict[str, object]:
+    """Turn on pgvector and store content embeddings as vector(768).
+
+    Every public table is counted before and after. The embedding values are
+    compared at float32 precision. Any mismatch rolls the conversion back, and
+    a value that is not a 768-number array is left as it is.
+    """
+    from app.logging_config import get_logger
+
+    log = get_logger("db")
+    if engine.dialect.name != "postgresql":
+        return {"status": "skipped"}
+    try:
+        async with engine.begin() as conn:
+            result = await _convert_embeddings(conn, log)
+    except _PgvectorUnavailable as exc:
+        log.warning("pgvector_extension_unavailable", error=str(exc)[:200])
+        await engine.dispose()
+        return {"status": "extension_unavailable"}
+    await engine.dispose()
+    return result
+
+
+async def _convert_embeddings(conn, log) -> dict[str, object]:
+    from sqlalchemy import text
+
+    try:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    except Exception as exc:  # noqa: BLE001 — missing library or privilege; keep the current column
+        raise _PgvectorUnavailable(str(exc)) from exc
+
+    present = await conn.scalar(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'content_embeddings'"
+        )
+    )
+    if not present:
+        return {"status": "extension_ready"}
+    current_type = await conn.scalar(
+        text(
+            "SELECT udt_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'content_embeddings' "
+            "AND column_name = 'embedding'"
+        )
+    )
+    if current_type == "vector":
+        await _ensure_embedding_index(conn)
+        return {"status": "already_vector"}
+
+    before_counts = await _public_table_counts(conn)
+    stored = (
+        await conn.execute(text("SELECT id::text, embedding::text FROM content_embeddings ORDER BY id"))
+    ).all()
+    refused = [row[0] for row in stored if not embedding_fits_vector(row[1])]
+    if refused:
+        log.error("pgvector_migration_refused", rows=len(refused))
+        return {"status": "refused", "rows": len(refused)}
+
+    await conn.execute(
+        text(
+            "ALTER TABLE content_embeddings "
+            "ALTER COLUMN embedding TYPE vector(768) "
+            "USING CASE WHEN embedding IS NULL THEN NULL ELSE embedding::text::vector END"
+        )
+    )
+    await _ensure_embedding_index(conn)
+    after = (
+        await conn.execute(text("SELECT id::text, embedding::text FROM content_embeddings ORDER BY id"))
+    ).all()
+    if [row[0] for row in stored] != [row[0] for row in after]:
+        raise RuntimeError("content_embeddings rows changed during the vector conversion")
+    for original, converted in zip(stored, after):
+        if not embeddings_match(original[1], converted[1]):
+            raise RuntimeError("an embedding value changed beyond float32 precision")
+    after_counts = await _public_table_counts(conn)
+    if before_counts != after_counts:
+        raise RuntimeError("a table row count changed during the vector conversion")
+    log.info(
+        "pgvector_embeddings_converted",
+        embeddings=len(stored),
+        tables=len(after_counts),
+    )
+    return {"status": "migrated", "embeddings": len(stored), "tables": len(after_counts)}
+
+
+async def _ensure_embedding_index(conn) -> None:
+    from sqlalchemy import text
+
+    nested = await conn.begin_nested()
+    try:
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS content_embeddings_embedding_hnsw "
+                "ON content_embeddings USING hnsw (embedding vector_cosine_ops)"
+            )
+        )
+        await nested.commit()
+    except Exception:  # noqa: BLE001 — a zero-norm embedding cannot use cosine
+        await nested.rollback()
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS content_embeddings_embedding_hnsw "
+                "ON content_embeddings USING hnsw (embedding vector_l2_ops)"
+            )
+        )

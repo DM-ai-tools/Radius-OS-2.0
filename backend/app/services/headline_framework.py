@@ -76,6 +76,55 @@ def traffic_temperature(intent: str | None = None, *, explicit: str | None = Non
     return _TRAFFIC_BY_INTENT.get((intent or "").lower(), "warm")
 
 
+def mapped_page_title(
+    keyword: str,
+    *,
+    page_type: str | None = None,
+    content_type: str | None = None,
+    intent: str | None = None,
+) -> str:
+    """Title for one page, from the headline framework.
+
+    The keyword stays in the title. A question keeps the question and promises
+    a clear guide. A how-to, comparison, or list keeps that shape. A commercial
+    page promises a clear path. A guide or article promises a practical guide.
+    Nothing here adds a statistic, a named authority, social proof, or an outcome
+    the caller did not supply. Blog title tags stay within 60 characters.
+    """
+    raw = (keyword or "").strip()
+    if not raw:
+        return "Untitled"
+    phrase = phrase_title(raw)
+    low = phrase.lower()
+    if low.startswith("what is "):
+        title = f"{phrase}? A Clear Guide"
+    elif low.startswith("how to ") or " vs " in low or low.startswith(("best ", "top ")):
+        title = phrase
+    else:
+        kind = asset_class(page_type=page_type, content_type=content_type, intent=intent)
+        if kind == "landing":
+            title = f"A Clear Path To {phrase}"
+        elif kind == "comparison":
+            title = f"{phrase}: Which Fits Your Situation?"
+        else:
+            title = f"The Practical Guide to {phrase}"
+    return _cap(title, 60)
+
+
+def title_for_map_row(row: dict[str, Any]) -> str:
+    """Framework title for a URL-map row, chosen from its page type."""
+    keyword = str(row.get("primary_keyword") or row.get("keyword") or row.get("l1_category") or "").strip()
+    label = str(row.get("page_type") or "").strip().lower()
+    job = str(row.get("page_job") or "")
+    if label == "blog" or (job == "draft_guide" and label == "blog"):
+        kind, intent = "blog", "informational"
+    elif job == "draft_guide" or label == "guide":
+        kind, intent = "guide", "informational"
+    else:
+        kind, intent = "service", "commercial"
+    return mapped_page_title(keyword, page_type=kind, intent=intent)
+
+
 def _cap(title: str, limit: int = 70) -> str:
     title = re.sub(r"\s+", " ", (title or "").strip())
     if len(title) <= limit:

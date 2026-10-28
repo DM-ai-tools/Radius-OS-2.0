@@ -739,8 +739,13 @@ async def validate_keywords(
     # offer is dropped before any ontology or LLM judgement is spent on it.
     rows, scope_dropped = partition_scope_rejects(rows, prioritization)
     audit["scope_dropped"] = len(scope_dropped)
+    # Industry-layer rows are judged against every service and the industry itself.
     rows, contract_dropped = partition_service_rejects(
-        rows, cdd_keywords=cdd_keywords, geography=geography
+        rows,
+        cdd_keywords=cdd_keywords,
+        geography=geography,
+        services=services,
+        industry=industry,
     )
     hard_dropped = [*scope_dropped, *contract_dropped]
     audit["hard_rule_dropped"] = len(hard_dropped)

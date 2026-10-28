@@ -1,6 +1,7 @@
 /** Structured phase reports for Team shared memory / playground. */
 
 import type { ReactNode } from "react";
+import { titleForMapRow } from "../lib/headline";
 import PlaygroundBlocks from "./PlaygroundBlocks";
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -182,8 +183,6 @@ function SearchDemandReport({ data }: { data: Record<string, unknown> }) {
   const evergreen = rows(data.strong_evergreen);
   const trends = rows(data.trend_plays);
   const avoid = rows(data.avoid);
-  const clusterReport = isObj(data.cluster_report) ? data.cluster_report : null;
-  const clusters = rows(clusterReport?.clusters);
   const funnel = isObj(data.funnel_balance) ? data.funnel_balance : null;
   const funnelCounts = isObj(funnel?.counts) ? (funnel!.counts as Record<string, number>) : null;
 
@@ -230,35 +229,6 @@ function SearchDemandReport({ data }: { data: Record<string, unknown> }) {
                 .join(" · ")}
             </p>
           ) : null}
-        </Section>
-      ) : null}
-      {clusters.length ? (
-        <Section title="Clusters">
-          {clusters.slice(0, 8).map((c, i) => {
-            const kws = rows(c.keywords);
-            return (
-              <div key={`${String(c.name)}-${i}`} className="pg-report-cluster">
-                <strong>
-                  {String(c.name || c.primary_keyword || `Cluster ${i + 1}`)}
-                </strong>
-                <div className="pg-report-meta">
-                  Intent: {String(c.intent || "—")} ·{" "}
-                  {String(c.recommended_content || c.content_type || "—")}
-                  {c.est_traffic != null || c.total_volume != null
-                    ? ` · vol ${fmtVol(c.est_traffic ?? c.total_volume)}`
-                    : ""}
-                  {` · ${kws.length} keywords`}
-                </div>
-                <p className="pg-report-small" style={{ margin: "4px 0 0" }}>
-                  {kws
-                    .slice(0, 6)
-                    .map((k) => String(k.keyword || ""))
-                    .filter(Boolean)
-                    .join(" · ") || "—"}
-                </p>
-              </div>
-            );
-          })}
         </Section>
       ) : null}
     </div>
@@ -598,7 +568,6 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
     data.navigation && typeof data.navigation === "object"
       ? (data.navigation as Record<string, unknown>)
       : {};
-  const primaryNav = rows(nav.primary_nav);
   const remediation = rows(nav.depth_remediation);
   const types = rows(data.page_type_model);
   const redirects = rows(data.redirect_map);
@@ -626,7 +595,7 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
             : "",
       )
       .filter(Boolean);
-    return words.slice(0, 10).join(", ");
+    return words.join(", ");
   };
 
   return (
@@ -653,6 +622,7 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
               <thead>
                 <tr>
                   <th>Primary Keyword</th>
+                  <th>Title</th>
                   <th>Secondary Keywords</th>
                   <th>URL</th>
                 </tr>
@@ -663,6 +633,7 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
                     <td>
                       <strong>{String(row.primary_keyword || row.keyword || "—")}</strong>
                     </td>
+                    <td>{titleForMapRow(row)}</td>
                     <td className="pg-report-small">
                       {secondaryText(row.secondary_keywords || row.secondary_keywords_sheet) || "—"}
                     </td>
@@ -755,6 +726,7 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
                   <th>Path / URL</th>
                   <th>Depth</th>
                   <th>Primary Keyword</th>
+                  <th>Title</th>
                   <th>Secondary Keywords</th>
                 </tr>
               </thead>
@@ -767,6 +739,7 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
                     </td>
                     <td>{fmtNum(n.depth)}</td>
                     <td>{String(n.primary_keyword || n.keyword || "—")}</td>
+                    <td>{String(n.headline || titleForMapRow(n))}</td>
                     <td className="pg-report-small">{secondaryText(n.secondary_keywords) || "—"}</td>
                   </tr>
                 ))}
@@ -776,58 +749,28 @@ function ArchitectureReport({ data }: { data: Record<string, unknown> }) {
         </Section>
       ) : null}
 
-      {primaryNav.length || remediation.length ? (
-        <Section title="Navigation & depth remediation">
-          {primaryNav.length ? (
-            <div className="pg-report-table-wrap" style={{ marginBottom: 12 }}>
-              <table className="pg-report-table">
-                <thead>
-                  <tr>
-                    <th>Label</th>
-                    <th>URL</th>
-                    <th>Depth</th>
+      {remediation.length ? (
+        <Section title="Depth remediation">
+          <div className="pg-report-table-wrap">
+            <table className="pg-report-table">
+              <thead>
+                <tr>
+                  <th>URL</th>
+                  <th>Depth</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {remediation.slice(0, 12).map((r, i) => (
+                  <tr key={i}>
+                    <td className="pg-report-small">{String(r.url || "—")}</td>
+                    <td>{fmtNum(r.current_depth)}</td>
+                    <td className="pg-report-small">{String(r.action || "—")}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {primaryNav.map((n, i) => (
-                    <tr key={i}>
-                      <td>
-                        <strong>{String(n.label || "—")}</strong>
-                      </td>
-                      <td className="pg-report-small">{String(n.url || "—")}</td>
-                      <td>{fmtNum(n.depth)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-          {remediation.length ? (
-            <div className="pg-report-table-wrap">
-              <table className="pg-report-table">
-                <thead>
-                  <tr>
-                    <th>URL</th>
-                    <th>Depth</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {remediation.slice(0, 12).map((r, i) => (
-                    <tr key={i}>
-                      <td className="pg-report-small">{String(r.url || "—")}</td>
-                      <td>{fmtNum(r.current_depth)}</td>
-                      <td className="pg-report-small">{String(r.action || "—")}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </Section>
-      ) : data.navigation ? (
-        <Section title="Navigation">
-          <PlaygroundBlocks value={data.navigation} />
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Section>
       ) : null}
 

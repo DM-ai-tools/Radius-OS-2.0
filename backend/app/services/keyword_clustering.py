@@ -138,7 +138,7 @@ def _det_name(key: str, pkw: str, intent: str) -> str:
 
 def _member_row(r: dict[str, Any]) -> dict[str, Any]:
     """A cluster member: the row's facts. Roles and labels are added by the decider."""
-    return {
+    member = {
         "keyword": r.get("keyword"),
         "volume": r.get("volume"),
         "difficulty": r.get("difficulty"),
@@ -154,6 +154,11 @@ def _member_row(r: dict[str, Any]) -> dict[str, Any]:
         "volume_estimated": r.get("volume_estimated"),
         "close_variants": r.get("close_variants") or None,
     }
+    # Which seed layer found the keyword ("industry" for the home page's terms). Phase 6
+    # reads it to tell industry clusters from service clusters; rows without a tag stay as they were.
+    if r.get("seed_origin"):
+        member["seed_origin"] = r["seed_origin"]
+    return member
 
 
 def _norm(s: str) -> str:
@@ -715,6 +720,62 @@ _GENERIC_BRAND_STOP = {
 }
 
 
+def clusters_one_search_each(
+    clusters: list[dict[str, Any]],
+    ctx: RoleContext | None = None,
+) -> list[dict[str, Any]]:
+    """Split a cluster whose members are not one search.
+
+    A city query stays with that city. The national wording of the same
+    service becomes its own cluster instead of a secondary of the city.
+    """
+    from app.services.keyword_cluster_roles import finalize_cluster
+    from app.services.topic_naming import phrase_title
+
+    ctx = ctx or RoleContext()
+    split: list[dict[str, Any]] = []
+    for cluster in clusters:
+        if not isinstance(cluster, dict):
+            continue
+        keywords = [row for row in (cluster.get("keywords") or []) if isinstance(row, dict) and row.get("keyword")]
+        pieces = _primary_with_secondaries(keywords, ctx) if len(keywords) > 1 else [keywords]
+        original = _norm(str(cluster.get("primary_keyword") or ""))
+        for piece in pieces:
+            if not piece:
+                continue
+            finalized = finalize_cluster({"keywords": [_member_row(row) for row in piece]}, ctx)
+            primary = str(finalized.get("primary_keyword") or "")
+            if _norm(primary) == original or len(pieces) == 1:
+                kept = dict(cluster)
+                kept["keywords"] = finalized.get("keywords") or piece
+                kept["primary_keyword"] = primary or cluster.get("primary_keyword")
+                kept["keyword_count"] = len(kept["keywords"])
+                kept["keywords_shown"] = len(kept["keywords"])
+                kept["role_counts"] = finalized.get("role_counts")
+                split.append(kept)
+                continue
+            funnel = finalized.get("funnel") or cluster.get("funnel")
+            intent = finalized.get("intent") or cluster.get("intent")
+            name = phrase_title(primary)
+            focus = " · ".join(part for part in (funnel, intent) if part)
+            if focus:
+                name = f"{name} ({focus})"
+            split.append(
+                {
+                    "name": name,
+                    "primary_keyword": primary,
+                    "funnel": funnel,
+                    "intent": intent,
+                    "keywords": finalized.get("keywords") or piece,
+                    "keyword_count": len(finalized.get("keywords") or piece),
+                    "keywords_shown": len(finalized.get("keywords") or piece),
+                    "role_counts": finalized.get("role_counts"),
+                    "primary_selection": finalized.get("primary_selection"),
+                }
+            )
+    return split
+
+
 def _primary_with_secondaries(items: list[dict[str, Any]], ctx: RoleContext) -> list[list[dict[str, Any]]]:
     """Split a candidate pool into clusters of one primary and its secondaries.
 
@@ -1182,6 +1243,11 @@ def _provenance(report: dict[str, Any]) -> dict[str, Any]:
             "Clusters were grouped by deterministic wording rules"
             + (f"; model clustering did not run ({model.get('reason')})." if model.get("reason") else ".")
         )
+        if model.get("deadline_fallback"):
+            inferred.append(
+                "This run fell back to the rules because the phase ran out of time; a run with "
+                "time left would have used the model, so cluster membership can differ between runs."
+            )
     if members:
         verified.append(
             f"{measured} of {len(members)} clustered keywords shown carry a measured DataForSEO volume; "
@@ -1208,6 +1274,8 @@ def _provenance(report: dict[str, Any]) -> dict[str, Any]:
         "model_clustering_ran": bool(model.get("ran")),
         "model_clustering_model": model.get("model"),
         "model_clustering_reason": model.get("reason"),
+        "engine_requested": model.get("requested"),
+        "deadline_fallback": bool(model.get("deadline_fallback")),
         "naming_ran": bool(naming.get("ran")),
         "naming_model": naming.get("model"),
         "naming_reason": naming.get("reason"),
@@ -1241,6 +1309,13 @@ def _complete_report(
     """Final shape for every exit path: roles, page pattern, pillars, roadmap,
     keyword accounting, provenance, validation."""
     report = _finalize_roles(report, ctx)
+    report["clustering"] = {
+        "ran": True,
+        "engine": "model" if model_clustering.get("ran") else "rules",
+        "requested_engine": model_clustering.get("requested"),
+        "deadline_fallback": bool(model_clustering.get("deadline_fallback")),
+        "reason": None if model_clustering.get("ran") else model_clustering.get("reason"),
+    }
     clusters = sorted(
         (c for c in report.get("clusters") or [] if isinstance(c, dict)),
         key=lambda c: c.get("best_score") or 0,
@@ -1411,12 +1486,24 @@ async def run_keyword_clustering(
     brand_name: str | None = None,
     domain: str | None = None,
     products: list[str] | None = None,
-    use_llm: bool = True,
+    within_deadline: bool = True,
     relevance_context: Any | None = None,
     location_code: int | None = None,
     language_code: str | None = None,
     site_strength: float | None = None,
 ) -> dict[str, Any]:
+    """Clean the keywords, then cluster them with the engine the settings choose.
+
+    ``keyword_clustering_enabled`` switches clustering off entirely: the cleaned
+    keywords are still audited, the report records that clustering did not run and
+    why, and it carries no ``clusters`` key. ``keyword_clustering_use_model`` picks
+    the engine (model or rules). ``within_deadline`` is only a guard: when the phase
+    is out of time the rules run instead of the model, and the report says so
+    (``clustering.deadline_fallback``) rather than silently differing between runs.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
     pipeline_result = run_keyword_pipeline(
         [r for r in rows if isinstance(r, dict) and r.get("keyword")],
         relevance_context=relevance_context,
@@ -1424,6 +1511,25 @@ async def run_keyword_clustering(
         source_label="clustering",
     )
     cleaned = pipeline_result["keywords"]
+    if not getattr(settings, "keyword_clustering_enabled", True):
+        excluded_all = pipeline_result["excluded"]
+        return {
+            "clustering": {
+                "ran": False,
+                "engine": None,
+                "requested_engine": None,
+                "deadline_fallback": False,
+                "reason": "turned off in settings (KEYWORD_CLUSTERING_ENABLED=false)",
+            },
+            "total_keywords": len(cleaned),
+            "clusters_created": 0,
+            "keyword_pipeline": pipeline_result["pipeline"],
+            "pipeline_excluded": excluded_all[:24],
+            "pipeline_excluded_count": len(excluded_all),
+            "keyword_cleaning": pipeline_result.get("relevance_audit") or {},
+            "source": "clustering_disabled",
+        }
+    requested = "model" if getattr(settings, "keyword_clustering_use_model", False) else "rules"
     role_context = RoleContext.build(
         cleaned,
         brand_name=brand_name,
@@ -1446,15 +1552,15 @@ async def run_keyword_clustering(
     }
     report["keyword_cleaning"] = pipeline_result.get("relevance_audit") or {}
 
-    from app.config import get_settings
-
+    engine = {"requested": requested, "deadline_fallback": False}
     skip_reason = None
-    if not use_llm:
-        skip_reason = "not requested for this run, to stay within the Phase 5 time budget"
+    if requested == "rules":
+        skip_reason = "the rules were chosen in settings (KEYWORD_CLUSTERING_USE_MODEL=false)"
+    elif not within_deadline:
+        skip_reason = "the Phase 5 time budget ran out before clustering, so the rules ran instead"
+        engine["deadline_fallback"] = True
     elif len(cleaned) < 3:
         skip_reason = "fewer than 3 keywords"
-    elif not get_settings().keyword_cluster_use_llm:
-        skip_reason = "turned off in settings"
     if skip_reason:
         return await _serp_name_and_attach(
             report,
@@ -1462,7 +1568,7 @@ async def run_keyword_clustering(
             location_code=location_code,
             language_code=language_code,
             role_context=role_context,
-            model_clustering={"ran": False, "model": None, "reason": skip_reason},
+            model_clustering={"ran": False, "model": None, "reason": skip_reason, **engine},
         )
 
     from app.services.keyword_llm_clustering import llm_cluster_keywords
@@ -1496,6 +1602,7 @@ async def run_keyword_clustering(
                     "mock_or_no_key": "no model key configured",
                     "empty": "the model returned no clusters",
                 }.get(why, why),
+                **engine,
             },
         )
 
@@ -1548,6 +1655,7 @@ async def run_keyword_clustering(
             "ran": True,
             "model": (llm_result.get("llm_cluster_audit") or {}).get("model"),
             "reason": None,
+            **engine,
         },
         naming=naming,
     )

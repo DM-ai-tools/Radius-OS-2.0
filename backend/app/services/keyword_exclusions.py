@@ -465,6 +465,13 @@ TOOL_SEEKER_TERMS: frozenset[str] = frozenset(
         "speed test",
         "results test",
         "seo test",
+        # Free rank / deliverability checkers: "google rank test", "google local ranking check".
+        "ranking test",
+        "rank test",
+        "ranking check",
+        "rank check",
+        "deliverability test",
+        "test my",
         "web test",
         "website test",
         "site test",

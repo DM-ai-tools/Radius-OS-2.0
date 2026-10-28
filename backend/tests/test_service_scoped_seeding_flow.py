@@ -109,7 +109,10 @@ def _recorder():
     calls: list[dict] = []
 
     async def record(seeds, *, seed_targets=None, **kw):
-        calls.append({"seeds": list(seeds), "targets": dict(seed_targets or {}), "kw": kw})
+        # The industry layer's fetch (seed_origin="industry") is not a service fetch; these
+        # tests count service fetches. tests/test_industry_keywords.py covers that fetch.
+        if not any(t.get("seed_origin") == "industry" for t in (seed_targets or {}).values()):
+            calls.append({"seeds": list(seeds), "targets": dict(seed_targets or {}), "kw": kw})
         raise _Stop()
 
     return calls, record
@@ -129,10 +132,12 @@ async def test_search_demand_fetches_keywords_once_per_service_from_that_service
     assert not (seo_seeds & meta_seeds), "no seed is shared between the two services here"
     # each fetch holds only its own service's material
     assert "seo melbourne" not in seo_seeds
-    assert "local seo" not in seo_seeds
     assert "meta ads agency" not in meta_seeds
     assert "facebook ads cost" not in meta_seeds
-    assert "instagram ads" not in meta_seeds
+    # each offered sub-service is a seed of its own, under its own parent (2026-10-27)
+    assert seo["targets"]["local seo"]["target_type"] == "sub_service"
+    assert seo["targets"]["local seo"]["parent_segment"] == "SEO"
+    assert meta["targets"]["instagram ads"]["parent_segment"] == "Meta Ads"
     assert not ({"meta ads", "instagram ads", "meta ads agency", "facebook ads cost"} & seo_seeds)
     assert not ({"seo", "seo melbourne"} & meta_seeds)
     # sub-services the operator did not offer are never seeded
@@ -187,10 +192,12 @@ async def test_each_service_is_also_seeded_by_its_own_synonyms():
     assert not {"facebook advertising", "meta advertising"} & {s.lower() for s in seo["seeds"]}
     assert not {"search engine optimization", "organic search"} & {s.lower() for s in meta["seeds"]}
     assert "seo melbourne" not in {s.lower() for s in seo["seeds"]}
-    assert "local seo" not in {s.lower() for s in seo["seeds"]}
     assert "meta ads agency" not in {s.lower() for s in meta["seeds"]}
     assert "facebook ads cost" not in {s.lower() for s in meta["seeds"]}
-    assert "instagram ads" not in {s.lower() for s in meta["seeds"]}
+    # sub-services follow the synonyms as their own seeds, never as synonyms
+    assert seo["seeds"][3:] == ["Local SEO"]
+    assert meta["seeds"][3:] == ["Instagram Ads"]
+    assert seo["targets"]["local seo"].get("seed_origin") == "subservice_catalog"
 
 
 async def test_when_the_model_fails_each_service_is_seeded_without_synonyms():
@@ -236,38 +243,49 @@ def _llm_with_subservices(answers: dict[str, list[str]]):
     return asked, questions, fake
 
 
-async def test_sub_services_are_not_fetched_as_seeds():
+async def test_sub_services_are_fetched_as_their_own_seeds_with_their_parent():
     _, no_synonyms = _llm_with_synonyms({})
+    asked, _questions, fake_subservices = _llm_with_subservices(
+        {
+            "SEO": ["technical seo", "seo melbourne", "link building"],
+            "Meta Ads": ["facebook retargeting", "tiktok marketing"],
+        }
+    )
     calls, record = _recorder()
-    with patch("app.services.seed_synonyms.generator.keyword_analysis_chat", no_synonyms):
+    with (
+        patch("app.services.seed_synonyms.generator.keyword_analysis_chat", no_synonyms),
+        patch("app.services.subservice_expansion.generator.synthesize_json", fake_subservices),
+        patch("app.services.subservice_expansion.generator._provider_ready", return_value=True),
+    ):
         await _drive(_profile(), record)
 
+    assert sorted(asked) == ["Meta Ads", "SEO"]
     by_service = {next(iter(c["targets"].values()))["service"]: c for c in calls}
-    seo_seeds = {s.lower() for s in by_service["SEO"]["seeds"]}
-    meta_seeds = {s.lower() for s in by_service["Meta Ads"]["seeds"]}
-    assert "seo" in seo_seeds and "seo melbourne" not in seo_seeds
-    assert "local seo" not in seo_seeds and "link building" not in seo_seeds
-    assert meta_seeds == {"meta ads"}
-    assert "instagram ads" not in meta_seeds and "tiktok ads" not in meta_seeds
-    for call in (by_service["SEO"], by_service["Meta Ads"]):
-        assert not any(t.get("target_type") == "sub_service" for t in call["targets"].values())
+    seo, meta = by_service["SEO"], by_service["Meta Ads"]
+    # root, then the catalog's offered sub-service, then the model's topics
+    assert seo["seeds"] == ["SEO", "Local SEO", "technical seo"]
+    assert meta["seeds"] == ["Meta Ads", "Instagram Ads", "facebook retargeting"]
+    for call, owner in ((seo, "SEO"), (meta, "Meta Ads")):
+        subs = [t for t in call["targets"].values() if t.get("target_type") == "sub_service"]
+        assert subs and all(t["parent_segment"] == owner and t["service"] == owner for t in subs)
+        own = [s for s in call["seeds"] if call["targets"][s.lower()].get("target_type") != "sub_service"]
+        assert own == [owner], "the parent's own seeds are unchanged"
+    # excluded by the operator, or a location qualifier: never seeded
+    lowered = {s.lower() for s in seo["seeds"] + meta["seeds"]}
+    assert not {"link building", "tiktok ads", "tiktok marketing", "seo melbourne"} & lowered
 
 
-async def test_when_the_expansion_model_fails_the_seeds_are_unchanged():
+async def test_when_the_expansion_model_fails_only_catalog_sub_services_are_seeded():
     _, no_synonyms = _llm_with_synonyms({})
-    baseline_calls, baseline = _recorder()
-    with patch("app.services.seed_synonyms.generator.keyword_analysis_chat", no_synonyms):
-        await _drive(_profile(), baseline)
-
     calls, record = _recorder()
     failing = AsyncMock(side_effect=RuntimeError("anthropic unavailable"))
     with (
         patch("app.services.subservice_expansion.generator.synthesize_json", failing),
+        patch("app.services.subservice_expansion.generator._provider_ready", return_value=True),
         patch("app.services.seed_synonyms.generator.keyword_analysis_chat", no_synonyms),
     ):
         await _drive(_profile(), record)
 
-    assert failing.await_count == 0, "sub-services are not asked for as seeds"
+    assert failing.await_count == 2, "asked once per service, then carried on"
     seeds = {next(iter(c["targets"].values()))["service"]: c["seeds"] for c in calls}
-    expected = {next(iter(c["targets"].values()))["service"]: c["seeds"] for c in baseline_calls}
-    assert seeds == expected
+    assert seeds == {"SEO": ["SEO", "Local SEO"], "Meta Ads": ["Meta Ads", "Instagram Ads"]}

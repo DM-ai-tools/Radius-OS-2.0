@@ -1485,15 +1485,27 @@ def build_roadmap(
     # URL map from site architecture — attach crawled URLs to clusters before join.
     from app.services.url_mapping import lookup_url_map_entry
 
-    for entry in architecture.get("final_url_map") or []:
-        if not isinstance(entry, dict) or entry.get("action") == "CREATE":
+    from app.services.content_strategy import is_page_plan, url_map_entries
+
+    map_rows = url_map_entries(architecture)
+    page_plan = is_page_plan(map_rows)
+    for entry in map_rows:
+        if not isinstance(entry, dict):
             continue
         # Supporting / out-of-scope / held-for-review clusters deliberately own
         # no URL of their own — they must not seed a planning row for a page
         # that will never exist.
         if entry.get("dedicated_url") is False:
             continue
-        mapped = url_n(str(entry.get("selected_url") or ""))
+        action = str(entry.get("action") or "").upper()
+        if action == "CREATE" and not page_plan:
+            continue
+        if action == "CREATE":
+            mapped = url_n(
+                str(entry.get("proposed_url") or entry.get("selected_url") or entry.get("create_url") or "")
+            )
+        else:
+            mapped = url_n(str(entry.get("current_url") or entry.get("selected_url") or ""))
         if not mapped or mapped == "/":
             continue
         if mapped not in arch_by:
@@ -1622,7 +1634,7 @@ def build_roadmap(
             map_action = str(row.get("url_map_action") or "").upper()
             if not map_action:
                 map_entry = lookup_url_map_entry(
-                    {"final_url_map": architecture.get("final_url_map") or []},
+                    {"final_url_map": url_map_entries(architecture)},
                     cluster=str(row.get("cluster") or ""),
                     keyword=str(row.get("keyword") or row.get("primary_keyword") or ""),
                 )

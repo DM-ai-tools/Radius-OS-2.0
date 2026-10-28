@@ -124,12 +124,16 @@ def test_partition_scope_rejects_drops_only_scoped_hits():
     rows = [
         {"keyword": "tiktok ads melbourne", "target": "meta ads"},
         {"keyword": "meta ads melbourne", "target": "meta ads"},
-        {"keyword": "tiktok marketing", "target": "seo"},  # no scope for seo → untouched
+        {"keyword": "tiktok marketing", "target": "seo"},  # names TikTok even though SEO has no scope
         {"keyword": "linkedin ads cost", "target": "Social Media Marketing"},
     ]
     kept, dropped = partition_scope_rejects(rows, _prio())
-    assert [r["keyword"] for r in kept] == ["meta ads melbourne", "tiktok marketing"]
-    assert [r["keyword"] for r in dropped] == ["tiktok ads melbourne", "linkedin ads cost"]
+    assert [r["keyword"] for r in kept] == ["meta ads melbourne"]
+    assert [r["keyword"] for r in dropped] == [
+        "tiktok ads melbourne",
+        "tiktok marketing",
+        "linkedin ads cost",
+    ]
     assert dropped[0]["relevance_drop_reason"] == REJECT_REASON
     assert dropped[0]["classifier_version"] == CLASSIFIER_VERSION
     assert dropped[0]["excluded_sub_service"] == "TikTok Ads"

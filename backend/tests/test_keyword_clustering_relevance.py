@@ -27,7 +27,7 @@ def _cluster_settings():
         return_value=type(
             "S",
             (),
-            {"keyword_cluster_use_llm": True},
+            {"keyword_clustering_use_model": True},
         )(),
     )
 
@@ -71,7 +71,7 @@ async def test_llm_invented_irrelevant_keyword_is_dropped_not_just_unmetriced():
         ),
     ):
         report = await run_keyword_clustering(
-            SEEDED_ROWS, relevance_context=_ctx(), use_llm=True
+            SEEDED_ROWS, relevance_context=_ctx(), within_deadline=True
         )
 
     assert report["clusters"], "cluster should survive with its grounded keyword"
@@ -114,7 +114,7 @@ async def test_llm_invented_relevant_paraphrase_is_kept_with_null_metrics():
         ),
     ):
         report = await run_keyword_clustering(
-            SEEDED_ROWS, relevance_context=_ctx(), use_llm=True
+            SEEDED_ROWS, relevance_context=_ctx(), within_deadline=True
         )
 
     invented = next(
@@ -158,7 +158,7 @@ async def test_cluster_dropped_entirely_when_every_keyword_is_irrelevant():
         ),
     ):
         report = await run_keyword_clustering(
-            SEEDED_ROWS, relevance_context=_ctx(), use_llm=True
+            SEEDED_ROWS, relevance_context=_ctx(), within_deadline=True
         )
 
     names = [c["name"] for c in report["clusters"]]
@@ -192,7 +192,7 @@ async def test_without_relevance_context_ungrounded_keywords_keep_prior_behavior
             )
         ),
     ):
-        report = await run_keyword_clustering(SEEDED_ROWS, relevance_context=None, use_llm=True)
+        report = await run_keyword_clustering(SEEDED_ROWS, relevance_context=None, within_deadline=True)
 
     kws = {k["keyword"] for cluster in report["clusters"] for k in cluster["keywords"]}
     assert "vegan recipes for beginners" in kws

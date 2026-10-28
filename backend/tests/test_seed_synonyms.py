@@ -34,6 +34,7 @@ from app.services.service_seeding import (
     extra_seeds_last,
     generate_service_seeds,
     plan_service_seeds,
+    related_seed_pairs,
     round_robin_seeds,
     run_service_scoped_seeding,
 )
@@ -390,7 +391,12 @@ def test_synonyms_are_added_right_after_the_service_root_and_tagged():
         prioritization=_prio("seo"),
         synonyms=["search engine optimization", "organic search"],
     )
-    assert plan.seeds == ["SEO", "search engine optimization", "organic search"]
+    # Root, its synonyms, then the catalog's offered sub-services as seeds of their
+    # own (2026-10-27). The sub-service page in the pool is still not a seed.
+    assert plan.seeds == [
+        "SEO", "search engine optimization", "organic search", "Local SEO", "Technical SEO",
+    ]
+    assert "seo audit" not in plan.seed_targets
     for synonym in ("search engine optimization", "organic search"):
         meta = plan.seed_targets[synonym]
         assert meta["seed_origin"] == SYNONYM_ORIGIN
@@ -430,7 +436,10 @@ def test_duplicate_synonyms_are_skipped():
     }
     lowered = [s.lower() for s in plan.seeds]
     assert len(lowered) == len(set(lowered))
-    assert "local seo" not in plan.seed_targets
+    # "local seo" is not a synonym of SEO; it is seeded as its own sub-service.
+    assert plan.seed_targets["local seo"]["target_type"] == "sub_service"
+    assert plan.seed_targets["local seo"]["parent_segment"] == "SEO"
+    assert "local seo" not in plan.synonyms_added
     assert "seo melbourne" not in plan.seed_targets
 
 
@@ -542,8 +551,11 @@ def test_related_lookups_use_a_services_own_seeds_before_its_synonyms():
         service_synonyms={"SEO": ["search engine optimization"]},
     )
     runs = [{"service": "SEO", "seeds": plans[0].seeds}]
-    picked = [seed for _service, seed in round_robin_seeds(extra_seeds_last(runs, plans), 3)]
+    picked = [seed for _service, seed in round_robin_seeds(extra_seeds_last(runs, plans), 2)]
     assert picked == ["SEO", "search engine optimization"]
+    # The related step raises the cap by the sub-service seeds instead of spending it.
+    pairs = [seed for _service, seed in related_seed_pairs(runs, plans, 2)]
+    assert pairs == ["SEO", "search engine optimization", "Local SEO", "Technical SEO"]
 
 
 # ---------------------------------------------------------------- relevance

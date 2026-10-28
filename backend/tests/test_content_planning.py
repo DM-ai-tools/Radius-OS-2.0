@@ -25,6 +25,160 @@ def _audit(*rows: dict) -> dict:
     return {"dispositions": list(rows)}
 
 
+def test_url_map_page_plan_keeps_the_decided_url():
+    from app.services.content_strategy import work_rows_from_url_map
+
+    rows = work_rows_from_url_map(
+        [
+            {
+                "l1_category": "SEO",
+                "page_job": "optimize_service_page",
+                "primary_keyword": "search engine optimisation",
+                "secondary_keywords": ["seo"],
+                "current_url": "/seo",
+                "action": "OPTIMIZE_EXISTING",
+                "search_volume": 8100,
+            },
+            {
+                "l1_category": "SEO",
+                "page_job": "draft_guide",
+                "primary_keyword": "what is seo",
+                "page_type": "Guide",
+                "proposed_url": "/what-is-seo",
+                "action": "CREATE",
+                "search_volume": 1900,
+            },
+        ],
+        "clicktrends.com.au",
+    )
+    by_keyword = {row["primary_keyword"]: row for row in rows}
+    assert by_keyword["search engine optimisation"]["action"] == "optimize"
+    assert by_keyword["search engine optimisation"]["url"] == "/seo"
+    assert by_keyword["search engine optimisation"]["secondary_keywords"] == ["seo"]
+    assert by_keyword["what is seo"]["action"] == "create"
+    assert by_keyword["what is seo"]["url"] == "/what-is-seo"
+    assert by_keyword["search engine optimisation"]["title"] == "A Clear Path To Search Engine Optimisation"
+    assert by_keyword["what is seo"]["title"] == "What Is SEO? A Clear Guide"
+
+
+def test_page_plan_tree_uses_api_page_types():
+    from app.schemas.client import SiteArchitectureSummary
+    from app.services.content_strategy import attach_page_plan
+
+    attached = attach_page_plan(
+        {
+            "url_map_report": {
+                "final_url_map": [
+                    {
+                        "page_job": "optimize_service_page",
+                        "page_type": "Hub Page",
+                        "primary_keyword": "search engine optimisation",
+                        "current_url": "/seo",
+                        "action": "OPTIMIZE_EXISTING",
+                    },
+                    {
+                        "page_job": "draft_guide",
+                        "page_type": "Guide",
+                        "primary_keyword": "what is seo",
+                        "proposed_url": "/what-is-seo",
+                        "action": "CREATE",
+                    },
+                    {
+                        "page_job": "related_service_page",
+                        "page_type": "Collection",
+                        "primary_keyword": "instagram marketing services",
+                        "proposed_url": "/social-media-marketing/instagram-marketing-services",
+                        "action": "CREATE",
+                    },
+                ]
+            }
+        }
+    )
+    SiteArchitectureSummary.model_validate(attached)
+    kinds = {node["url"]: node["page_type"] for node in attached["target_url_tree"]}
+    assert kinds["/seo"] == "hub"
+    assert kinds["/what-is-seo"] == "guide"
+    assert kinds["/social-media-marketing/instagram-marketing-services"] == "spoke"
+
+
+def test_url_tree_is_the_url_map_nested_under_each_hub():
+    from app.schemas.client import SiteArchitectureSummary
+    from app.services.content_strategy import attach_page_plan
+
+    attached = attach_page_plan(
+        {
+            "target_url_tree": [
+                {"url": "/seo/ai-seo", "path": "/seo/ai-seo", "page_type": "subservice", "title": "AI SEO", "depth": 2, "parent": "/seo"},
+                {"url": "/search-engine-optimisation-company", "path": "/search-engine-optimisation-company", "page_type": "hub", "title": "seo company", "depth": 1, "parent": "/"},
+            ],
+            "url_map_report": {
+                "final_url_map": [
+                    {
+                        "page_type": "Hub Page",
+                        "l1_category": "SEO",
+                        "primary_keyword": "seo",
+                        "current_url": "/seo",
+                    },
+                    {
+                        "page_type": "Guide",
+                        "l1_category": "SEO",
+                        "primary_keyword": "what is seo",
+                        "proposed_url": "/what-is-seo",
+                    },
+                    {
+                        "page_type": "Hub Page",
+                        "l1_category": "Email Marketing",
+                        "primary_keyword": "email marketing",
+                        "current_url": "/email-marketing",
+                    },
+                ]
+            },
+        }
+    )
+    SiteArchitectureSummary.model_validate(attached)
+    by_url = {node["url"]: node for node in attached["target_url_tree"]}
+    assert set(by_url) == {"/seo", "/what-is-seo", "/email-marketing"}
+    assert by_url["/what-is-seo"]["parent"] == "/seo"
+    assert by_url["/what-is-seo"]["title"] == "what is seo"
+    assert by_url["/seo"]["title"] == "SEO"
+    assert by_url["/seo"]["parent"] == "/"
+    owners = {row["canonical_owner_url"]: row for row in attached["cluster_ownership"]}
+    assert set(owners) == set(by_url)
+    assert owners["/what-is-seo"]["cluster"] == "what is seo"
+    assert owners["/seo"]["cluster"] == "seo"
+    assert attached["cluster_owners"] == attached["cluster_ownership"]
+
+
+def test_proposed_page_joins_the_roadmap_at_that_url():
+    report = build_roadmap(
+        _strategy(
+            {
+                "url": "/what-is-seo",
+                "title": "What Is Seo",
+                "keyword": "what is seo",
+                "action": "create",
+                "priority_tier": "big_bet",
+            }
+        ),
+        {
+            "target_url_tree": [],
+            "url_map_report": {
+                "final_url_map": [
+                    {
+                        "page_job": "draft_guide",
+                        "primary_keyword": "what is seo",
+                        "action": "CREATE",
+                        "proposed_url": "/what-is-seo",
+                        "selected_url": "/what-is-seo",
+                    }
+                ]
+            },
+        },
+        {},
+    )
+    assert any(page.get("url_n") == "/what-is-seo" for page in report["pages"])
+
+
 def test_url_n_normalises_path():
     assert url_n("https://ex.com/Blog/Share-Of-Search/") == "/blog/share-of-search"
     assert url_n("/services") == "/services"

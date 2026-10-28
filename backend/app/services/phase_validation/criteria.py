@@ -247,6 +247,7 @@ PHASE_CRITERIA: dict[str, PhaseCriteria] = {
             "output_present",
             "required_keys",
             "ia_tree_nodes",
+            "url_tree_placement",
         ),
         never_present_notes="Missing url/parent/depth; tree unrelated to strategy keywords.",
         success_looks_like=(

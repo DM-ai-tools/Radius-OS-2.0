@@ -24,6 +24,7 @@ from app.services.keyword_opportunity import (
     normalize_provider_intent,
 )
 from app.services.keyword_provider_filters import noise_filters
+from app.services.keyword_service_contract import INDUSTRY_ORIGIN
 from app.services.keyword_relevance import (
     RelevanceContext,
     compact_cleaning_audit,
@@ -32,6 +33,7 @@ from app.services.keyword_relevance import (
 )
 from app.services.keyword_variants import collapse_close_variants
 from app.services.query_variants import anchor_term
+from app.services.shared_keyword_pool.reuse import PoolContext, pooled_seed_fetch
 
 log = get_logger("keyword_seeding")
 
@@ -619,6 +621,8 @@ async def expand_seed(
     variants: Callable[[], Awaitable[list[str]]] | None = None,
     service: str | None = None,
     report: dict[str, Any] | None = None,
+    pool: PoolContext | None = None,
+    informational_floor: float = INFORMATIONAL_SHARE_FLOOR,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Expand one seed into exact / phrase / related / broad via DataForSEO.
 
@@ -629,9 +633,16 @@ async def expand_seed(
 
     ``variants`` returns this seed's informational query variants (see
     ``query_variants``). They widen the pull with one extra keyword-ideas call, and
-    when the seed's informational (TOFU) share is still under 15% they drive a second,
+    when the seed's informational (TOFU) share is still under ``informational_floor``
+    (15% for a service seed, 10% for an industry seed) they drive a second,
     informational-only call. ``report`` (if given) receives the seed's funnel
     coverage before and after.
+
+    ``pool`` (if given) serves the seed's main provider pull from the shared keyword
+    pool when an earlier client already fetched it, and saves a fresh pull for later
+    clients. The variant pulls and the informational top-up stay live: they depend on
+    this client's own variants and anchor filter. Mock-provider mode returns above and
+    never reaches the pool.
     """
     errors: list[str] = []
     settings = get_settings()
@@ -739,27 +750,38 @@ async def expand_seed(
                 errors.append(f"dataforseo_keyword_ideas_variants_error:{type(exc).__name__}")
                 return queries, []
 
-        if getattr(settings, "keyword_extra_idea_pulls", False):
-            (df_rows, df_errs), (queries, variant_rows) = await asyncio.gather(
-                expand_seed_dataforseo(
+        async def _seed_pull() -> tuple[list[dict[str, Any]], list[str]]:
+            """The seed's main provider pull, from the shared pool when one is given."""
+            classes = ("phrase", "related", "broad")
+            if pool is None:
+                return await expand_seed_dataforseo(
                     seed,
                     location_code=location_code,
                     min_volume=min_volume,
                     limit=limit_per_mode,
-                    classes=("phrase", "related", "broad"),
+                    classes=classes,
                     language_code=language_code,
-                ),
+                )
+            return await pooled_seed_fetch(
+                seed,
+                pool=pool,
+                service=service,
+                fetch=expand_seed_dataforseo,
+                location_code=location_code,
+                # The language the provider is actually asked in, so the pool key matches.
+                language_code=language,
+                min_volume=min_volume,
+                limit=limit_per_mode,
+                classes=classes,
+            )
+
+        if getattr(settings, "keyword_extra_idea_pulls", False):
+            (df_rows, df_errs), (queries, variant_rows) = await asyncio.gather(
+                _seed_pull(),
                 _variant_pull(),
             )
         else:
-            df_rows, df_errs = await expand_seed_dataforseo(
-                seed,
-                location_code=location_code,
-                min_volume=min_volume,
-                limit=limit_per_mode,
-                classes=("phrase", "related", "broad"),
-                language_code=language_code,
-            )
+            df_rows, df_errs = await _seed_pull()
             queries, variant_rows = [], []
         errors.extend(df_errs)
         _ingest(df_rows, endpoint="dataforseo", source="dataforseo")
@@ -779,7 +801,7 @@ async def expand_seed(
         total = sum(before.values())
         share = (before[INFORMATIONAL_FUNNEL] / total) if total else 0.0
         topped_up = 0
-        if getattr(settings, "keyword_extra_idea_pulls", False) and total and share < INFORMATIONAL_SHARE_FLOOR and language:
+        if getattr(settings, "keyword_extra_idea_pulls", False) and total and share < informational_floor and language:
             # Too few awareness keywords: ask keyword ideas for informational ones
             # only, from the variants (or the seed itself when there are none), and
             # still about the seed's subject.
@@ -1098,12 +1120,16 @@ async def run_multi_mode_seeding(
     language_code: str | None = None,
     relevance_context: RelevanceContext | None = None,
     query_variants: Any | None = None,
+    pool: PoolContext | None = None,
 ) -> dict[str, Any]:
     """Expand every seed via Ahrefs multi-mode pipeline into a clustered dataset.
 
     ``query_variants`` (a ``QueryVariantResolver``) supplies each seed's informational
     query variants; without it the informational widening and top-up use the seed
     alone.
+
+    ``pool`` (a ``PoolContext``) lets each seed's main provider pull be served from the
+    shared keyword pool; what it reused and fetched is on ``pool.report``.
 
     seed_targets maps normalized seed -> {"target": str, "target_type": str} so
     each seed root can be a targeted service / page (not only CDD keywords).
@@ -1118,16 +1144,22 @@ async def run_multi_mode_seeding(
             continue
         used_seeds.append(s)
 
+    def _is_industry(s: str) -> bool:
+        return (seed_targets.get(_norm(s)) or {}).get("seed_origin") == INDUSTRY_ORIGIN
+
     # One model call for every seed's variants, started now and awaited by each
-    # seed only when it needs them, so it overlaps the main keyword fetches.
+    # seed only when it needs them, so it overlaps the main keyword fetches. Industry
+    # seeds get none: the home page's terms are commercial, and their informational
+    # top-up uses the seed itself.
+    variant_seeds = [s for s in used_seeds if not _is_industry(s)]
     variants_task = (
-        asyncio.ensure_future(query_variants.variants_for(used_seeds))
-        if query_variants is not None and used_seeds
+        asyncio.ensure_future(query_variants.variants_for(variant_seeds))
+        if query_variants is not None and variant_seeds
         else None
     )
 
     def _variants_for(s: str) -> Callable[[], Awaitable[list[str]]] | None:
-        if variants_task is None:
+        if variants_task is None or _is_industry(s):
             return None
 
         async def _get() -> list[str]:
@@ -1140,8 +1172,13 @@ async def run_multi_mode_seeding(
     # Expand every seed concurrently (bounded) — each seed itself fans out 3 calls
     sem = asyncio.Semaphore(3)
 
+    # Industry seeds aim at the home page, mostly commercial and transactional, so their
+    # informational top-up starts lower (a setting) than a service seed's 15%.
+    industry_floor = float(get_settings().keyword_industry_informational_share)
+
     async def _expand(s: str) -> tuple[list[dict[str, Any]], list[str]]:
         report: dict[str, Any] = {}
+        is_industry = _is_industry(s)
         async with sem:
             result = await expand_seed(
                 s,
@@ -1154,6 +1191,8 @@ async def run_multi_mode_seeding(
                 variants=_variants_for(s),
                 service=str((seed_targets.get(_norm(s)) or {}).get("service") or "") or None,
                 report=report,
+                pool=pool,
+                informational_floor=industry_floor if is_industry else INFORMATIONAL_SHARE_FLOOR,
             )
         if report:
             funnel_reports.append(report)

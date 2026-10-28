@@ -25,6 +25,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
+from app.logging_config import get_logger
 from app.services.report_export import resolve_report_title
 from app.services.report_pdf_document import (
     SectionSpec,
@@ -32,10 +33,14 @@ from app.services.report_pdf_document import (
     _meta_line,
     _resolve_blueprint,
     _rows,
+    _spec_key,
     _summary_text,
     _table_rows,
+    auto_section_specs,
 )
 from app.services.report_pdf_normalize import normalize_report_payload
+
+log = get_logger("report_docx")
 
 INK = RGBColor(0x07, 0x1C, 0x1F)
 MUTED = RGBColor(0x3D, 0x56, 0x5A)
@@ -479,6 +484,22 @@ def _render_docx_report(
             section_num += 1
             if contents is not None:
                 contents.append(f"{section_num}. {spec.title}")
+
+    # The same automatic sections the PDF adds (labelled, suppression-aware), so the
+    # two exports agree. A report the PDF draws with its own renderer has none.
+    from app.services.report_pdf import SPECIAL_RENDERERS
+
+    if card_type in SPECIAL_RENDERERS:
+        return
+    rendered: list[str] = []
+    for spec in auto_section_specs(card_type, payload, blueprint):
+        if _render_docx_section(doc, section_num + 1, spec, payload):
+            section_num += 1
+            rendered.append(_spec_key(spec))
+            if contents is not None:
+                contents.append(f"{section_num}. {spec.title}")
+    if rendered:
+        log.warning("report_auto_sections_rendered", card_type=card_type or "(none)", keys=rendered, format="docx")
 
 
 # --------------------------------------------------------------------------- cover + frame

@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { titleForMapRow } from "../../lib/headline";
 
 type Row = Record<string, unknown>;
 
@@ -11,6 +12,7 @@ type Page = {
   l3: string;
   l4: string;
   primary: string;
+  title: string;
   keywords: string[];
   currentUrl: string;
   proposedUrl: string;
@@ -216,6 +218,7 @@ function buildPages(rows: Row[]): Page[] {
       l3: String(row.l3_subsubcategory || row.l3_sub_subcategory || "").trim(),
       l4: String(row.l4_attribution || "").trim(),
       primary,
+      title: titleForMapRow(row),
       keywords: clusterKeywords(row, primary),
       currentUrl: current,
       proposedUrl: proposed,
@@ -243,14 +246,14 @@ export default function UrlMapBoard({ rows, canAct, focused, onToggle }: Props) 
     if (mode === "live" && page.status !== "LIVE") return false;
     if (mode === "new" && page.status !== "NEW") return false;
     if (!needle) return true;
-    const hay = `${page.group} ${page.l1} ${page.l2} ${page.primary} ${page.keywords.join(" ")} ${page.currentUrl} ${page.proposedUrl}`.toLowerCase();
+    const hay = `${page.group} ${page.l1} ${page.l2} ${page.primary} ${page.title} ${page.keywords.join(" ")} ${page.currentUrl} ${page.proposedUrl}`.toLowerCase();
     return hay.includes(needle);
   });
   if (!pages.length) {
     return <p className="umap-empty">No pages mapped yet. Run site architecture after keyword research.</p>;
   }
 
-  const taxonomy = ["#", "Lvl", "L1", "L2", "L3", "L4", "Primary Keyword", "Secondary Keywords", "Current URL", "Proposed URL", "Status", "Page Type", "Priority"];
+  const taxonomy = ["#", "Lvl", "L1", "L2", "L3", "L4", "Primary Keyword", "Title", "Secondary Keywords", "Current URL", "Proposed URL", "Status", "Page Type", "Priority"];
   const decision = ["#", "Outcome", "Score and basis", "Confidence", "Effort", "Checks", "Links and redirects", "Decision trail"];
   const decided = visible.filter((page) => hasDecision(page.source));
 
@@ -297,15 +300,15 @@ export default function UrlMapBoard({ rows, canAct, focused, onToggle }: Props) 
               <tbody>
                 {visible.map((page, index) => {
                   const on = focused(page.source);
-                  const number = text(page.source.row_no) || String(index + 1);
-                  const cells = [number, page.level, page.l1, page.l2, page.l3, page.l4, page.primary, page.keywords.slice(0, 10).join(", "), page.currentUrl, page.proposedUrl, page.status, page.pageType, page.priority];
+                  const number = String(index + 1);
+                  const cells = [number, page.level, page.l1, page.l2, page.l3, page.l4, page.primary, page.title, page.keywords.join(", "), page.currentUrl, page.proposedUrl, page.status, page.pageType, page.priority];
                   return (
                     <tr key={page.key} className={on ? undefined : "is-off"}>
                       <td>
                         <input type="checkbox" checked={on} disabled={!canAct} aria-label={`Include ${page.primary || page.l1}`} onChange={() => onToggle(page.source)} />
                       </td>
                       {cells.map((value, cell) => (
-                        <td key={taxonomy[cell]} className={cell === 6 || cell === 7 ? "umap-keywords" : cell === 8 || cell === 9 ? "umap-url" : undefined}>{value || "—"}</td>
+                        <td key={taxonomy[cell]} className={cell === 6 || cell === 8 ? "umap-keywords" : cell === 7 ? "umap-title" : cell === 9 || cell === 10 ? "umap-url" : undefined}>{value || "—"}</td>
                       ))}
                     </tr>
                   );
@@ -324,7 +327,7 @@ export default function UrlMapBoard({ rows, canAct, focused, onToggle }: Props) 
                   </thead>
                   <tbody>
                     {decided.map((page, index) => {
-                      const number = text(page.source.row_no) || String(index + 1);
+                      const number = String(index + 1);
                       const effort = text(page.source.effort) || "—";
                       const cells = [
                         number,

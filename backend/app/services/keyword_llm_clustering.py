@@ -394,6 +394,9 @@ def build_cluster_report_from_llm(
                     "_group_focus": f"{group_intent}|{llm_funnel}",
                 }
             )
+            if src and src.get("seed_origin"):
+                # Which seed layer found it ("industry" for the home page's terms); Phase 6 reads it.
+                fixed[-1]["seed_origin"] = src["seed_origin"]
             assigned.add(kw)
 
         if not fixed:

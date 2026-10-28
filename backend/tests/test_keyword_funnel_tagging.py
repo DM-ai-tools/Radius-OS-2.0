@@ -20,7 +20,7 @@ def _cluster_settings():
         return_value=type(
             "S",
             (),
-            {"keyword_cluster_use_llm": True},
+            {"keyword_clustering_use_model": True},
         )(),
     )
 
@@ -68,7 +68,7 @@ DETERMINISTIC_ROWS = [
 
 @pytest.mark.asyncio
 async def test_deterministic_clustering_gives_each_keyword_its_own_funnel():
-    report = await run_keyword_clustering(DETERMINISTIC_ROWS, use_llm=False)
+    report = await run_keyword_clustering(DETERMINISTIC_ROWS, within_deadline=False)
     assert report["clusters"]
     all_kw_rows = [k for c in report["clusters"] for k in c["keywords"]]
     for row in all_kw_rows:
@@ -102,7 +102,7 @@ async def test_llm_clustering_path_stamps_funnel_per_keyword():
             )
         ),
     ):
-        report = await run_keyword_clustering(DETERMINISTIC_ROWS, use_llm=True)
+        report = await run_keyword_clustering(DETERMINISTIC_ROWS, within_deadline=True)
 
     kw_rows = [row for cluster in report["clusters"] for row in cluster["keywords"]]
     by_kw = {r["keyword"]: r["funnel"] for r in kw_rows}

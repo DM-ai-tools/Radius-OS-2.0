@@ -1,5 +1,6 @@
 import WorkbookTable from "./WorkbookTable";
 import FocusBox from "./FocusBox";
+import { titleForMapRow } from "../../lib/headline";
 import { useStageFocus } from "../../lib/stageFocus";
 
 type Props = {
@@ -7,6 +8,16 @@ type Props = {
   canAct: boolean;
   onAction: (action: string, edits?: Record<string, unknown>) => void;
 };
+
+function frameworkTitle(row: Record<string, unknown>): string {
+  const keyword = String(row.primary_keyword || row.keyword || "").trim();
+  if (!keyword) return String(row.title || "—");
+  return titleForMapRow({
+    primary_keyword: keyword,
+    page_type: row.page_type || row.content_type,
+    page_job: row.page_job,
+  });
+}
 
 function asRows(raw: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(raw)) return [];
@@ -304,7 +315,7 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                       {String(p.source || "—")}
                     </td>
                     <td style={{ padding: "6px 8px", verticalAlign: "top", fontWeight: 600 }}>
-                      {String(p.title || p.keyword || "—")}
+                      {frameworkTitle(p)}
                       {p.rationale ? (
                         <div style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400, marginTop: 2 }}>
                           {String(p.rationale).slice(0, 120)}
@@ -404,7 +415,7 @@ export default function ContentStrategyCard({ payload, canAct, onAction }: Props
                         <span className="cs-chip">{workLabel(w)}</span>
                       </td>
                       <td style={{ padding: "6px 8px", fontWeight: 600 }}>
-                        {String(w.title || w.keyword || "—")}
+                        {frameworkTitle(w)}
                       </td>
                       <td style={{ padding: "6px 8px" }}>{String(w.keyword || "—")}</td>
                       <td style={{ padding: "6px 8px" }}>{String(w.content_type || "—")}</td>

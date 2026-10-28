@@ -717,6 +717,43 @@ def _check_ia_tree_nodes(
     ]
 
 
+def _check_url_tree_placement(
+    *,
+    criteria: PhaseCriteria,
+    output: dict[str, Any],
+    company_ctx: dict[str, Any],
+    prior: dict[str, Any],
+) -> list[CheckResult]:
+    """Every cluster in one place of the URL map's L1-L4 tree. A broken rule warns; it never blocks."""
+    _ = criteria, company_ctx, prior
+    report = output.get("url_map_report")
+    tree = report.get("url_tree") if isinstance(report, dict) else None
+    if not isinstance(tree, dict):
+        return []
+    violations = [str(v) for v in tree.get("violations") or []]
+    review = len(tree.get("needs_review") or [])
+    if not violations and not review and not tree.get("placed"):
+        # No catalog, so no tree was built: nothing to check (not a pass).
+        return []
+    if violations:
+        return [
+            _warn(
+                "url_tree_placement",
+                "schema_structure",
+                f"The URL map's L1-L4 tree breaks {len(violations)} rule(s): a level below an empty one, "
+                "or a cluster placed twice or nowhere.",
+                evidence="; ".join(violations[:5]),
+            )
+        ]
+    return [
+        _pass(
+            "url_tree_placement",
+            "schema_structure",
+            f"URL tree: {tree.get('placed', 0)} clusters placed once each, {review} listed for review.",
+        )
+    ]
+
+
 def _check_technical_seo_honesty(
     *,
     criteria: PhaseCriteria,
@@ -1290,6 +1327,7 @@ _CHECK_FNS = {
     "search_demand_relevance_shell": _check_search_demand_relevance_shell,
     "strategy_phase5_carry": _check_strategy_phase5_carry,
     "ia_tree_nodes": _check_ia_tree_nodes,
+    "url_tree_placement": _check_url_tree_placement,
     "technical_seo_honesty": _check_technical_seo_honesty,
     "audit_dispositions": _check_audit_dispositions,
     "planning_lock_integrity": _check_planning_lock_integrity,

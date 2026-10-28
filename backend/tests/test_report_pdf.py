@@ -396,3 +396,36 @@ def test_site_architecture_pdf_shows_url_mapping_columns():
     assert "Optimize Existing" in text_norm
     assert "1,200" in text_norm
 
+
+def test_site_architecture_pdf_keeps_row_numbers_numbers_and_keywords_whole():
+    # Narrow columns used to split "10" into "1" / "0", "$12.50" across lines and
+    # keywords such as "accountants" mid-word. One row never showed it.
+    payload = _url_map_fixture_payload()
+    base = payload["url_map_report"]["final_url_map"][0]
+    words = ["accountants", "consultants", "refinancing", "bookkeeping"]
+    payload["url_map_report"]["final_url_map"] = [
+        dict(
+            base,
+            primary_keyword=f"{words[i % 4]} {words[(i + 1) % 4]}",
+            search_volume=120000,
+            cpc=12.5,
+        )
+        for i in range(12)
+    ]
+    bundle = {
+        "client": {"name": "Acme Corp"},
+        "exported_at": "2026-08-12T12:00:00+00:00",
+        "reports": [{"card_type": "site_architecture_blueprint", "payload": payload}],
+        "phase_statuses": {},
+    }
+    text = _pdf_text(build_reports_pdf(bundle, single=True))
+    section = text[text.rfind("URL Mapping") :]
+    tokens = section.split("\n")
+    for number in ("10", "11", "12"):
+        assert number in tokens, number
+    for whole in ("120,000", "$12.50"):
+        assert whole in tokens, whole
+    for word in words:
+        assert word in tokens, word
+
+
